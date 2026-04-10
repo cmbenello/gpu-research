@@ -1,6 +1,7 @@
 # GPU CrocSort — Makefile
 # Build: make
 # Run:   ./gpu_crocsort --num-records 1000000 --verify
+# All experiments: make experiments
 # Clean: make clean
 
 NVCC = nvcc
@@ -18,48 +19,103 @@ HDRS = include/record.cuh include/ovc.cuh include/loser_tree.cuh
 
 TARGET = gpu_crocsort
 
+# ── Main build ──────────────────────────────────────────────────────
+
 all: $(TARGET)
 
 $(TARGET): $(SRCS) $(HDRS)
 	$(NVCC) $(NVCC_FLAGS) $(INCLUDES) $(SRCS) -o $(TARGET)
 
-# Debug build (with device debug info, no optimization)
 debug: NVCC_FLAGS = -G -g -std=c++17 --expt-relaxed-constexpr -arch=$(ARCH)
 debug: $(TARGET)
 
-# Quick test: 10K records with verification
+# ── Tests ───────────────────────────────────────────────────────────
+
 test: $(TARGET)
 	./$(TARGET) --num-records 10000 --verify
 
-# Medium test: 1M records with verification
 test-medium: $(TARGET)
 	./$(TARGET) --num-records 1000000 --verify
 
-# Benchmark: 10M records, no verification
+# ── Benchmarks ──────────────────────────────────────────────────────
+
 bench: $(TARGET)
 	./$(TARGET) --num-records 10000000
 
-# Benchmark with duplicates (tests OVC duplicate shortcut)
 bench-dup: $(TARGET)
 	./$(TARGET) --num-records 10000000 --duplicates
 
-# Large benchmark: 100M records (~10GB)
 bench-large: $(TARGET)
 	./$(TARGET) --num-records 100000000
 
-# Bottleneck benchmark (run this FIRST to know what to optimize)
+# ── Experiments ─────────────────────────────────────────────────────
+
+# Bottleneck analysis (run FIRST — tells you what to optimize)
 bottleneck: experiments/bottleneck_bench.cu
 	$(NVCC) $(NVCC_FLAGS) experiments/bottleneck_bench.cu -o bottleneck_bench
 
-# If CUB headers not found, compile without CUB baseline
 bottleneck-nocub: experiments/bottleneck_bench.cu
 	$(NVCC) $(NVCC_FLAGS) -DNO_CUB experiments/bottleneck_bench.cu -o bottleneck_bench
 
-# Run bottleneck analysis
-run-bottleneck: bottleneck
-	./bottleneck_bench 10000000
+# CUB radix sort vs merge sort crossover analysis
+radix-vs-merge: experiments/radix_vs_merge.cu
+	$(NVCC) $(NVCC_FLAGS) experiments/radix_vs_merge.cu -o radix_vs_merge
+
+# Memory layout comparison (AoS vs SoA vs Key+Index)
+layout-bench: experiments/memory_layout_bench.cu
+	$(NVCC) $(NVCC_FLAGS) experiments/memory_layout_bench.cu -o layout_bench
+
+# CPU vs GPU comparison
+cpu-vs-gpu: experiments/cpu_baseline.cu $(SRCS) $(HDRS)
+	$(NVCC) $(NVCC_FLAGS) $(INCLUDES) experiments/cpu_baseline.cu src/run_generation.cu src/merge.cu src/host_sort.cu -o cpu_vs_gpu
+
+# Key-value separation benchmark
+kv-bench: experiments/kv_separate_bench.cu
+	$(NVCC) $(NVCC_FLAGS) $(INCLUDES) experiments/kv_separate_bench.cu -o kv_bench
+
+# Profiling instrumentation (self-contained: has own main + merge orchestration)
+profile: experiments/profile_sort.cu src/run_generation.cu src/merge.cu $(HDRS)
+	$(NVCC) $(NVCC_FLAGS) $(INCLUDES) experiments/profile_sort.cu src/run_generation.cu src/merge.cu -o profile_sort
+
+# Sample-based partitioning test
+sample-part: experiments/sample_partition.cu
+	$(NVCC) $(NVCC_FLAGS) $(INCLUDES) experiments/sample_partition.cu -o sample_partition
+
+# Edge case test suite
+test-edge: experiments/test_edge_cases.cu src/run_generation.cu src/merge.cu src/host_sort.cu $(HDRS)
+	$(NVCC) $(NVCC_FLAGS) $(INCLUDES) experiments/test_edge_cases.cu src/run_generation.cu src/merge.cu src/host_sort.cu -o test_edge_cases
+	./test_edge_cases
+
+# External sort (data > GPU memory)
+external-sort: src/external_sort.cu src/run_generation.cu src/merge.cu $(HDRS)
+	$(NVCC) $(NVCC_FLAGS) $(INCLUDES) -DEXTERNAL_SORT_MAIN src/external_sort.cu src/run_generation.cu src/merge.cu -o external_sort
+
+# ── Build all experiments ───────────────────────────────────────────
+
+experiments: bottleneck-nocub radix-vs-merge layout-bench
+	@echo ""
+	@echo "Built all experiments. Run them:"
+	@echo "  ./bottleneck_bench 10000000"
+	@echo "  ./radix_vs_merge"
+	@echo "  ./layout_bench"
+
+# ── Run everything ──────────────────────────────────────────────────
+
+run-all: $(TARGET) experiments
+	@echo "═══ Running complete benchmark suite ═══"
+	./bottleneck_bench 1000000
+	./radix_vs_merge
+	./layout_bench
+	./$(TARGET) --num-records 1000000 --verify
+	./$(TARGET) --num-records 10000000
+
+# ── Clean ───────────────────────────────────────────────────────────
 
 clean:
-	rm -f $(TARGET) bottleneck_bench
+	rm -f $(TARGET) bottleneck_bench radix_vs_merge layout_bench cpu_vs_gpu \
+	      kv_bench profile_sort sample_partition test_edge_cases external_sort
 
-.PHONY: all debug test test-medium bench bench-dup bench-large bottleneck bottleneck-nocub run-bottleneck clean
+.PHONY: all debug test test-medium bench bench-dup bench-large \
+        bottleneck bottleneck-nocub radix-vs-merge layout-bench \
+        cpu-vs-gpu kv-bench profile test-edge external-sort \
+        experiments run-all clean
