@@ -48,6 +48,29 @@ bench-dup: $(TARGET)
 bench-large: $(TARGET)
 	./$(TARGET) --num-records 100000000
 
+# ── Benchmark Suite ────────────────────────────────────────────────
+
+BENCH_SUITE_SRCS = benchmark_suite.cu src/run_generation.cu src/merge.cu
+
+benchmark-suite: $(BENCH_SUITE_SRCS) $(HDRS)
+	$(NVCC) $(NVCC_FLAGS) $(INCLUDES) $(BENCH_SUITE_SRCS) -o benchmark_suite
+
+bench-quick: benchmark-suite
+	./benchmark_suite --quick
+
+bench-full: benchmark-suite
+	./benchmark_suite --full
+
+bench-default: benchmark-suite
+	./benchmark_suite
+
+parse-results:
+	python3 parse_results.py benchmark_results.csv
+
+bench-and-parse: benchmark-suite
+	./benchmark_suite
+	python3 parse_results.py benchmark_results.csv
+
 # ── Experiments ─────────────────────────────────────────────────────
 
 # Bottleneck analysis (run FIRST — tells you what to optimize)
@@ -113,9 +136,12 @@ run-all: $(TARGET) experiments
 
 clean:
 	rm -f $(TARGET) bottleneck_bench radix_vs_merge layout_bench cpu_vs_gpu \
-	      kv_bench profile_sort sample_partition test_edge_cases external_sort
+	      kv_bench profile_sort sample_partition test_edge_cases external_sort \
+	      benchmark_suite
 
 .PHONY: all debug test test-medium bench bench-dup bench-large \
+        benchmark-suite bench-quick bench-full bench-default \
+        parse-results bench-and-parse \
         bottleneck bottleneck-nocub radix-vs-merge layout-bench \
         cpu-vs-gpu kv-bench profile test-edge external-sort \
         experiments run-all clean

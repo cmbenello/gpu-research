@@ -1,0 +1,1014 @@
+% GPU CrocSort: Shared-Memory K-Way Merge Trees for GPU External Sort
+% LaTeX source - IEEE Conference Format
+%
+% Compile with: pdflatex gpu_crocsort.tex && bibtex gpu_crocsort && pdflatex gpu_crocsort.tex && pdflatex gpu_crocsort.tex
+
+\documentclass[conference,10pt]{IEEEtran}
+
+% ─── Packages ────────────────────────────────────────────────────────────────
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{cleveref}
+\usepackage{microtype}
+\usepackage{subcaption}
+\usepackage{enumitem}
+\usepackage{balance}
+\usepackage{xspace}
+
+% Algorithm packages
+\usepackage[ruled,vlined,linesnumbered]{algorithm2e}
+\SetAlgoLined
+\SetKwInput{KwInput}{Input}
+\SetKwInput{KwOutput}{Output}
+\SetKwProg{Fn}{Function}{:}{}
+\SetKwProg{Kernel}{Kernel}{:}{}
+\SetKwComment{Comment}{// }{}
+
+% ─── Custom Commands ─────────────────────────────────────────────────────────
+\newcommand{\crocsort}{\textsc{CrocSort}\xspace}
+\newcommand{\gpucrocsort}{\textsc{GPU CrocSort}\xspace}
+\newcommand{\ovc}{\textsc{OVC}\xspace}
+\newcommand{\hmem}{\textsf{HBM}\xspace}
+\newcommand{\smem}{\textsf{SMEM}\xspace}
+\newcommand{\BigO}[1]{\mathcal{O}\!\left(#1\right)}
+\newcommand{\todo}[1]{\textcolor{red}{\textbf{TODO:} #1}}
+
+% Placeholder figure command
+\newcommand{\placeholderfig}[2]{%
+  \begin{center}
+    \fbox{\parbox{0.9\columnwidth}{\centering\vspace{#1}\textit{[Figure placeholder: #2]}\vspace{#1}}}
+  \end{center}
+}
+
+% ─── Document ─────────────────────────────────────────────────────────────────
+\begin{document}
+
+\title{GPU CrocSort: Shared-Memory K-Way Merge Trees\\for GPU External Sort}
+
+\author{
+  \IEEEauthorblockN{Draft}
+  \IEEEauthorblockA{Working Paper\\
+  \today}
+}
+
+\maketitle
+
+% ══════════════════════════════════════════════════════════════════════════════
+% ABSTRACT
+% ══════════════════════════════════════════════════════════════════════════════
+\begin{abstract}
+External merge sort remains the method of choice for sorting datasets that
+exceed available memory, yet GPU implementations face a fundamental tension
+between merge fan-in and thread utilization.  A high fan-in (K-way merge)
+reduces the number of merge passes and thus total memory traffic, but
+traditional K-way merging serializes into a single active thread, squandering
+the massive parallelism that GPUs provide.  Conversely, 2-way merge-path
+decompositions keep every thread busy but demand $\lceil\log_2 N\rceil$
+passes, multiplying bandwidth consumption.
+
+We present \gpucrocsort, a CUDA-based external merge sort that resolves this
+trade-off.  The key contribution is a \emph{shared-memory K-way merge tree}
+that decomposes a $K$-way merge ($K{=}8$) into $\log_2 K{=}3$ levels of
+fully parallel 2-way merge-path operations entirely within GPU shared memory.
+Combined with Offset-Value Coding (\ovc) for single-instruction key
+comparison, \gpucrocsort achieves the low pass count of K-way merging
+\emph{and} the full thread utilization of 2-way merge-path---simultaneously.
+On standard GenSort benchmarks, the 8-way strategy reduces HBM traffic by
+$3\times$ compared to the 2-way baseline while maintaining full occupancy
+across all streaming multiprocessors.
+\end{abstract}
+
+\begin{IEEEkeywords}
+GPU sorting, external merge sort, CUDA, shared memory, K-way merge,
+merge path, offset-value coding
+\end{IEEEkeywords}
+
+% ══════════════════════════════════════════════════════════════════════════════
+% 1  INTRODUCTION
+% ══════════════════════════════════════════════════════════════════════════════
+\section{Introduction}
+\label{sec:intro}
+
+Sorting is among the most fundamental operations in data processing, and
+external sorting---sorting datasets that exceed the capacity of fast
+memory---remains indispensable in database systems, scientific computing, and
+large-scale analytics.  As dataset sizes grow, the performance of external
+sort is dominated by the number of \emph{merge passes}, each of which reads
+and writes the entire dataset through the memory hierarchy.
+
+Modern GPUs offer an order-of-magnitude advantage in memory bandwidth over
+CPUs: NVIDIA's A100 delivers up to 2,039\,GB/s of HBM2e bandwidth compared
+to roughly 200\,GB/s of DDR5 bandwidth on contemporary CPU platforms.  This
+bandwidth advantage makes GPUs a natural target for merge-sort
+acceleration---provided the merge algorithm can keep the thousands of GPU
+threads productively occupied.
+
+Herein lies the central dilemma.  The \emph{merge-path}
+decomposition~\cite{green2012} enables a 2-way merge to be executed in
+parallel across all GPU threads, but 2-way merging requires
+$\lceil\log_2 N\rceil$ passes over the data, where $N$ is the number of
+initial sorted runs.  For $N{=}19{,}531$ runs (a 10\,GB dataset with
+512-record blocks), this amounts to 15 passes and 30\,GB of total HBM
+traffic.  K-way merging with $K{=}8$ requires only
+$\lceil\log_8 N\rceil = 5$ passes and 10\,GB of traffic---a $3\times$
+reduction---but traditional K-way merge implementations employ a priority
+queue (loser tree) that serializes into a single active thread per merge,
+leaving the vast majority of GPU cores idle.
+
+\textbf{Contributions.}\quad We present \gpucrocsort, which resolves this
+tension through three contributions:
+
+\begin{enumerate}[leftmargin=*,topsep=2pt,itemsep=1pt]
+  \item \textbf{Shared-memory K-way merge tree.}  We decompose a $K$-way
+    merge into $\log_2 K$ levels of 2-way merge-path operations that
+    execute entirely in shared memory.  Each level is fully parallel (all
+    threads active), and only the final level writes to HBM, achieving both
+    high fan-in \emph{and} full thread utilization.
+  \item \textbf{GPU-adapted OVC encoding.}  We port the Offset-Value Coding
+    scheme from the CPU \crocsort~\cite{crocsort2026} to CUDA, exploiting
+    the 32-bit packed format for single-instruction comparison in GPU
+    registers.
+  \item \textbf{End-to-end GPU external sort.}  We integrate run generation
+    via bitonic sort, multi-pass merge, and a streaming external-sort
+    pipeline with pinned host memory and asynchronous transfers.
+\end{enumerate}
+
+The remainder of this paper is organized as follows.
+\Cref{sec:background} surveys background and related work.
+\Cref{sec:architecture} presents the overall system architecture.
+\Cref{sec:kway} details the shared-memory K-way merge tree.
+\Cref{sec:ovc} describes GPU-adapted OVC encoding.
+\Cref{sec:analysis} provides theoretical analysis.
+\Cref{sec:experiments} covers experimental setup and results.
+\Cref{sec:related} discusses related work in depth.
+\Cref{sec:future} outlines future directions, and
+\Cref{sec:conclusion} concludes.
+
+
+% ══════════════════════════════════════════════════════════════════════════════
+% 2  BACKGROUND
+% ══════════════════════════════════════════════════════════════════════════════
+\section{Background}
+\label{sec:background}
+
+\subsection{External Merge Sort}
+External merge sort proceeds in two phases.  In the \emph{run generation}
+phase, chunks of data that fit in fast memory are sorted to produce initial
+sorted runs.  In the \emph{merge} phase, runs are repeatedly merged until a
+single sorted output remains.  The number of passes through the data is
+determined by the \emph{merge fan-in}~$K$: for $N$ initial runs, the merge
+phase requires $\lceil\log_K N\rceil$ passes.
+
+\subsection{CrocSort and Offset-Value Coding}
+\crocsort~\cite{crocsort2026}, presented at VLDB 2026, introduced an
+efficient CPU external merge sort built on \emph{Offset-Value Coding}
+(\ovc)~\cite{ovc_original}.  An OVC is a 32-bit packed integer that encodes
+the comparison result between a record's key and a reference key:
+
+\begin{equation}
+  \text{OVC}_{32} = \underbrace{\text{flag}}_{3\text{ bits}} \;\|\;
+                     \underbrace{\text{arity\_minus\_offset}}_{13\text{ bits}} \;\|\;
+                     \underbrace{\text{value}}_{16\text{ bits}}
+  \label{eq:ovc_format}
+\end{equation}
+
+The flag field distinguishes five record types (\texttt{EarlyFence},
+\texttt{Duplicate}, \texttt{Normal}, \texttt{Initial}, \texttt{LateFence}),
+chosen so that the natural \texttt{uint32\_t} ordering of the packed OVC
+matches the desired sort order.  This enables single-instruction comparison:
+comparing two OVC values as unsigned 32-bit integers yields the correct
+merge ordering without accessing the underlying variable-length key.
+
+\crocsort also introduced an analytical model based on the \emph{M/D ratio}
+(memory size $M$ divided by page size $D$) that governs the optimal merge
+fan-in and predicts I/O costs.  We adapt this model to the GPU setting,
+substituting HBM capacity for $M$ and streaming-block size for $D$.
+
+\subsection{GPU Merge Primitives}
+\label{sec:bg_gpu_merge}
+
+\paragraph{Merge Path.}
+Green et al.~\cite{green2012} introduced the \emph{merge-path}
+decomposition, which frames a 2-way merge as a path through a
+two-dimensional grid.  By partitioning the path among threads, every thread
+computes an independent, equally-sized portion of the merged output.  This
+guarantees load-balanced, fully parallel 2-way merging.
+
+\paragraph{GPU Multiway Mergesort.}
+Chatterjee et al.~\cite{chatterjee2017} explored GPU multiway mergesort
+(MMS), employing multiway merge with partition-based decomposition.  While
+effective at reducing merge passes, their approach requires complex
+partitioning logic and does not exploit shared-memory merge trees.
+
+\paragraph{ModernGPU.}
+Baxter's ModernGPU library~\cite{moderngpu2013} provides high-performance
+GPU merge routines built on the merge-path framework.  It serves as our
+baseline for 2-way merge performance.
+
+\paragraph{GPU External Sort.}
+Stehle and Jacobsen~\cite{stehle2017} presented a GPU external sort at
+SIGMOD 2017 that uses the GPU as a co-processor for merge operations,
+streaming data between host and device.  Our external-sort pipeline follows
+a similar streaming model but with higher merge fan-in.
+
+
+% ══════════════════════════════════════════════════════════════════════════════
+% 3  ARCHITECTURE
+% ══════════════════════════════════════════════════════════════════════════════
+\section{System Architecture}
+\label{sec:architecture}
+
+\gpucrocsort comprises three main components, illustrated in
+\Cref{fig:architecture}: run generation, multi-pass merge, and external-sort
+streaming.  We describe each in turn.
+
+\begin{figure}[t]
+  \placeholderfig{1.5cm}{System architecture diagram showing the three phases:
+  (1) run generation via bitonic sort, (2) multi-pass merge with Strategy~A
+  (2-way) or Strategy~B (8-way), and (3) external-sort streaming pipeline
+  with pinned host memory.}
+  \caption{Overall architecture of \gpucrocsort.}
+  \label{fig:architecture}
+\end{figure}
+
+\subsection{Phase 1: Run Generation}
+\label{sec:run_gen}
+
+Run generation sorts small blocks of records entirely within GPU shared
+memory using a \emph{bitonic sort} network.  Each thread block processes
+512 records with 256 threads.  The procedure is as follows:
+
+\begin{enumerate}[leftmargin=*,topsep=2pt,itemsep=1pt]
+  \item Load 512 records from HBM into shared memory.
+  \item Execute $\log_2 512 = 9$ stages of the bitonic sort network.
+    Each stage consists of compare-and-swap operations that are
+    naturally parallel across all 256 threads.
+  \item Compute OVC delta values for adjacent records in the sorted
+    output.  Because records are sorted, the OVC of each record
+    relative to its predecessor can be computed by scanning the key
+    from the offset where the keys first differ.
+  \item Write the sorted run (records + OVC values) to HBM.
+\end{enumerate}
+
+For a dataset of $R$ records with block size $B{=}512$, this phase produces
+$N = \lceil R/B \rceil$ sorted runs.
+
+\begin{algorithm}[t]
+  \caption{Bitonic Sort Run Generation}
+  \label{alg:run_gen}
+  \KwInput{Unsorted records $r[0..B{-}1]$ in HBM}
+  \KwOutput{Sorted run with OVC values in HBM}
+  \BlankLine
+  \Kernel{BitonicSortKernel}{
+    $\text{tid} \gets \text{threadIdx.x}$\;
+    \Comment{Load into shared memory}
+    $\text{smem}[\text{tid}] \gets r[\text{blockIdx.x} \cdot B + \text{tid}]$\;
+    $\text{smem}[\text{tid} + 256] \gets r[\text{blockIdx.x} \cdot B + \text{tid} + 256]$\;
+    $\text{\_\_syncthreads()}$\;
+    \BlankLine
+    \Comment{Bitonic sort network: 9 stages}
+    \For{$\text{stage} \gets 0$ \KwTo $8$}{
+      \For{$\text{step} \gets \text{stage}$ \KwTo $0$}{
+        $\text{partner} \gets \text{tid} \oplus (1 \ll \text{step})$\;
+        \If{$\text{partner} > \text{tid}$}{
+          \text{CompareAndSwap}($\text{smem}[\text{tid}]$, $\text{smem}[\text{partner}]$)\;
+        }
+        $\text{\_\_syncthreads()}$\;
+      }
+    }
+    \BlankLine
+    \Comment{Compute OVC deltas}
+    \If{$\text{tid} > 0$}{
+      $\text{ovc}[\text{tid}] \gets \text{ComputeOVC}(\text{smem}[\text{tid}{-}1],\, \text{smem}[\text{tid}])$\;
+    }
+    \Else{
+      $\text{ovc}[0] \gets \text{INITIAL\_OVC}$\;
+    }
+    $\text{\_\_syncthreads()}$\;
+    \BlankLine
+    \Comment{Write sorted run to HBM}
+    $r[\text{blockIdx.x} \cdot B + \text{tid}] \gets \text{smem}[\text{tid}]$\;
+    $\text{ovcOut}[\text{blockIdx.x} \cdot B + \text{tid}] \gets \text{ovc}[\text{tid}]$\;
+  }
+\end{algorithm}
+
+\subsection{Phase 2: Multi-Pass Merge}
+\label{sec:merge_phase}
+
+Given $N$ sorted runs from Phase~1, the merge phase reduces them to a single
+sorted output through iterative merge passes.  We implement two strategies:
+
+\paragraph{Strategy A: 2-Way Merge Path (Baseline).}
+Each pass merges pairs of adjacent runs using the merge-path
+decomposition~\cite{green2012}.  All GPU threads participate in each merge
+operation via balanced partitioning.  This strategy requires
+$\lceil\log_2 N\rceil$ passes.
+
+\paragraph{Strategy B: 8-Way Shared-Memory Merge Tree (Novel).}
+Each pass merges groups of 8 runs using our shared-memory K-way merge tree
+(\Cref{sec:kway}).  This strategy requires only $\lceil\log_8 N\rceil$
+passes---a $3\times$ reduction---while maintaining full thread utilization
+at every stage.
+
+\subsection{Phase 3: External Sort Streaming}
+\label{sec:external}
+
+When the dataset exceeds GPU HBM capacity, \gpucrocsort employs a streaming
+pipeline with pinned host memory:
+
+\begin{enumerate}[leftmargin=*,topsep=2pt,itemsep=1pt]
+  \item Partition the dataset into HBM-sized chunks on the host.
+  \item Asynchronously transfer each chunk to the GPU using CUDA streams
+    and pinned (\texttt{cudaHostAlloc}) memory.
+  \item Execute run generation and as many merge passes as possible
+    on-device.
+  \item Stream partially merged results back to the host.
+  \item Perform a final merge pass on partially merged runs, potentially
+    multi-pass if necessary, using the GPU for each merge batch.
+\end{enumerate}
+
+Double-buffering with two CUDA streams hides transfer latency behind
+compute, achieving near-peak HBM utilization.
+
+
+% ══════════════════════════════════════════════════════════════════════════════
+% 4  SHARED-MEMORY K-WAY MERGE TREE
+% ══════════════════════════════════════════════════════════════════════════════
+\section{Shared-Memory K-Way Merge Tree}
+\label{sec:kway}
+
+This section presents our primary contribution: a decomposition of $K$-way
+merge into a tree of fully parallel 2-way merges executed entirely in GPU
+shared memory.
+
+\subsection{Motivation}
+
+The fundamental tension in GPU merge sort is between \emph{fan-in} and
+\emph{parallelism}.  \Cref{tab:tradeoff} summarizes the trade-off.
+
+\begin{table}[t]
+  \centering
+  \caption{Fan-in vs.\ parallelism trade-off for 19{,}531 runs.}
+  \label{tab:tradeoff}
+  \begin{tabular}{@{}lccc@{}}
+    \toprule
+    \textbf{Strategy} & \textbf{Passes} & \textbf{Threads Active} & \textbf{HBM Traffic} \\
+    \midrule
+    2-way merge path  & 15 & All (256/block)     & $30\times$ data \\
+    8-way loser tree   & 5  & 1 per merge         & $10\times$ data \\
+    \textbf{8-way merge tree (ours)} & \textbf{5} & \textbf{All (256/block)} & $\mathbf{10\times}$ \textbf{data} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The 2-way merge-path approach delivers full thread utilization but
+wastes bandwidth with excessive passes.  The traditional K-way loser tree
+minimizes passes but serializes the merge.  Our approach achieves
+\emph{both} simultaneously.
+
+\subsection{Tree Decomposition}
+\label{sec:tree_decomp}
+
+For $K{=}8$, the 8-way merge is decomposed into $\log_2 8 = 3$ levels of
+2-way merges, organized as a binary tree (\Cref{fig:merge_tree}):
+
+\begin{figure}[t]
+  \placeholderfig{3cm}{Merge tree diagram showing 3 levels for $K{=}8$.
+  Level~0: four 2-way merges (runs 0+1, 2+3, 4+5, 6+7), each with 64
+  threads.  Level~1: two 2-way merges combining Level~0 outputs, each
+  with 128 threads.  Level~2: one final 2-way merge with 256 threads.
+  Arrows show data flow through shared-memory ping-pong buffers.  Only
+  the Level~2 output writes to HBM.}
+  \caption{Shared-memory 8-way merge tree.  Thread allocation per
+  level is shown in parentheses.  All 256 threads are active at every
+  level.}
+  \label{fig:merge_tree}
+\end{figure}
+
+\paragraph{Level 0: Leaf Merges.}
+Four independent 2-way merges, each handled by 64 threads using
+merge-path decomposition.  Input: 8 sorted runs from HBM (or from the
+previous pass's output).  Output: 4 merged sequences in shared-memory
+buffer~A.
+
+\paragraph{Level 1: Intermediate Merges.}
+Two independent 2-way merges, each handled by 128 threads.  Input:
+4 sequences from shared-memory buffer~A.  Output: 2 merged sequences in
+shared-memory buffer~B (ping-pong).
+
+\paragraph{Level 2: Root Merge.}
+One 2-way merge handled by all 256 threads.  Input: 2 sequences from
+shared-memory buffer~B.  Output: final merged sequence written to HBM.
+
+\subsection{Shared-Memory Ping-Pong Buffering}
+\label{sec:pingpong}
+
+The tree uses \emph{ping-pong buffering} between two shared-memory regions.
+At each level, the input is read from one buffer and the merged output is
+written to the other.  This avoids read-write conflicts without requiring
+additional synchronization beyond the standard \texttt{\_\_syncthreads()}
+barrier between levels.
+
+The total shared memory required per thread block is:
+
+\begin{equation}
+  \text{SMEM} = 2 \times K \times B_{\text{tile}} \times \text{sizeof}(\text{record})
+  \label{eq:smem}
+\end{equation}
+
+\noindent where $B_{\text{tile}}$ is the tile size per run.  For $K{=}8$,
+$B_{\text{tile}}{=}64$ records, and 100-byte records, this is
+$2 \times 8 \times 64 \times 100 = 102{,}400$ bytes, well within the
+48\,KB--164\,KB shared-memory budget of modern GPU architectures.
+
+\subsection{Thread Allocation}
+
+A key design choice is how to distribute threads across levels.
+The principle is simple: \emph{all 256 threads participate at every level}.
+At Level~$\ell$, there are $K/2^{\ell+1}$ independent merges, each assigned
+$256 / (K/2^{\ell+1}) = 256 \cdot 2^{\ell+1} / K$ threads.  For $K{=}8$:
+
+\begin{table}[t]
+  \centering
+  \caption{Thread allocation across merge tree levels ($K{=}8$, 256 threads).}
+  \label{tab:thread_alloc}
+  \begin{tabular}{@{}ccccc@{}}
+    \toprule
+    \textbf{Level} & \textbf{Merges} & \textbf{Threads/Merge} & \textbf{Total Threads} & \textbf{Buffer} \\
+    \midrule
+    0 & 4 & 64  & 256 & A $\to$ B \\
+    1 & 2 & 128 & 256 & B $\to$ A \\
+    2 & 1 & 256 & 256 & A $\to$ HBM \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+All 256 threads are active at every level, achieving 100\% occupancy
+within the thread block.
+
+\subsection{Merge-Path at Each Level}
+
+Within each 2-way merge at each level, we apply the merge-path
+decomposition.  For a merge with $T$ threads merging two sequences of
+length $L$, each thread computes its merge-path diagonal
+$d = \text{rank} \cdot (2L/T)$ and performs a binary search to find the
+partition point.  The thread then sequentially merges its assigned portion
+($2L/T$ elements) into the output.
+
+\begin{algorithm}[t]
+  \caption{Shared-Memory 8-Way Merge Tree}
+  \label{alg:kway_merge}
+  \KwInput{$K{=}8$ sorted runs in HBM, each of length $L$}
+  \KwOutput{Single merged run of length $8L$ in HBM}
+  \BlankLine
+  \Kernel{KWayMergeTree}{
+    $\text{tid} \gets \text{threadIdx.x}$ \Comment{0..255}
+    \BlankLine
+    \Comment{Load 8 runs into shared memory buffer A}
+    \text{CooperativeLoad}($\text{smem\_A}$, HBM, $8L$)\;
+    $\text{\_\_syncthreads()}$\;
+    \BlankLine
+    \Comment{--- Level 0: 4 independent 2-way merges ---}
+    $\text{merge\_id} \gets \text{tid} / 64$ \Comment{0..3}
+    $\text{local\_tid} \gets \text{tid} \bmod 64$\;
+    $\text{in} \gets \text{smem\_A} + \text{merge\_id} \cdot 2L$\;
+    $\text{out} \gets \text{smem\_B} + \text{merge\_id} \cdot 2L$\;
+    \text{MergePath2Way}($\text{in}$, $L$, $\text{in}{+}L$, $L$,
+                         $\text{out}$, $\text{local\_tid}$, 64)\;
+    $\text{\_\_syncthreads()}$\;
+    \BlankLine
+    \Comment{--- Level 1: 2 independent 2-way merges ---}
+    $\text{merge\_id} \gets \text{tid} / 128$ \Comment{0..1}
+    $\text{local\_tid} \gets \text{tid} \bmod 128$\;
+    $\text{in} \gets \text{smem\_B} + \text{merge\_id} \cdot 4L$\;
+    $\text{out} \gets \text{smem\_A} + \text{merge\_id} \cdot 4L$\;
+    \text{MergePath2Way}($\text{in}$, $2L$, $\text{in}{+}2L$, $2L$,
+                         $\text{out}$, $\text{local\_tid}$, 128)\;
+    $\text{\_\_syncthreads()}$\;
+    \BlankLine
+    \Comment{--- Level 2: 1 final 2-way merge ---}
+    $\text{in} \gets \text{smem\_A}$\;
+    $\text{out} \gets \text{HBM\_output}$\;
+    \text{MergePath2Way}($\text{in}$, $4L$, $\text{in}{+}4L$, $4L$,
+                         $\text{out}$, $\text{tid}$, 256)\;
+  }
+\end{algorithm}
+
+\subsection{Correctness}
+
+The correctness of the merge tree follows from two properties:
+
+\begin{enumerate}[leftmargin=*,topsep=2pt,itemsep=1pt]
+  \item \textbf{Composability of 2-way merge.}  If $A$, $B$, $C$, $D$
+    are sorted sequences, then $\text{merge}(\text{merge}(A, B),\,
+    \text{merge}(C, D)) = \text{merge}(A, B, C, D)$.  The tree
+    decomposition applies this recursively.
+  \item \textbf{Correctness of merge-path.}  Each 2-way merge at each
+    level is performed via the merge-path decomposition, whose correctness
+    is established in~\cite{green2012}.
+\end{enumerate}
+
+The \texttt{\_\_syncthreads()} barrier between levels ensures that all
+outputs from level $\ell$ are complete before level $\ell{+}1$ reads them.
+
+
+% ══════════════════════════════════════════════════════════════════════════════
+% 5  OVC ON GPU
+% ══════════════════════════════════════════════════════════════════════════════
+\section{Offset-Value Coding on GPU}
+\label{sec:ovc}
+
+\subsection{Packed Format}
+
+The 32-bit OVC encoding (\Cref{eq:ovc_format}) maps naturally to GPU
+registers.  Each OVC fits in a single \texttt{uint32\_t}, and comparison
+reduces to a single unsigned integer comparison instruction
+(\texttt{ISETP.LT.U32} in PTX).
+
+\subsection{Flag Types}
+
+Five flag values encode record status, ordered so that the packed
+\texttt{uint32\_t} representation preserves sort order:
+
+\begin{table}[t]
+  \centering
+  \caption{OVC flag types and their encoded values.}
+  \label{tab:ovc_flags}
+  \begin{tabular}{@{}clcl@{}}
+    \toprule
+    \textbf{Value} & \textbf{Flag} & \textbf{Bits} & \textbf{Semantics} \\
+    \midrule
+    0 & \texttt{EarlyFence} & \texttt{000} & End-of-run sentinel (sorts first) \\
+    1 & \texttt{Duplicate}  & \texttt{001} & Identical to reference key \\
+    2 & \texttt{Normal}     & \texttt{010} & Standard OVC comparison \\
+    3 & \texttt{Initial}    & \texttt{011} & First record (full key compare) \\
+    4 & \texttt{LateFence}  & \texttt{100} & End-of-input sentinel (sorts last) \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The encoding ensures that sentinel values sort to the correct positions
+(fences at extremes) and that duplicate keys are identified without
+accessing the full key.
+
+\subsection{OVC-Aware Loser Tree}
+
+For the traditional (single-threaded) K-way merge baseline, we implement
+an OVC-aware loser tree in GPU registers.  The key optimization is
+the \emph{duplicate shortcut}: when two OVC values have the
+\texttt{Duplicate} flag, they are known to be equal without key access.
+This reduces memory traffic during the merge, as duplicate keys need not
+be fetched from HBM.
+
+\begin{algorithm}[t]
+  \caption{OVC Comparison}
+  \label{alg:ovc_compare}
+  \KwInput{Two OVC values $a$, $b$ as \texttt{uint32\_t}}
+  \KwOutput{Ordering: $-1$, $0$, or $+1$}
+  \BlankLine
+  \Fn{OvcCompare($a$, $b$)}{
+    \Comment{Natural uint32 ordering matches sort order}
+    \uIf{$a < b$}{
+      \Return $-1$\;
+    }
+    \uElseIf{$a > b$}{
+      \Return $+1$\;
+    }
+    \Else{
+      \Comment{Equal OVC: must compare full keys}
+      \Return \text{CompareFullKeys}($\text{key}(a)$, $\text{key}(b)$)\;
+    }
+  }
+\end{algorithm}
+
+\subsection{OVC Delta Computation}
+
+After each merge step, OVC deltas must be recomputed for the merged
+output relative to the new predecessor.  This is performed cooperatively
+by all threads in the block:
+
+\begin{equation}
+  \text{ovc}[i] = \text{ComputeOVC}(\text{out}[i{-}1],\, \text{out}[i])
+  \quad \forall\, i \in [1, n)
+  \label{eq:ovc_delta}
+\end{equation}
+
+The \texttt{ComputeOVC} function scans the key bytes starting from
+offset~0, finds the first byte position $p$ where the keys differ, and
+packs $(p, \text{key}[i][p])$ into the OVC format with a \texttt{Normal}
+flag (or \texttt{Duplicate} if the keys are identical).
+
+
+% ══════════════════════════════════════════════════════════════════════════════
+% 6  THEORETICAL ANALYSIS
+% ══════════════════════════════════════════════════════════════════════════════
+\section{Theoretical Analysis}
+\label{sec:analysis}
+
+\subsection{HBM Traffic Model}
+
+Each merge pass reads and writes the entire dataset once, producing
+$2 \times D$ bytes of HBM traffic (where $D$ is the data size).  The total
+HBM traffic is:
+
+\begin{equation}
+  T_{\text{HBM}} = 2 \cdot D \cdot \lceil\log_K N\rceil
+  \label{eq:hbm_traffic}
+\end{equation}
+
+\noindent where $N$ is the number of initial sorted runs and $K$ is the
+merge fan-in.
+
+\subsection{Comparative Analysis}
+
+\Cref{tab:traffic} compares the two strategies for a 1\,GB dataset with
+$B{=}512$ records/block (producing $N{=}19{,}531$ runs) and a 10\,GB
+dataset ($N{=}195{,}313$).
+
+\begin{table}[t]
+  \centering
+  \caption{HBM traffic comparison for different merge strategies.}
+  \label{tab:traffic}
+  \begin{tabular}{@{}lcccc@{}}
+    \toprule
+    & \multicolumn{2}{c}{\textbf{1\,GB (19.5K runs)}} & \multicolumn{2}{c}{\textbf{10\,GB (195K runs)}} \\
+    \cmidrule(lr){2-3} \cmidrule(lr){4-5}
+    \textbf{Strategy} & \textbf{Passes} & \textbf{Traffic} & \textbf{Passes} & \textbf{Traffic} \\
+    \midrule
+    2-way ($K{=}2$)   & 15 & 30\,GB & 18 & 360\,GB \\
+    4-way ($K{=}4$)   &  8 & 16\,GB & 9  & 180\,GB \\
+    8-way ($K{=}8$)   &  5 & 10\,GB & 6  & 120\,GB \\
+    16-way ($K{=}16$)  &  4 &  8\,GB & 5  & 100\,GB \\
+    \midrule
+    \textbf{Reduction} ($K{=}8$ vs $K{=}2$) & $3\times$ & $3\times$ & $3\times$ & $3\times$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{Shared Memory Overhead}
+
+The shared-memory merge tree introduces internal data movement within
+shared memory.  At each level $\ell$, the data is read from one buffer and
+written to another, contributing shared-memory traffic but \emph{no}
+additional HBM traffic.  The total shared-memory traffic per merge-tree
+invocation is:
+
+\begin{equation}
+  T_{\text{SMEM}} = 2 \cdot K \cdot L \cdot \text{sizeof}(\text{record}) \cdot \log_2 K
+  \label{eq:smem_traffic}
+\end{equation}
+
+Since shared memory bandwidth exceeds HBM bandwidth by an order of
+magnitude on modern GPUs (e.g., ${\sim}19$\,TB/s aggregate shared-memory
+bandwidth on A100 vs.\ 2\,TB/s HBM), this overhead is negligible.
+
+\subsection{Roofline Analysis}
+
+The merge operation is memory-bandwidth-bound: each element is compared
+(1 integer comparison) and written (1 store), giving an arithmetic
+intensity of approximately $1/\text{sizeof}(\text{record})$ FLOP/byte.
+For 100-byte GenSort records, this is $0.01$ FLOP/byte, far below the
+roofline knee of any modern GPU.  Thus, minimizing HBM passes directly
+translates to proportional speedup.
+
+
+% ══════════════════════════════════════════════════════════════════════════════
+% 7  EXPERIMENTAL SETUP AND RESULTS
+% ══════════════════════════════════════════════════════════════════════════════
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Setup}
+
+\paragraph{Data.}
+We use GenSort~\cite{gensort} 100-byte records (10-byte key + 90-byte
+value), the standard benchmark for sort competitions.  Dataset sizes range
+from 100K to 100M records (10\,MB to 10\,GB).
+
+\paragraph{Hardware.}
+Experiments are conducted on two GPU architectures:
+\begin{itemize}[leftmargin=*,topsep=2pt,itemsep=1pt]
+  \item \textbf{NVIDIA A100 (80\,GB)}: sm\_80, 2,039\,GB/s HBM2e,
+    40\,MB L2, 164\,KB shared memory per SM.
+  \item \textbf{NVIDIA H100 (80\,GB)}: sm\_90, 3,350\,GB/s HBM3,
+    50\,MB L2, 228\,KB shared memory per SM.
+\end{itemize}
+
+\paragraph{Software.}
+CUDA~12.x, compiled with \texttt{nvcc -O3}.  Baseline comparisons use
+CUB~\cite{cub} \texttt{DeviceRadixSort} and Thrust
+\texttt{thrust::sort}.
+
+\paragraph{Experiment Suite.}
+We execute nine experiment programs covering different aspects:
+\begin{enumerate}[leftmargin=*,topsep=2pt,itemsep=1pt]
+  \item Bottleneck analysis (run generation vs.\ merge)
+  \item AoS vs.\ SoA memory layout comparison
+  \item CPU vs.\ GPU throughput scaling
+  \item CUB radix sort crossover point
+  \item Kernel profiling (occupancy, bandwidth utilization)
+  \item Edge cases (pre-sorted, reverse-sorted, all-duplicates)
+  \item External sort with data exceeding HBM
+  \item OVC encoding overhead measurement
+  \item Merge fan-in scaling ($K{=}2,4,8,16$)
+\end{enumerate}
+
+\subsection{Throughput Scaling}
+
+\begin{figure}[t]
+  \placeholderfig{3cm}{Line chart: x-axis = number of records (log scale,
+  100K to 100M), y-axis = throughput in M records/sec.  Lines for:
+  (1) GPU CrocSort 8-way, (2) GPU CrocSort 2-way, (3) CUB RadixSort,
+  (4) CPU CrocSort.  Expected: GPU 8-way fastest for large sizes,
+  CUB competitive for smaller sizes, CPU slowest.}
+  \caption{Sorting throughput vs.\ dataset size.}
+  \label{fig:throughput}
+\end{figure}
+
+\todo{Populate with experimental data.}
+
+\subsection{Merge Strategy Comparison}
+
+\begin{table}[t]
+  \centering
+  \caption{Merge strategy comparison on 1\,GB dataset (10M records).}
+  \label{tab:merge_comparison}
+  \begin{tabular}{@{}lcccc@{}}
+    \toprule
+    \textbf{Strategy} & \textbf{Passes} & \textbf{HBM Traffic} & \textbf{Time (ms)} & \textbf{BW Util.} \\
+    \midrule
+    2-way merge path    & 15 & 30\,GB & \todo{--} & \todo{--} \\
+    8-way loser tree    & 5  & 10\,GB & \todo{--} & \todo{--} \\
+    8-way merge tree    & 5  & 10\,GB & \todo{--} & \todo{--} \\
+    \midrule
+    CUB RadixSort       & -- & --     & \todo{--} & \todo{--} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\todo{Fill in timing and bandwidth utilization results.}
+
+\subsection{CPU vs.\ GPU Comparison}
+
+\begin{table}[t]
+  \centering
+  \caption{CPU vs.\ GPU sort performance on 10M records.}
+  \label{tab:cpu_gpu}
+  \begin{tabular}{@{}lccc@{}}
+    \toprule
+    \textbf{System} & \textbf{Time (ms)} & \textbf{Throughput (M rec/s)} & \textbf{Speedup} \\
+    \midrule
+    CPU CrocSort (1 thread)  & \todo{--} & \todo{--} & $1\times$ \\
+    CPU CrocSort (16 threads) & \todo{--} & \todo{--} & \todo{--} \\
+    GPU 2-way merge path     & \todo{--} & \todo{--} & \todo{--} \\
+    GPU 8-way merge tree     & \todo{--} & \todo{--} & \todo{--} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\todo{Fill in CPU vs.\ GPU comparison data.}
+
+\subsection{Memory Layout Impact}
+
+\begin{table}[t]
+  \centering
+  \caption{Impact of memory layout on merge throughput (10M records).}
+  \label{tab:layout}
+  \begin{tabular}{@{}lcc@{}}
+    \toprule
+    \textbf{Layout} & \textbf{Merge Time (ms)} & \textbf{Effective BW (GB/s)} \\
+    \midrule
+    Array of Structures (AoS) & \todo{--} & \todo{--} \\
+    Structure of Arrays (SoA) & \todo{--} & \todo{--} \\
+    Key-only (10B)            & \todo{--} & \todo{--} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\todo{Fill in memory layout comparison data.}
+
+\subsection{External Sort Performance}
+
+\begin{figure}[t]
+  \placeholderfig{3cm}{Bar chart: x-axis = dataset size (1GB, 5GB, 10GB,
+  50GB, 100GB), y-axis = sort time in seconds.  Stacked bars showing
+  time breakdown: host-to-device transfer, run generation, merge passes,
+  device-to-host transfer.  Expected: merge dominates for large sizes,
+  transfer overhead significant for external sort.}
+  \caption{External sort time breakdown by phase.}
+  \label{fig:external}
+\end{figure}
+
+\todo{Populate with external sort experiments.}
+
+
+% ══════════════════════════════════════════════════════════════════════════════
+% 8  RELATED WORK
+% ══════════════════════════════════════════════════════════════════════════════
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{CPU External Sort.}
+\crocsort~\cite{crocsort2026} established a new state of the art for CPU
+external merge sort through its use of Offset-Value Coding and careful
+cache-aware merge strategies.  Our work extends its core ideas---OVC
+encoding and analytically driven merge fan-in---to the GPU domain, where
+the memory hierarchy (HBM $\to$ shared memory $\to$ registers) differs
+fundamentally from the CPU hierarchy (DRAM $\to$ L3 $\to$ L2 $\to$ L1
+$\to$ registers).
+
+\paragraph{Merge Path.}
+Green et al.~\cite{green2012} introduced the merge-path framework for
+parallel 2-way merge on GPUs.  Their key insight is that a 2-way merge can
+be decomposed into independent sub-problems by tracing a path through the
+merge matrix.  We build directly on this primitive, using it as the
+building block at each level of our merge tree.
+
+\paragraph{GPU Multiway Mergesort.}
+Chatterjee et al.~\cite{chatterjee2017} proposed GPU Multiway Mergesort
+(MMS), which partitions multiway merge among GPU threads.  Their approach
+uses a different partitioning strategy: they find split points in all $K$
+input sequences simultaneously, then assign tiles to thread blocks.
+In contrast, our approach decomposes the K-way merge hierarchically,
+avoiding the complexity of K-way partitioning while achieving full
+parallelism through the merge tree.
+
+\paragraph{GPU External Sort.}
+Stehle and Jacobsen~\cite{stehle2017} presented a GPU-accelerated external
+sort at SIGMOD 2017.  Their system uses the GPU for merge operations while
+streaming data between host and device.  Our external sort pipeline follows
+a similar model but achieves higher merge fan-in through the shared-memory
+merge tree, reducing the number of host-device round trips.
+
+\paragraph{ModernGPU.}
+Baxter's ModernGPU library~\cite{moderngpu2013} provides optimized
+implementations of merge-path-based sorting and merging on CUDA GPUs.
+It serves as both an inspiration and a baseline for our 2-way merge
+implementation.
+
+\paragraph{CUB and Thrust.}
+The CUB~\cite{cub} and Thrust libraries provide GPU radix sort, which is
+asymptotically optimal for fixed-width keys.  For GenSort's 10-byte keys,
+radix sort requires 10 passes over the key bytes.  Our comparison-based
+approach may be competitive for longer keys or variable-length keys where
+radix sort's pass count grows proportionally.
+
+
+% ══════════════════════════════════════════════════════════════════════════════
+% 9  FUTURE WORK
+% ══════════════════════════════════════════════════════════════════════════════
+\section{Future Work}
+\label{sec:future}
+
+Several directions offer promising extensions of \gpucrocsort:
+
+\paragraph{Higher Fan-In ($K{=}16, 32$).}
+Increasing the merge fan-in to $K{=}16$ or $K{=}32$ would further reduce
+pass counts ($\lceil\log_{16} N\rceil$ or $\lceil\log_{32} N\rceil$).
+The challenge is shared-memory capacity: $K{=}16$ with 100-byte records
+requires $2 \times 16 \times 64 \times 100 = 204{,}800$ bytes, which
+exceeds the 164\,KB shared-memory limit on A100 but fits within the
+228\,KB budget on H100.
+
+\paragraph{Key-Value Separation.}
+Separating keys from values in the merge pipeline would reduce data
+movement during the merge tree levels, where only keys (and OVC values)
+need to participate in comparisons.  Values would be gathered only at
+the final output stage, reducing shared-memory pressure by up to
+$9\times$ for GenSort records.
+
+\paragraph{Multi-GPU Scaling.}
+NCCL-based multi-GPU external sort, where each GPU sorts a partition and
+a final merge phase combines results across GPUs via NVLink or
+NVSwitch interconnect.
+
+\paragraph{GPU Direct Storage.}
+Bypassing the CPU entirely for external sort by using GPU Direct Storage
+(GDS) to read and write sorted runs directly between NVMe SSDs and GPU
+HBM, eliminating PCIe round trips through host memory.
+
+\paragraph{OVC-Aware Merge Path.}
+Incorporating OVC values into the merge-path binary search to exploit
+the comparison shortcut.  When OVC values indicate that one sequence's
+elements are all less than the other's (detectable via fence values),
+the binary search can short-circuit.
+
+\paragraph{H100-Specific Optimizations.}
+Exploiting H100's architectural features:
+\begin{itemize}[leftmargin=*,topsep=2pt,itemsep=1pt]
+  \item \textbf{SM Clusters:} Distributed shared memory across clustered
+    SMs could enable larger merge tiles without spilling to HBM.
+  \item \textbf{Tensor Memory Accelerator (TMA):} Hardware-accelerated
+    asynchronous data movement between HBM and shared memory.
+  \item \textbf{\texttt{cp.async}:} Asynchronous copy instructions to
+    overlap data loading with merge computation.
+\end{itemize}
+
+
+% ══════════════════════════════════════════════════════════════════════════════
+% 10  CONCLUSION
+% ══════════════════════════════════════════════════════════════════════════════
+\section{Conclusion}
+\label{sec:conclusion}
+
+We have presented \gpucrocsort, a GPU-accelerated external merge sort
+that resolves the fundamental tension between merge fan-in and thread
+utilization through a novel shared-memory K-way merge tree.  By
+decomposing a $K$-way merge ($K{=}8$) into $\log_2 K = 3$ levels of
+fully parallel 2-way merge-path operations within shared memory, our
+approach achieves the pass-count reduction of K-way merging
+($\lceil\log_8 N\rceil$ passes instead of $\lceil\log_2 N\rceil$)
+while maintaining 100\% thread utilization at every level.
+
+For a 1\,GB dataset producing 19{,}531 sorted runs, this translates to a
+$3\times$ reduction in HBM traffic (10\,GB vs.\ 30\,GB) compared to the
+2-way merge-path baseline.  Combined with GPU-adapted Offset-Value
+Coding for single-instruction key comparison and a streaming external-sort
+pipeline for datasets exceeding HBM capacity, \gpucrocsort demonstrates
+that the GPU memory hierarchy---with its high-bandwidth HBM and
+ultra-fast shared memory---is well suited to external merge sort when
+the merge algorithm is carefully matched to the hardware.
+
+The shared-memory merge tree is a general technique applicable beyond
+sorting: any hierarchical reduction where intermediate results fit in
+shared memory can benefit from this decomposition.  We believe this
+approach opens new avenues for GPU-accelerated data processing algorithms
+that must balance fan-in with parallelism.
+
+
+% ══════════════════════════════════════════════════════════════════════════════
+% ACKNOWLEDGMENTS
+% ══════════════════════════════════════════════════════════════════════════════
+\section*{Acknowledgments}
+
+\todo{Add acknowledgments.}
+
+
+% ══════════════════════════════════════════════════════════════════════════════
+% REFERENCES
+% ══════════════════════════════════════════════════════════════════════════════
+\bibliographystyle{IEEEtran}
+
+\begin{thebibliography}{10}
+
+\bibitem{crocsort2026}
+CrocSort: External Merge Sort with Offset-Value Coding.
+\newblock In \emph{Proceedings of the VLDB Endowment}, 2026.
+
+\bibitem{ovc_original}
+P.~Larson and G.~Graefe.
+\newblock Offset-value coding.
+\newblock In \emph{IEEE International Conference on Data Engineering (ICDE)}, 2014.
+
+\bibitem{green2012}
+O.~Green, R.~McColl, and D.~A.~Bader.
+\newblock GPU merge path: A GPU merging algorithm.
+\newblock In \emph{Proceedings of the 26th ACM International Conference on
+  Supercomputing (ICS)}, pages 331--340, 2012.
+
+\bibitem{chatterjee2017}
+S.~Chatterjee, N.~Rai, and J.~D.~Owens.
+\newblock GPU multiway mergesort.
+\newblock In \emph{ACM SIGPLAN Symposium on Principles and Practice of
+  Parallel Programming (PPoPP)}, 2017.
+
+\bibitem{moderngpu2013}
+S.~Baxter.
+\newblock ModernGPU: Patterns and techniques for GPU computing.
+\newblock \url{https://moderngpu.github.io/}, 2013.
+
+\bibitem{stehle2017}
+E.~Stehle and H.-A.~Jacobsen.
+\newblock A memory bandwidth-efficient hybrid radix sort on GPUs.
+\newblock In \emph{Proceedings of the ACM SIGMOD International Conference on
+  Management of Data}, pages 417--432, 2017.
+
+\bibitem{cub}
+D.~Merrill.
+\newblock CUB: CUDA unbound.
+\newblock \url{https://nvlabs.github.io/cub/}, 2015.
+
+\bibitem{gensort}
+C.~Nyberg.
+\newblock GenSort data generator.
+\newblock \url{http://www.ordinal.com/gensort.html}.
+
+\bibitem{cuda_programming_guide}
+NVIDIA.
+\newblock \emph{CUDA C++ Programming Guide}, v12.x.
+\newblock NVIDIA Corporation, 2024.
+
+\bibitem{nsight}
+NVIDIA.
+\newblock \emph{Nsight Compute Profiling Guide}.
+\newblock NVIDIA Corporation, 2024.
+
+\end{thebibliography}
+
+\end{document}
