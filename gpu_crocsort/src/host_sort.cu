@@ -175,7 +175,9 @@ void gpu_crocsort_in_hbm(
            KWAY_K, max_recs_per_part, max_recs_per_part * RECORD_SIZE * 2.0 / 1024.0);
 
     // Choose strategy
-    MergeStrategy strategy = STRATEGY_KWAY; // Default: fewer passes
+    // K-way partitioning uses naive proportional split (known incorrect on skewed data)
+    // Use 2-way merge path until sample-based partitioning is integrated
+    MergeStrategy strategy = STRATEGY_2WAY;
 
     // ════════════════════════════════════════
     // Phase 1: Run Generation
