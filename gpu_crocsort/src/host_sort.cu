@@ -284,15 +284,6 @@ void gpu_crocsort_in_hbm(
                                       partitions.size() * sizeof(KWayPartition),
                                       cudaMemcpyHostToDevice));
 
-                // Request sufficient shared memory
-                int smem_needed = 2 * max_rec * RECORD_SIZE;
-
-                // Set max dynamic shared memory for this kernel
-                cudaFuncSetAttribute(
-                    (const void*)launch_merge_kway, // Note: need the actual kernel function
-                    cudaFuncAttributeMaxDynamicSharedMemorySize,
-                    smem_needed);
-
                 timer.begin();
                 launch_merge_kway(d_src, d_dst, d_parts, (int)partitions.size(), max_rec, 0);
                 pass_ms += timer.end();

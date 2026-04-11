@@ -328,6 +328,11 @@ extern "C" void launch_merge_kway(
     if (num_partitions > 0) {
         // Dynamic shared memory: 2 × max_records × RECORD_SIZE
         int smem_bytes = 2 * max_records_per_partition * RECORD_SIZE;
+        // Opt-in for extended shared memory (>48KB on sm_75+)
+        cudaFuncSetAttribute(
+            (const void*)smem_kway_merge_kernel,
+            cudaFuncAttributeMaxDynamicSharedMemorySize,
+            smem_bytes);
         smem_kway_merge_kernel<<<num_partitions, SMMT_BLOCK_THREADS, smem_bytes, stream>>>(
             d_input, d_output, d_partitions);
     }
