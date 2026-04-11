@@ -294,62 +294,31 @@ void ExternalGpuSort::merge_runs_streaming(
                 d2h_bytes += pair_bytes;
 
             } else {
-                // Pair too large for GPU — streaming merge in chunks
-                // Load chunks from each run, merge on GPU, write back
-                uint64_t half_chunk = chunk_records / 2;
-                uint64_t cursor_a = 0, cursor_b = 0;
-                uint64_t written = 0;
+                // Pair too large for GPU — CPU-side streaming merge
+                // This is correct but PCIe-bound. GPU streaming merge
+                // would need a proper cursor-based algorithm.
+                const uint8_t* pa = h_src + ra.host_offset;
+                const uint8_t* pb = h_src + rb.host_offset;
+                uint8_t* po = h_dst + out_off;
+                uint64_t ia = 0, ib = 0;
 
-                while (written < pair_n) {
-                    uint64_t na = std::min(half_chunk, ra.num_records - cursor_a);
-                    uint64_t nb = std::min(half_chunk, rb.num_records - cursor_b);
-                    uint64_t loaded = na + nb;
-                    if (loaded == 0) break;
-
-                    // Upload A chunk then B chunk
-                    uint64_t a_bytes_chunk = na * RECORD_SIZE;
-                    uint64_t b_bytes_chunk = nb * RECORD_SIZE;
-                    if (na > 0)
-                        memcpy(h_pinned_a, h_src + ra.host_offset + cursor_a*RECORD_SIZE, a_bytes_chunk);
-                    if (nb > 0)
-                        memcpy(h_pinned_a + a_bytes_chunk,
-                               h_src + rb.host_offset + cursor_b*RECORD_SIZE, b_bytes_chunk);
-
-                    CUDA_CHECK(cudaMemcpyAsync(d_buf_a, h_pinned_a, (na+nb)*RECORD_SIZE,
-                                                cudaMemcpyHostToDevice, stream_compute));
-                    h2d_bytes += (na+nb)*RECORD_SIZE;
-
-                    // Merge this batch
-                    if (na > 0 && nb > 0) {
-                        PairDesc2Way desc = {0, (int)na, a_bytes_chunk, (int)nb, 0, 0};
-                        int items_per_blk = MERGE_ITEMS_PER_THREAD_CFG * MERGE_BLOCK_THREADS_CFG;
-                        int mblks = (int)((loaded + items_per_blk - 1) / items_per_blk);
-
-                        PairDesc2Way* d_desc;
-                        CUDA_CHECK(cudaMalloc(&d_desc, sizeof(PairDesc2Way)));
-                        CUDA_CHECK(cudaMemcpyAsync(d_desc, &desc, sizeof(PairDesc2Way),
-                                                    cudaMemcpyHostToDevice, stream_compute));
-                        launch_merge_2way(d_buf_a, d_buf_b, d_desc, 1, mblks, stream_compute);
-                        CUDA_CHECK(cudaStreamSynchronize(stream_compute));
-                        cudaFree(d_desc);
+                while (ia < ra.num_records && ib < rb.num_records) {
+                    if (key_compare(pa + ia*RECORD_SIZE, pb + ib*RECORD_SIZE, KEY_SIZE) <= 0) {
+                        memcpy(po, pa + ia*RECORD_SIZE, RECORD_SIZE);
+                        ia++;
                     } else {
-                        // Only one run has data — just copy
-                        CUDA_CHECK(cudaMemcpyAsync(d_buf_b, d_buf_a, loaded*RECORD_SIZE,
-                                                    cudaMemcpyDeviceToDevice, stream_compute));
-                        CUDA_CHECK(cudaStreamSynchronize(stream_compute));
+                        memcpy(po, pb + ib*RECORD_SIZE, RECORD_SIZE);
+                        ib++;
                     }
-
-                    // Download merged output
-                    uint64_t out_n = std::min(loaded, pair_n - written);
-                    CUDA_CHECK(cudaMemcpyAsync(h_pinned_b, d_buf_b, out_n*RECORD_SIZE,
-                                                cudaMemcpyDeviceToHost, stream_compute));
-                    CUDA_CHECK(cudaStreamSynchronize(stream_compute));
-                    memcpy(h_dst + out_off + written*RECORD_SIZE, h_pinned_b, out_n*RECORD_SIZE);
-                    d2h_bytes += out_n*RECORD_SIZE;
-
-                    cursor_a += na;
-                    cursor_b += nb;
-                    written += out_n;
+                    po += RECORD_SIZE;
+                }
+                while (ia < ra.num_records) {
+                    memcpy(po, pa + ia*RECORD_SIZE, RECORD_SIZE);
+                    ia++; po += RECORD_SIZE;
+                }
+                while (ib < rb.num_records) {
+                    memcpy(po, pb + ib*RECORD_SIZE, RECORD_SIZE);
+                    ib++; po += RECORD_SIZE;
                 }
             }
 
