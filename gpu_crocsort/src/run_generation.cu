@@ -33,8 +33,8 @@ __device__ void bitonic_sort_shared(
                 if (partner > i && partner < n) {
                     bool ascending = ((i & k) == 0);
                     bool need_swap = ascending
-                        ? (s_keys[pos] > s_keys[partner])
-                        : (s_keys[pos] < s_keys[partner]);
+                        ? (s_keys[i] > s_keys[partner])
+                        : (s_keys[i] < s_keys[partner]);
                     if (need_swap) {
                         SortKey tk = s_keys[i];
                         s_keys[i] = s_keys[partner];
