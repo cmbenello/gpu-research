@@ -16,8 +16,11 @@
 // (OVC encoding, loser tree merge), and optionally verifies correctness.
 // ============================================================================
 
+// Strategy enum (must match host_sort.cu)
+enum MergeStrategy { STRATEGY_2WAY, STRATEGY_KWAY };
+
 // Forward declaration
-void gpu_crocsort_in_hbm(uint8_t* d_data, uint64_t num_records, bool verify);
+void gpu_crocsort_in_hbm(uint8_t* d_data, uint64_t num_records, bool verify, MergeStrategy strategy);
 
 // ── Random data generation ─────────────────────────────────────────
 // Generates GenSort-style records: 10-byte random key + 90-byte payload
@@ -84,6 +87,7 @@ int main(int argc, char** argv) {
     bool verify = false;
     unsigned seed = 42;
     bool duplicates = false;
+    MergeStrategy strategy = STRATEGY_KWAY;  // Default: K-way (fewer passes)
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--num-records") == 0 && i + 1 < argc) {
@@ -94,12 +98,18 @@ int main(int argc, char** argv) {
             seed = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--duplicates") == 0) {
             duplicates = true;
+        } else if (strcmp(argv[i], "--strategy") == 0 && i + 1 < argc) {
+            i++;
+            if (strcmp(argv[i], "2way") == 0) strategy = STRATEGY_2WAY;
+            else if (strcmp(argv[i], "kway") == 0) strategy = STRATEGY_KWAY;
+            else { fprintf(stderr, "Unknown strategy: %s (use 2way or kway)\n", argv[i]); return 1; }
         } else if (strcmp(argv[i], "--help") == 0) {
-            printf("Usage: %s [--num-records N] [--verify] [--seed S] [--duplicates]\n", argv[0]);
-            printf("  --num-records N   Number of records to sort (default: 1000000)\n");
-            printf("  --verify          Verify sort correctness after sorting\n");
-            printf("  --seed S          Random seed (default: 42)\n");
-            printf("  --duplicates      Generate data with many duplicate keys\n");
+            printf("Usage: %s [--num-records N] [--verify] [--seed S] [--duplicates] [--strategy 2way|kway]\n", argv[0]);
+            printf("  --num-records N       Number of records to sort (default: 1000000)\n");
+            printf("  --verify              Verify sort correctness after sorting\n");
+            printf("  --seed S              Random seed (default: 42)\n");
+            printf("  --duplicates          Generate data with many duplicate keys\n");
+            printf("  --strategy 2way|kway  Merge strategy (default: kway)\n");
             return 0;
         }
     }
@@ -119,7 +129,9 @@ int main(int argc, char** argv) {
     int passes_8way = (int)ceil(log((double)expected_runs) / log(8.0));
     printf("  Records per block: %d\n", RECORDS_PER_BLOCK);
     printf("  Expected runs: %lu\n", expected_runs);
-    printf("  Merge strategy: 8-way shared-memory merge tree (novel)\n");
+    printf("  Merge strategy: %s\n", strategy == STRATEGY_KWAY
+           ? "8-way shared-memory merge tree (sample partitioning)"
+           : "2-way merge path");
     printf("  Merge passes: %d (vs %d for 2-way) = %.1fx less HBM traffic\n",
            passes_8way, passes_2way, (double)passes_2way / passes_8way);
     printf("  Mode: %s\n", duplicates ? "duplicate-heavy" : "random");
@@ -164,7 +176,7 @@ int main(int argc, char** argv) {
     CUDA_CHECK(cudaMemcpy(d_data, h_data, total_bytes, cudaMemcpyHostToDevice));
 
     // ── Sort ──
-    gpu_crocsort_in_hbm(d_data, num_records, verify);
+    gpu_crocsort_in_hbm(d_data, num_records, verify, strategy);
 
     float total_ms = overall_timer.end();
 

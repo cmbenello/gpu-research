@@ -4,6 +4,8 @@
 #include <vector>
 #include <cstring>
 #include <cmath>
+#include <thrust/sort.h>
+#include <thrust/device_ptr.h>
 
 // ============================================================================
 // Host orchestration: supports both 2-way and K-way merge strategies
@@ -60,96 +62,6 @@ struct Run {
     uint64_t num_records;
 };
 
-// ── Shared memory limit for K-way merge tree ───────────────────────
-// Each partition needs 2 × total_records × RECORD_SIZE bytes in shared mem
-// Query device to find actual limit
-
-static int get_max_smem_per_block() {
-    int device;
-    cudaGetDevice(&device);
-    cudaDeviceProp props;
-    cudaGetDeviceProperties(&props, device);
-    // Can configure up to this much on modern GPUs (A100: 164KB, H100: 228KB)
-    return props.sharedMemPerMultiprocessor; // Conservative: use SM-level max
-}
-
-static int max_records_per_kway_partition() {
-    int smem = get_max_smem_per_block();
-    // Need 2 buffers (ping-pong) of total_records × RECORD_SIZE
-    // Cap at 47KB to stay within default 48KB limit (avoids opt-in issues on some GPUs)
-    int usable_smem = std::min(smem, 47 * 1024);
-    return usable_smem / (2 * RECORD_SIZE);       // Records per partition
-}
-
-// ── K-way merge: partition computation ─────────────────────────────
-// Splits K runs into P partitions by sampling boundaries.
-// Each partition gets a roughly equal number of total records.
-// Within each partition, binary search each run to find its sub-range.
-
-static void compute_kway_partitions(
-    const uint8_t* h_sorted_data,  // Sorted run data (host copy for boundary search)
-    const std::vector<Run>& group_runs,
-    int K,
-    int max_records_per_part,
-    std::vector<KWayPartition>& out_partitions,
-    uint64_t out_base_offset
-) {
-    // Total records across all runs in this group
-    uint64_t total = 0;
-    for (auto& r : group_runs) total += r.num_records;
-
-    // Number of partitions: enough so each fits in shared memory
-    int min_partitions = (int)((total + max_records_per_part - 1) / max_records_per_part);
-    int num_partitions = std::max(min_partitions, 64); // At least 64 for parallelism
-
-    // Simple count-balanced partitioning: each partition gets ~total/P records
-    int records_per_part = (int)((total + num_partitions - 1) / num_partitions);
-
-    // For each partition, determine how many records from each source
-    // Simple approach: proportional split (each run contributes proportionally)
-    out_partitions.resize(num_partitions);
-
-    for (int p = 0; p < num_partitions; p++) {
-        KWayPartition& kp = out_partitions[p];
-        uint64_t part_start = (uint64_t)p * records_per_part;
-        uint64_t part_end = std::min(part_start + (uint64_t)records_per_part, total);
-        kp.total_records = (int)(part_end - part_start);
-        kp.out_byte_offset = out_base_offset + part_start * RECORD_SIZE;
-
-        // Distribute records from each source
-        // Simple proportional: each source contributes (source_records / total) * partition_records
-        uint64_t remaining = kp.total_records;
-        for (int k = 0; k < K; k++) {
-            uint64_t run_recs = group_runs[k].num_records;
-            int this_source;
-            if (k == K - 1) {
-                this_source = (int)remaining; // Last source gets remainder
-            } else {
-                this_source = (int)((run_recs * kp.total_records + total - 1) / total);
-                this_source = std::min(this_source, (int)remaining);
-                this_source = std::min(this_source, (int)run_recs);
-            }
-
-            // Compute start offset within this source's run
-            uint64_t src_part_start = (run_recs * p) / num_partitions;
-            int src_count = std::min((uint64_t)this_source,
-                                     run_recs - src_part_start);
-
-            kp.src_rec_start[k] = (int)src_part_start;
-            kp.src_rec_count[k] = src_count;
-            kp.src_byte_off[k] = group_runs[k].byte_offset;
-            remaining -= src_count;
-        }
-
-        // Zero unused sources
-        for (int k = K; k < KWAY_K; k++) {
-            kp.src_rec_start[k] = 0;
-            kp.src_rec_count[k] = 0;
-            kp.src_byte_off[k] = 0;
-        }
-    }
-}
-
 // ── Strategy selector ──────────────────────────────────────────────
 
 enum MergeStrategy {
@@ -157,12 +69,214 @@ enum MergeStrategy {
     STRATEGY_KWAY,      // K-way merge tree: fewer passes, still parallel
 };
 
+// ── Shared memory limit for K-way merge tree ───────────────────────
+
+static int max_records_per_kway_partition() {
+    int device;
+    cudaGetDevice(&device);
+    cudaDeviceProp props;
+    cudaGetDeviceProperties(&props, device);
+    // Use the per-block optin limit (cudaFuncSetAttribute in merge.cu handles opt-in)
+    int max_smem = props.sharedMemPerBlockOptin;
+    // Leave 1KB for static shared memory (seq_start, seq arrays)
+    int usable_smem = max_smem - 1024;
+    // Need 2 buffers (ping-pong) of total_records × RECORD_SIZE
+    return usable_smem / (2 * RECORD_SIZE);
+}
+
+// ============================================================================
+// Sample-based partitioning for K-way merge
+// Ported from experiments/sample_partition.cu
+// ============================================================================
+
+// Phase 1: Sample every S-th key from each run (one block per run)
+__global__ void sample_keys_kernel(
+    const uint8_t* __restrict__ d_runs, const uint64_t* __restrict__ d_run_offsets,
+    const int* __restrict__ d_run_lengths, int K, int S,
+    SortKey* __restrict__ d_samples, int* __restrict__ d_sample_counts
+) {
+    int run_id = blockIdx.x;
+    if (run_id >= K) return;
+    int run_len = d_run_lengths[run_id];
+    uint64_t base = d_run_offsets[run_id];
+    int num_samples = run_len / S;
+    // Compute prefix offset for this run's samples
+    int sample_base = 0;
+    for (int r = 0; r < run_id; r++) sample_base += d_run_lengths[r] / S;
+    if (threadIdx.x == 0) d_sample_counts[run_id] = num_samples;
+    for (int i = threadIdx.x; i < num_samples; i += blockDim.x) {
+        const uint8_t* rec = d_runs + base + (uint64_t)(i * S) * RECORD_SIZE;
+        d_samples[sample_base + i] = make_sort_key(rec);
+    }
+}
+
+// Binary search: find first record in run >= target key
+__device__ int lower_bound_run(const uint8_t* run_data, int run_len, SortKey target) {
+    int lo = 0, hi = run_len;
+    while (lo < hi) {
+        int mid = lo + (hi - lo) / 2;
+        if (make_sort_key(run_data + (uint64_t)mid * RECORD_SIZE) < target) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo;
+}
+
+// Phase 4: Binary search each run for each boundary (P blocks, K threads)
+__global__ void compute_partition_ranges_kernel(
+    const uint8_t* __restrict__ d_runs, const uint64_t* __restrict__ d_run_offsets,
+    const int* __restrict__ d_run_lengths, int K,
+    const SortKey* __restrict__ d_boundaries, int P,
+    int* __restrict__ d_starts, int* __restrict__ d_counts
+) {
+    int p = blockIdx.x, k = threadIdx.x;
+    if (p >= P || k >= K) return;
+    int run_len = d_run_lengths[k];
+    const uint8_t* run_data = d_runs + d_run_offsets[k];
+    int lo = (p == 0)     ? 0       : lower_bound_run(run_data, run_len, d_boundaries[p - 1]);
+    int hi = (p == P - 1) ? run_len : lower_bound_run(run_data, run_len, d_boundaries[p]);
+    d_starts[p * K + k] = lo;
+    d_counts[p * K + k] = hi - lo;
+}
+
+// Host orchestrator: compute sample-based partitions for a group of K runs
+static void compute_sample_partitions(
+    const uint8_t* d_runs,
+    const std::vector<Run>& group_runs,
+    int K, int P,
+    uint64_t out_base_offset,
+    std::vector<KWayPartition>& out_partitions
+) {
+    // Build host arrays for run offsets and lengths
+    std::vector<uint64_t> h_run_offsets(K);
+    std::vector<int> h_run_lengths(K);
+    uint64_t total = 0;
+    for (int i = 0; i < K; i++) {
+        h_run_offsets[i] = group_runs[i].byte_offset;
+        h_run_lengths[i] = (int)group_runs[i].num_records;
+        total += group_runs[i].num_records;
+    }
+
+    // Compute sampling rate: ~10 samples per partition
+    int target_samples = 10 * P;
+    int S = std::max(1, (int)(total / target_samples));
+
+    int total_samples = 0;
+    for (int i = 0; i < K; i++) total_samples += h_run_lengths[i] / S;
+
+    if (total_samples < 2) {
+        // Too few records — single partition gets everything
+        out_partitions.resize(1);
+        KWayPartition& kp = out_partitions[0];
+        kp.out_byte_offset = out_base_offset;
+        kp.total_records = (int)total;
+        for (int k = 0; k < K; k++) {
+            kp.src_rec_start[k] = 0;
+            kp.src_rec_count[k] = h_run_lengths[k];
+            kp.src_byte_off[k] = h_run_offsets[k];
+        }
+        for (int k = K; k < KWAY_K; k++) {
+            kp.src_rec_start[k] = 0;
+            kp.src_rec_count[k] = 0;
+            kp.src_byte_off[k] = 0;
+        }
+        return;
+    }
+
+    // Upload run metadata
+    uint64_t* d_run_offsets_dev;
+    int* d_run_lengths_dev;
+    CUDA_CHECK(cudaMalloc(&d_run_offsets_dev, K * sizeof(uint64_t)));
+    CUDA_CHECK(cudaMalloc(&d_run_lengths_dev, K * sizeof(int)));
+    CUDA_CHECK(cudaMemcpy(d_run_offsets_dev, h_run_offsets.data(), K * sizeof(uint64_t), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_run_lengths_dev, h_run_lengths.data(), K * sizeof(int), cudaMemcpyHostToDevice));
+
+    // Phase 1: Sample keys from each run
+    SortKey* d_samples;
+    int* d_sample_counts;
+    CUDA_CHECK(cudaMalloc(&d_samples, std::max(1, total_samples) * sizeof(SortKey)));
+    CUDA_CHECK(cudaMalloc(&d_sample_counts, K * sizeof(int)));
+
+    sample_keys_kernel<<<K, 256>>>(
+        d_runs, d_run_offsets_dev, d_run_lengths_dev, K, S, d_samples, d_sample_counts);
+    CUDA_CHECK(cudaGetLastError());
+
+    // Phase 2: Sort samples using Thrust
+    thrust::device_ptr<SortKey> dp_samples(d_samples);
+    thrust::sort(dp_samples, dp_samples + total_samples);
+
+    // Phase 3: Select P-1 evenly spaced boundaries from sorted samples
+    std::vector<SortKey> h_samples(total_samples);
+    CUDA_CHECK(cudaMemcpy(h_samples.data(), d_samples,
+                          total_samples * sizeof(SortKey), cudaMemcpyDeviceToHost));
+
+    int num_boundaries = P - 1;
+    std::vector<SortKey> h_boundaries(num_boundaries);
+    for (int i = 0; i < num_boundaries; i++) {
+        int idx = (int)(((uint64_t)(i + 1) * total_samples) / P);
+        idx = std::min(idx, total_samples - 1);
+        h_boundaries[i] = h_samples[idx];
+    }
+
+    SortKey* d_boundaries;
+    CUDA_CHECK(cudaMalloc(&d_boundaries, num_boundaries * sizeof(SortKey)));
+    CUDA_CHECK(cudaMemcpy(d_boundaries, h_boundaries.data(),
+                          num_boundaries * sizeof(SortKey), cudaMemcpyHostToDevice));
+
+    // Phase 4: Binary search each run for each boundary
+    int* d_starts;
+    int* d_counts;
+    CUDA_CHECK(cudaMalloc(&d_starts, P * K * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_counts, P * K * sizeof(int)));
+
+    compute_partition_ranges_kernel<<<P, K>>>(
+        d_runs, d_run_offsets_dev, d_run_lengths_dev, K,
+        d_boundaries, P, d_starts, d_counts);
+    CUDA_CHECK(cudaGetLastError());
+
+    // Copy results back
+    std::vector<int> h_starts(P * K), h_counts(P * K);
+    CUDA_CHECK(cudaMemcpy(h_starts.data(), d_starts, P * K * sizeof(int), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(h_counts.data(), d_counts, P * K * sizeof(int), cudaMemcpyDeviceToHost));
+
+    // Phase 5: Build KWayPartition descriptors
+    out_partitions.resize(P);
+    uint64_t out_offset = out_base_offset;
+
+    for (int p = 0; p < P; p++) {
+        KWayPartition& kp = out_partitions[p];
+        kp.out_byte_offset = out_offset;
+        kp.total_records = 0;
+        for (int k = 0; k < K; k++) {
+            kp.src_rec_start[k] = h_starts[p * K + k];
+            kp.src_rec_count[k] = h_counts[p * K + k];
+            kp.src_byte_off[k]  = h_run_offsets[k];
+            kp.total_records += kp.src_rec_count[k];
+        }
+        for (int k = K; k < KWAY_K; k++) {
+            kp.src_rec_start[k] = 0;
+            kp.src_rec_count[k] = 0;
+            kp.src_byte_off[k]  = 0;
+        }
+        out_offset += (uint64_t)kp.total_records * RECORD_SIZE;
+    }
+
+    // Cleanup
+    CUDA_CHECK(cudaFree(d_run_offsets_dev));
+    CUDA_CHECK(cudaFree(d_run_lengths_dev));
+    CUDA_CHECK(cudaFree(d_samples));
+    CUDA_CHECK(cudaFree(d_sample_counts));
+    CUDA_CHECK(cudaFree(d_boundaries));
+    CUDA_CHECK(cudaFree(d_starts));
+    CUDA_CHECK(cudaFree(d_counts));
+}
+
 // ── Main sort function ─────────────────────────────────────────────
 
 void gpu_crocsort_in_hbm(
     uint8_t* d_data,
     uint64_t num_records,
-    bool verify
+    bool verify,
+    MergeStrategy strategy
 ) {
     if (num_records <= 1) return;
 
@@ -173,11 +287,6 @@ void gpu_crocsort_in_hbm(
            num_records, (double)total_bytes / (1024.0 * 1024.0));
     printf("  K-way merge tree: K=%d, max %d records/partition (%.1f KB smem)\n",
            KWAY_K, max_recs_per_part, max_recs_per_part * RECORD_SIZE * 2.0 / 1024.0);
-
-    // Choose strategy
-    // K-way partitioning uses naive proportional split (known incorrect on skewed data)
-    // Use 2-way merge path until sample-based partitioning is integrated
-    MergeStrategy strategy = STRATEGY_2WAY;
 
     // ════════════════════════════════════════
     // Phase 1: Run Generation
@@ -240,8 +349,8 @@ void gpu_crocsort_in_hbm(
     float total_merge_ms = 0;
 
     if (strategy == STRATEGY_KWAY) {
-        // ── K-way merge tree strategy ──
-        printf("\n  Using %d-way shared-memory merge tree\n", KWAY_K);
+        // ── K-way merge tree strategy with sample-based partitioning ──
+        printf("\n  Using %d-way shared-memory merge tree (sample partitioning)\n", KWAY_K);
 
         while (runs.size() > 1) {
             pass++;
@@ -271,15 +380,22 @@ void gpu_crocsort_in_hbm(
                 // Build group runs
                 std::vector<Run> group_runs(runs.begin() + g_start, runs.begin() + g_end);
 
-                // Compute partitions
+                // Compute total records to determine partition count
+                uint64_t group_total = 0;
+                for (auto& r : group_runs) group_total += r.num_records;
+
+                int min_partitions = (int)((group_total + max_recs_per_part - 1) / max_recs_per_part);
+                int num_partitions = std::max(min_partitions, 64);
+
+                // Compute partitions using sample-based boundaries
                 std::vector<KWayPartition> partitions;
-                compute_kway_partitions(nullptr, group_runs, g_size,
-                                        max_recs_per_part, partitions, out_offset);
+                compute_sample_partitions(d_src, group_runs, g_size,
+                                          num_partitions, out_offset, partitions);
 
                 int max_rec = 0;
                 for (auto& p : partitions) max_rec = std::max(max_rec, p.total_records);
 
-                // Upload
+                // Upload partition descriptors
                 KWayPartition* d_parts;
                 CUDA_CHECK(cudaMalloc(&d_parts, partitions.size() * sizeof(KWayPartition)));
                 CUDA_CHECK(cudaMemcpy(d_parts, partitions.data(),
@@ -300,9 +416,9 @@ void gpu_crocsort_in_hbm(
             }
 
             total_merge_ms += pass_ms;
-            printf("  Pass %d: %d runs -> %d (%d-way), %d+ partitions, %.2f ms (%.2f GB/s)\n",
+            printf("  Pass %d: %d runs -> %d (%d-way), %d partitions, %.2f ms (%.2f GB/s)\n",
                    pass, current_runs, (int)new_runs.size(), group_size,
-                   (int)(current_runs / group_size) * 64, // Approximate partition count
+                   (int)(current_runs / group_size) * 64,
                    pass_ms, 2.0 * total_bytes / (pass_ms * 1e6));
 
             runs = new_runs;
