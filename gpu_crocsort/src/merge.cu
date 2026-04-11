@@ -90,10 +90,10 @@ __global__ void merge_2way_kernel(
         const uint8_t* src = take_a ? A + (uint64_t)ai*RECORD_SIZE : B + (uint64_t)bi*RECORD_SIZE;
         if (take_a) ai++; else bi++;
         uint8_t* dst = out_base + (uint64_t)i * RECORD_SIZE;
-        const uint4* s4 = reinterpret_cast<const uint4*>(src);
-        uint4* d4 = reinterpret_cast<uint4*>(dst);
-        d4[0]=s4[0]; d4[1]=s4[1]; d4[2]=s4[2]; d4[3]=s4[3]; d4[4]=s4[4]; d4[5]=s4[5];
-        *reinterpret_cast<uint32_t*>(dst+96) = *reinterpret_cast<const uint32_t*>(src+96);
+        for (int b = 0; b < RECORD_SIZE; b += 4) {
+            *reinterpret_cast<uint32_t*>(dst + b) =
+                *reinterpret_cast<const uint32_t*>(src + b);
+        }
     }
 }
 
@@ -299,10 +299,10 @@ smem_kway_merge_kernel(
     for (int i = threadIdx.x; i < total; i += blockDim.x) {
         const uint8_t* src = src_buf + i * RECORD_SIZE;
         uint8_t* dst = output + part.out_byte_offset + (uint64_t)i * RECORD_SIZE;
-        const uint4* s4 = reinterpret_cast<const uint4*>(src);
-        uint4* d4 = reinterpret_cast<uint4*>(dst);
-        d4[0]=s4[0]; d4[1]=s4[1]; d4[2]=s4[2]; d4[3]=s4[3]; d4[4]=s4[4]; d4[5]=s4[5];
-        *reinterpret_cast<uint32_t*>(dst+96) = *reinterpret_cast<const uint32_t*>(src+96);
+        for (int b = 0; b < RECORD_SIZE; b += 4) {
+            *reinterpret_cast<uint32_t*>(dst + b) =
+                *reinterpret_cast<const uint32_t*>(src + b);
+        }
     }
 }
 
