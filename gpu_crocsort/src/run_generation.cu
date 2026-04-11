@@ -21,32 +21,26 @@ __device__ void bitonic_sort_shared(
     int n
 ) {
     int tid = threadIdx.x;
-    int half_n = n / 2;  // n should already be power-of-2 padded
 
     // Bitonic sort: O(n * log^2(n)) comparators
     for (int k = 2; k <= n; k <<= 1) {
         for (int j = k >> 1; j > 0; j >>= 1) {
             __syncthreads();
-            for (int i = tid; i < half_n; i += blockDim.x) {
-                // Compute the pair of indices to compare
-                int ixj = i ^ j;
-                // Only compare if ixj > i (each pair compared once)
-                // Map i to the actual array position
-                int pos = i;
-                int partner = ixj;
+            for (int i = tid; i < n; i += blockDim.x) {
+                int partner = i ^ j;
 
-                // Standard bitonic: compare (pos, partner) with direction based on k
-                if (partner > pos && partner < n) {
-                    bool ascending = ((pos & k) == 0);
+                // Standard bitonic: compare (i, partner) with direction based on k
+                if (partner > i && partner < n) {
+                    bool ascending = ((i & k) == 0);
                     bool need_swap = ascending
                         ? (s_keys[pos] > s_keys[partner])
                         : (s_keys[pos] < s_keys[partner]);
                     if (need_swap) {
-                        SortKey tk = s_keys[pos];
-                        s_keys[pos] = s_keys[partner];
+                        SortKey tk = s_keys[i];
+                        s_keys[i] = s_keys[partner];
                         s_keys[partner] = tk;
-                        int ti = s_indices[pos];
-                        s_indices[pos] = s_indices[partner];
+                        int ti = s_indices[i];
+                        s_indices[i] = s_indices[partner];
                         s_indices[partner] = ti;
                     }
                 }
@@ -97,7 +91,8 @@ __global__ void run_generation_kernel(
     __syncthreads();
 
     // ── Step 2: Sort keys in shared memory ──
-    bitonic_sort_shared(s_keys, s_indices, block_records);
+    // Must pass power-of-2 size (padded with max values above)
+    bitonic_sort_shared(s_keys, s_indices, RECORDS_PER_BLOCK);
 
     // ── Step 3: Write sorted records to output ──
     for (int i = tid; i < block_records; i += blockDim.x) {
