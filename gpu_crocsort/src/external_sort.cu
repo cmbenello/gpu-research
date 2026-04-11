@@ -118,9 +118,13 @@ void ExternalGpuSort::sort_chunk_on_gpu(uint8_t* d_in, uint8_t* d_scratch,
     CUDA_CHECK(cudaStreamSynchronize(s));
     cudaFree(d_ovc); cudaFree(d_sp); cudaFree(d_sc);
 
-    // Iterative 2-way merge: reads d_scratch, uses d_in as temp
-    // After this, result is in d_scratch (for even passes) or d_in (odd passes)
+    // Iterative 2-way merge: result goes into first arg (d_scratch)
     gpu_merge_pair(d_scratch, d_in, n, s);
+
+    // Copy result back to d_in so caller can find it there
+    CUDA_CHECK(cudaMemcpyAsync(d_in, d_scratch, n * RECORD_SIZE,
+                                cudaMemcpyDeviceToDevice, s));
+    CUDA_CHECK(cudaStreamSynchronize(s));
 }
 
 // 2-way merge passes entirely on GPU (data already in device memory)
