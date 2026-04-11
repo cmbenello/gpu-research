@@ -384,16 +384,22 @@ void gpu_crocsort_in_hbm(
                 uint64_t group_total = 0;
                 for (auto& r : group_runs) group_total += r.num_records;
 
+                // Use 2x safety margin since sample partitioning doesn't guarantee sizes
                 int min_partitions = (int)((group_total + max_recs_per_part - 1) / max_recs_per_part);
-                int num_partitions = std::max(min_partitions, 64);
+                int num_partitions = std::max(min_partitions * 2, 64);
 
-                // Compute partitions using sample-based boundaries
+                // Compute partitions, retry with more partitions if any exceed smem limit
                 std::vector<KWayPartition> partitions;
-                compute_sample_partitions(d_src, group_runs, g_size,
-                                          num_partitions, out_offset, partitions);
-
-                int max_rec = 0;
-                for (auto& p : partitions) max_rec = std::max(max_rec, p.total_records);
+                int max_rec;
+                for (int attempt = 0; attempt < 4; attempt++) {
+                    partitions.clear();
+                    compute_sample_partitions(d_src, group_runs, g_size,
+                                              num_partitions, out_offset, partitions);
+                    max_rec = 0;
+                    for (auto& p : partitions) max_rec = std::max(max_rec, p.total_records);
+                    if (max_rec <= max_recs_per_part) break;
+                    num_partitions *= 2; // Double and retry
+                }
 
                 // Upload partition descriptors
                 KWayPartition* d_parts;
