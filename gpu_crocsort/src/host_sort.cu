@@ -76,8 +76,8 @@ static int get_max_smem_per_block() {
 static int max_records_per_kway_partition() {
     int smem = get_max_smem_per_block();
     // Need 2 buffers (ping-pong) of total_records × RECORD_SIZE
-    // Cap at 99KB to leave room for other shared mem usage
-    int usable_smem = std::min(smem, 99 * 1024); // Stay under 100KB
+    // Cap at 47KB to stay within default 48KB limit (avoids opt-in issues on some GPUs)
+    int usable_smem = std::min(smem, 47 * 1024);
     return usable_smem / (2 * RECORD_SIZE);       // Records per partition
 }
 

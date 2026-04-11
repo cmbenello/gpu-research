@@ -14,6 +14,7 @@ detect_arch() {
             *H100*|*H200*)              echo "sm_90" ;;
             *L4*|*L40*|*4090*|*4080*)   echo "sm_89" ;;
             *A10*|*3090*|*3080*|*A6000*) echo "sm_86" ;;
+            *"RTX 6000"*|*Quadro*RTX*)   echo "sm_75" ;;
             *A100*)                     echo "sm_80" ;;
             *V100*)                     echo "sm_70" ;;
             *T4*)                       echo "sm_75" ;;
