@@ -401,24 +401,6 @@ void gpu_crocsort_in_hbm(
                     num_partitions *= 2; // Double and retry
                 }
 
-                // Verify partition integrity: each source must be fully covered
-                for (int k = 0; k < g_size; k++) {
-                    int total_from_src = 0;
-                    int prev_end = 0;
-                    for (auto& p : partitions) {
-                        if (p.src_rec_start[k] != prev_end) {
-                            printf("  WARNING: source %d gap at partition, start=%d prev_end=%d\n",
-                                   k, p.src_rec_start[k], prev_end);
-                        }
-                        total_from_src += p.src_rec_count[k];
-                        prev_end = p.src_rec_start[k] + p.src_rec_count[k];
-                    }
-                    if (total_from_src != (int)group_runs[k].num_records) {
-                        printf("  WARNING: source %d: partitions cover %d records, expected %d\n",
-                               k, total_from_src, (int)group_runs[k].num_records);
-                    }
-                }
-
                 // Upload partition descriptors
                 KWayPartition* d_parts;
                 CUDA_CHECK(cudaMalloc(&d_parts, partitions.size() * sizeof(KWayPartition)));
