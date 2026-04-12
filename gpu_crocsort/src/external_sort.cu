@@ -566,8 +566,8 @@ uint8_t* ExternalGpuSort::streaming_merge(
 
     d_perm_in = d_perm_buf.Current();
     printf("  Downloading permutation (%.2f GB)...\n", total_perm_bytes/1e9);
-    // Use regular malloc — cudaMallocHost takes ~1s for 2.4GB, pageable D2H is ~0.3s
-    uint32_t* h_perm = (uint32_t*)malloc(total_perm_bytes);
+    uint32_t* h_perm;
+    CUDA_CHECK(cudaMallocHost(&h_perm, total_perm_bytes));
     CUDA_CHECK(cudaMemcpy(h_perm, d_perm_in, total_perm_bytes, cudaMemcpyDeviceToHost));
     d2h += total_perm_bytes;
     tpoint("perm downloaded");
@@ -642,7 +642,7 @@ uint8_t* ExternalGpuSort::streaming_merge(
     printf("    Gathered in %.0f ms (%.2f GB/s)\n",
            gather_ms, total_bytes / (gather_ms * 1e6));
 
-    free(h_perm);
+    CUDA_CHECK(cudaFreeHost(h_perm));
     ms = timer.end_ms();
     return h_output;  // caller owns this buffer (allocated with malloc)
 }
