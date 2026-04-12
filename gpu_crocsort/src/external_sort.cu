@@ -114,6 +114,8 @@ struct SortWorkspace {
     SparseEntry* d_sp = nullptr;
     int* d_sc = nullptr;
     PairDesc2Way* d_merge_desc = nullptr;
+    KWayPartition* d_kway_parts = nullptr;  // pre-allocated K-way partition buffer
+    int kway_parts_capacity = 0;            // max partitions this buffer supports
     uint64_t capacity = 0;
 
     void allocate(uint64_t max_records) {
@@ -123,17 +125,24 @@ struct SortWorkspace {
         int nblocks = (max_records + RECORDS_PER_BLOCK - 1) / RECORDS_PER_BLOCK;
         int max_sp = nblocks * ((RECORDS_PER_BLOCK + SPARSE_INDEX_STRIDE - 1) / SPARSE_INDEX_STRIDE);
         int max_pairs = (max_records + 2 * RECORDS_PER_BLOCK - 1) / (2 * RECORDS_PER_BLOCK);
+        // K-way partitions: max ~2x records/max_recs_per_part, with headroom
+        int device; cudaGetDevice(&device);
+        cudaDeviceProp props; cudaGetDeviceProperties(&props, device);
+        int max_recs_per_part = (props.sharedMemPerBlockOptin - 1024) / (2 * RECORD_SIZE);
+        kway_parts_capacity = std::max(256, (int)((max_records / max_recs_per_part) * 4));
         CUDA_CHECK(cudaMalloc(&d_ovc, max_records * sizeof(uint32_t)));
         CUDA_CHECK(cudaMalloc(&d_sp, std::max(1, max_sp) * (int)sizeof(SparseEntry)));
         CUDA_CHECK(cudaMalloc(&d_sc, std::max(1, nblocks) * (int)sizeof(int)));
         CUDA_CHECK(cudaMalloc(&d_merge_desc, max_pairs * sizeof(PairDesc2Way)));
+        CUDA_CHECK(cudaMalloc(&d_kway_parts, kway_parts_capacity * sizeof(KWayPartition)));
     }
     void free() {
         if (d_ovc) { cudaFree(d_ovc); d_ovc = nullptr; }
         if (d_sp) { cudaFree(d_sp); d_sp = nullptr; }
         if (d_sc) { cudaFree(d_sc); d_sc = nullptr; }
         if (d_merge_desc) { cudaFree(d_merge_desc); d_merge_desc = nullptr; }
-        capacity = 0;
+        if (d_kway_parts) { cudaFree(d_kway_parts); d_kway_parts = nullptr; }
+        capacity = 0; kway_parts_capacity = 0;
     }
 };
 
@@ -305,14 +314,23 @@ void ExternalGpuSort::gpu_merge_inplace(uint8_t* d_src, uint8_t* d_dst,
                 num_partitions *= 2;
             }
 
-            // Upload partition descriptors and launch K-way merge
-            KWayPartition* d_parts;
-            CUDA_CHECK(cudaMalloc(&d_parts, partitions.size() * sizeof(KWayPartition)));
-            CUDA_CHECK(cudaMemcpyAsync(d_parts, partitions.data(),
-                partitions.size() * sizeof(KWayPartition), cudaMemcpyHostToDevice, s));
-            launch_merge_kway(d_src, d_dst, d_parts, (int)partitions.size(), max_rec, s);
-            CUDA_CHECK(cudaStreamSynchronize(s));
-            cudaFree(d_parts);
+            // Upload partition descriptors to pre-allocated buffer and launch
+            if ((int)partitions.size() <= sort_ws.kway_parts_capacity) {
+                CUDA_CHECK(cudaMemcpyAsync(sort_ws.d_kway_parts, partitions.data(),
+                    partitions.size() * sizeof(KWayPartition), cudaMemcpyHostToDevice, s));
+                launch_merge_kway(d_src, d_dst, sort_ws.d_kway_parts,
+                                  (int)partitions.size(), max_rec, s);
+                CUDA_CHECK(cudaStreamSynchronize(s));
+            } else {
+                // Fallback: allocate if pre-allocated buffer too small
+                KWayPartition* d_parts;
+                CUDA_CHECK(cudaMalloc(&d_parts, partitions.size() * sizeof(KWayPartition)));
+                CUDA_CHECK(cudaMemcpyAsync(d_parts, partitions.data(),
+                    partitions.size() * sizeof(KWayPartition), cudaMemcpyHostToDevice, s));
+                launch_merge_kway(d_src, d_dst, d_parts, (int)partitions.size(), max_rec, s);
+                CUDA_CHECK(cudaStreamSynchronize(s));
+                cudaFree(d_parts);
+            }
 
             uint64_t merged_records = 0;
             for (auto& r : group_runs) merged_records += r.num_records;
