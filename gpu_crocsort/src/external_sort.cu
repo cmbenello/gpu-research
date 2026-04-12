@@ -28,7 +28,7 @@
 #include <chrono>
 #include <thread>
 
-// Forward-declare the in-HBM sort from host_sort.cu (uses K-way merge tree)
+// Forward-declare the in-HBM sort from host_sort.cu
 enum MergeStrategy { STRATEGY_2WAY, STRATEGY_KWAY };
 void gpu_crocsort_in_hbm(uint8_t* d_data, uint64_t num_records,
                            bool verify, MergeStrategy strategy);
@@ -170,29 +170,29 @@ ExternalGpuSort::~ExternalGpuSort() {
     if (d_key_buffer) cudaFree(d_key_buffer);
 }
 
-// Sort a chunk on GPU: run generation + 2-way merge
-// d_in has input data, d_scratch is temp workspace. Result ends up in d_in.
+// Sort a chunk on GPU using the K-way merge tree from host_sort.cu.
+// Temporarily frees the other sort buffer to make room (gpu_crocsort_in_hbm
+// allocates its own d_sorted + d_merge_buf internally).
 void ExternalGpuSort::sort_chunk_on_gpu(uint8_t* d_in, uint8_t* d_scratch,
                                          uint64_t n, cudaStream_t s) {
-    int nblocks = (n + RECORDS_PER_BLOCK - 1) / RECORDS_PER_BLOCK;
-    int max_sp = nblocks * ((RECORDS_PER_BLOCK + SPARSE_INDEX_STRIDE - 1) / SPARSE_INDEX_STRIDE);
+    (void)s;
+    int scratch_idx = -1;
+    // Find which d_buf[] is the scratch buffer and free it
+    for (int i = 0; i < NBUFS; i++) {
+        if (d_buf[i] == d_scratch) { scratch_idx = i; break; }
+    }
+    if (scratch_idx >= 0) {
+        cudaFree(d_buf[scratch_idx]);
+        d_buf[scratch_idx] = nullptr;
+    }
 
-    uint32_t* d_ovc; SparseEntry* d_sp; int* d_sc;
-    CUDA_CHECK(cudaMalloc(&d_ovc, n * sizeof(uint32_t)));
-    CUDA_CHECK(cudaMalloc(&d_sp, std::max(1, max_sp) * (int)sizeof(SparseEntry)));
-    CUDA_CHECK(cudaMalloc(&d_sc, std::max(1, nblocks) * (int)sizeof(int)));
+    // K-way merge tree: 5-6 HBM passes instead of 17
+    gpu_crocsort_in_hbm(d_in, n, false, STRATEGY_KWAY);
 
-    launch_run_generation(d_in, d_scratch, d_ovc, n, d_sp, d_sc, nblocks, s);
-    CUDA_CHECK(cudaStreamSynchronize(s));
-    cudaFree(d_ovc); cudaFree(d_sp); cudaFree(d_sc);
-
-    // Iterative 2-way merge: result ends up in d_scratch
-    gpu_merge_inplace(d_scratch, d_in, n, s);
-
-    // Copy result back to d_in
-    CUDA_CHECK(cudaMemcpyAsync(d_in, d_scratch, n * RECORD_SIZE,
-                                cudaMemcpyDeviceToDevice, s));
-    CUDA_CHECK(cudaStreamSynchronize(s));
+    // Re-allocate scratch buffer
+    if (scratch_idx >= 0) {
+        CUDA_CHECK(cudaMalloc(&d_buf[scratch_idx], buf_bytes));
+    }
 }
 
 void ExternalGpuSort::gpu_merge_inplace(uint8_t* d_src, uint8_t* d_dst,
