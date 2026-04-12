@@ -241,7 +241,7 @@ private:
     uint8_t* streaming_merge(uint8_t* h_data, uint64_t num_records,
                               std::vector<RunInfo>& runs,
                               double& ms, int& passes, double& h2d, double& d2h,
-                              uint32_t* h_perm_prealloc);
+                              uint32_t* h_perm_prealloc, uint8_t* h_output_prealloc);
 
 };
 
@@ -430,7 +430,7 @@ uint8_t* ExternalGpuSort::streaming_merge(
     uint8_t* h_data, uint64_t num_records,
     std::vector<RunInfo>& runs,
     double& ms, int& passes, double& h2d, double& d2h,
-    uint32_t* h_perm_prealloc
+    uint32_t* h_perm_prealloc, uint8_t* h_output_prealloc
 ) {
     if (runs.size() <= 1) { ms = 0; passes = 0; h2d = d2h = 0; return nullptr; }
 
@@ -580,9 +580,13 @@ uint8_t* ExternalGpuSort::streaming_merge(
     int num_threads = std::min(48, (int)std::thread::hardware_concurrency());
     printf("  CPU value gather (%.2f GB, %d threads)...\n", total_bytes/1e9, num_threads);
 
-    uint8_t* h_output = (uint8_t*)malloc(total_bytes);
-    if (!h_output) { fprintf(stderr, "malloc failed for gather output\n"); ms = timer.end_ms(); return nullptr; }
-    madvise(h_output, total_bytes, MADV_HUGEPAGE);
+    // Use pre-allocated output buffer if available (allocated before run gen)
+    uint8_t* h_output = h_output_prealloc;
+    if (!h_output) {
+        h_output = (uint8_t*)malloc(total_bytes);
+        if (!h_output) { fprintf(stderr, "malloc failed for gather output\n"); ms = timer.end_ms(); return nullptr; }
+        madvise(h_output, total_bytes, MADV_HUGEPAGE);
+    }
 
     // Free GPU memory while perm downloads
     if (d_merge_arena) { cudaFree(d_merge_arena); d_merge_arena = nullptr; }
@@ -695,12 +699,15 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
     }
     run_key_offsets.clear();
 
-    // Pre-allocate sort workspace and host permutation buffer
+    // Pre-allocate sort workspace and host buffers for merge phase
     sort_ws.allocate(buf_records);
     // Pre-allocate pinned host perm buffer NOW to avoid 1s cudaMallocHost during merge
     uint32_t* h_perm_prealloc = nullptr;
     uint64_t total_perm_bytes_prealloc = num_records * sizeof(uint32_t);
-    cudaMallocHost(&h_perm_prealloc, total_perm_bytes_prealloc); // non-critical if fails
+    cudaMallocHost(&h_perm_prealloc, total_perm_bytes_prealloc);
+    // Pre-allocate gather output buffer NOW (hidden behind run gen time)
+    uint8_t* h_output_prealloc = (uint8_t*)malloc(total_bytes);
+    if (h_output_prealloc) madvise(h_output_prealloc, total_bytes, MADV_HUGEPAGE);
 
     printf("\n== Phase 1: Run Generation (pipelined) ==\n");
     double rg_h2d = 0, rg_d2h = 0;
@@ -718,7 +725,7 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
     double mg_h2d = 0, mg_d2h = 0;
     r.sorted_output = streaming_merge(h_data, num_records, runs,
                                        r.merge_ms, r.merge_passes, mg_h2d, mg_d2h,
-                                       h_perm_prealloc);
+                                       h_perm_prealloc, h_output_prealloc);
 
     r.pcie_h2d_gb = (rg_h2d + mg_h2d) / 1e9;
     r.pcie_d2h_gb = (rg_d2h + mg_d2h) / 1e9;
