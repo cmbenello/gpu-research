@@ -438,6 +438,17 @@ uint8_t* ExternalGpuSort::streaming_merge(
     uint64_t total_keys_bytes = num_records * KEY_SIZE;
     uint64_t total_perm_bytes = num_records * sizeof(uint32_t);
 
+    // Detailed merge phase profiling
+    auto tpoint = [](const char* label) {
+        static std::chrono::high_resolution_clock::time_point prev;
+        auto now = std::chrono::high_resolution_clock::now();
+        if (label[0] != '_')
+            printf("    [merge] %-30s %6.0f ms\n", label,
+                   std::chrono::duration<double,std::milli>(now - prev).count());
+        prev = now;
+    };
+    tpoint("_start");
+
     WallTimer timer; timer.begin();
 
     // Build global index mapping
@@ -488,9 +499,9 @@ uint8_t* ExternalGpuSort::streaming_merge(
         h2d += total_keys_bytes;
     }
 
+    tpoint("keys ready");
+
     // ── Step 3: CUB radix sort ALL keys + permutation in ONE pass ──
-    // Reuse sort buffers (d_buf[0], d_buf[1]) as merge workspace — NO new allocation!
-    // d_buf[0] + d_buf[1] = 2 × buf_bytes = ~10-16GB, plenty for N×24B merge buffers.
     passes = 1;
     printf("  CUB radix sort on all %lu keys (single pass)...\n", num_records);
 
@@ -527,15 +538,12 @@ uint8_t* ExternalGpuSort::streaming_merge(
         d_temp = (void*)(d_perm_out + num_records);
     }
 
-    // Initialize permutation to identity on GPU
+    tpoint("alloc merge workspace");
+
+    // Init perm + extract keys — both on GPU, overlapped on same stream
     {
         int nt = 256, nb = (num_records + nt - 1) / nt;
         init_identity_kernel<<<nb, nt, 0, streams[0]>>>(d_perm_in, num_records);
-    }
-
-    // Extract uint64 from 10-byte keys
-    {
-        int nt = 256, nb = (num_records + nt - 1) / nt;
         extract_uint64_from_keys_kernel<<<nb, nt, 0, streams[0]>>>(
             d_keys_in, d_sort_keys, num_records);
     }
@@ -544,6 +552,7 @@ uint8_t* ExternalGpuSort::streaming_merge(
     if (allocated_keys_gpu && d_keys_in) { CUDA_CHECK(cudaFree(d_keys_in)); d_keys_in = nullptr; }
     if (d_keys_out) { CUDA_CHECK(cudaFree(d_keys_out)); d_keys_out = nullptr; }
     if (d_key_buffer) { cudaFree(d_key_buffer); d_key_buffer = nullptr; }
+    tpoint("init perm + extract keys + free bufs");
 
     // CUB sort (uint64 key, uint32 perm) pairs
     cub::DoubleBuffer<uint64_t> d_sortkey_buf(d_sort_keys, d_sort_keys_alt);
@@ -553,14 +562,15 @@ uint8_t* ExternalGpuSort::streaming_merge(
         d_sortkey_buf, d_perm_buf, (int)num_records, 0, 64, streams[0]);
     CUDA_CHECK(cudaStreamSynchronize(streams[0]));
 
-    // The sorted permutation is in d_perm_buf.Current()
-    // Make sure d_perm_in points to the sorted result
+    tpoint("CUB radix sort done");
+
     d_perm_in = d_perm_buf.Current();
     printf("  Downloading permutation (%.2f GB)...\n", total_perm_bytes/1e9);
     uint32_t* h_perm;
     CUDA_CHECK(cudaMallocHost(&h_perm, total_perm_bytes));
     CUDA_CHECK(cudaMemcpy(h_perm, d_perm_in, total_perm_bytes, cudaMemcpyDeviceToHost));
     d2h += total_perm_bytes;
+    tpoint("perm downloaded");
 
     // Free merge workspace
     if (d_merge_arena) { CUDA_CHECK(cudaFree(d_merge_arena)); }
@@ -568,6 +578,7 @@ uint8_t* ExternalGpuSort::streaming_merge(
         if (d_buf[i]) { cudaFree(d_buf[i]); d_buf[i] = nullptr; }
     }
     if (h_keys) CUDA_CHECK(cudaFreeHost(h_keys));
+    tpoint("freed GPU memory");
 
     // ── Step 5: Multi-threaded CPU value gather using permutation ──
     int num_threads = std::min(48, (int)std::thread::hardware_concurrency());
