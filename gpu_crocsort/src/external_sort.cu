@@ -64,20 +64,42 @@ static uint64_t host_upper_bound(const uint8_t* data, uint64_t n, const uint8_t*
     return lo;
 }
 
+// ── GPU key extraction kernel ────────────────────────────────────────
+// Extract KEY_SIZE bytes from each sorted record into a contiguous key array.
+// Runs at HBM bandwidth (~672 GB/s), essentially free compared to PCIe.
+
+__global__ void extract_keys_kernel(
+    const uint8_t* __restrict__ sorted_records,
+    uint8_t* __restrict__ key_buffer,
+    uint64_t num_records
+) {
+    uint64_t i = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= num_records) return;
+    const uint8_t* src = sorted_records + i * RECORD_SIZE;
+    uint8_t* dst = key_buffer + i * KEY_SIZE;
+    // Copy 10-byte key
+    for (int b = 0; b < KEY_SIZE; b++) dst[b] = src[b];
+}
+
 // ============================================================================
 // External Sort Engine
 // ============================================================================
 
 class ExternalGpuSort {
-    // Triple-buffer: 3 device buffers + 3 pinned host buffers
     static constexpr int NBUFS = 3;
     size_t gpu_budget;
-    uint64_t buf_records;  // records per buffer
+    uint64_t buf_records;
     size_t buf_bytes;
     uint8_t* d_buf[NBUFS];
     uint8_t* h_pin[NBUFS];
     cudaStream_t streams[NBUFS];
     cudaEvent_t events[NBUFS];
+
+    // Persistent key buffer: holds sorted keys from ALL runs
+    // Stays on GPU across run generation, used directly by merge phase
+    uint8_t* d_key_buffer;
+    uint64_t key_buffer_capacity;  // total bytes allocated
+    std::vector<uint64_t> run_key_offsets;  // byte offset per run in d_key_buffer
 
 public:
     struct TimingResult {
@@ -111,9 +133,10 @@ private:
 ExternalGpuSort::ExternalGpuSort() {
     size_t free_mem, total_mem;
     CUDA_CHECK(cudaMemGetInfo(&free_mem, &total_mem));
-    gpu_budget = (size_t)(free_mem * 0.70);
-    // 3 buffers for triple-buffering during run gen
-    // During merge we reuse 2 of them (input + output)
+    // Reserve 10% for key buffer, use 60% for sort buffers
+    gpu_budget = (size_t)(free_mem * 0.60);
+    key_buffer_capacity = (size_t)(free_mem * 0.10);  // ~2.5GB for keys
+    d_key_buffer = nullptr; // allocated lazily in sort()
     buf_records = (gpu_budget / NBUFS) / RECORD_SIZE;
     buf_bytes = buf_records * RECORD_SIZE;
 
@@ -137,6 +160,7 @@ ExternalGpuSort::~ExternalGpuSort() {
         cudaStreamDestroy(streams[i]);
         cudaEventDestroy(events[i]);
     }
+    if (d_key_buffer) cudaFree(d_key_buffer);
 }
 
 // Sort a chunk on GPU: run generation + iterative 2-way merge
@@ -248,7 +272,19 @@ ExternalGpuSort::generate_runs_pipelined(
         // Sort (uses d_buf[cur] as input, d_buf[scratch] as temp)
         sort_chunk_on_gpu(d_buf[cur], d_buf[scratch], cur_n, streams[1]);
 
-        // Download (result is in d_buf[cur])
+        // Extract keys to persistent GPU key buffer (essentially free at HBM bandwidth)
+        uint64_t key_off = run_key_offsets.empty() ? 0 :
+            run_key_offsets.back() + (runs.empty() ? 0 : runs.back().num_records * KEY_SIZE);
+        if (d_key_buffer && (key_off + cur_n * KEY_SIZE) <= key_buffer_capacity) {
+            int nthreads = 256;
+            int nblocks_k = (cur_n + nthreads - 1) / nthreads;
+            extract_keys_kernel<<<nblocks_k, nthreads, 0, streams[1]>>>(
+                d_buf[cur], d_key_buffer + key_off, cur_n);
+            CUDA_CHECK(cudaStreamSynchronize(streams[1]));
+            run_key_offsets.push_back(key_off);
+        }
+
+        // Download sorted records (result is in d_buf[cur])
         CUDA_CHECK(cudaMemcpyAsync(h_pin[cur], d_buf[cur], cur_bytes,
                                     cudaMemcpyDeviceToHost, streams[2]));
         CUDA_CHECK(cudaStreamSynchronize(streams[2]));
@@ -307,65 +343,64 @@ void ExternalGpuSort::streaming_merge(
 
     WallTimer timer; timer.begin();
 
-    // ── Step 1: Extract keys from all runs on CPU ──
-    printf("  Extracting %lu keys (%.2f GB)...\n", num_records, total_keys_bytes/1e9);
-    WallTimer ext_timer; ext_timer.begin();
-
-    uint8_t* h_keys;
-    CUDA_CHECK(cudaMallocHost(&h_keys, total_keys_bytes));
-    // Build global index mapping: for each run, its starting global index
-    std::vector<uint64_t> run_key_offsets(K);  // byte offset of run's keys in h_keys
-    std::vector<uint64_t> run_global_base(K);  // global record index of run's first record
-    uint64_t key_off = 0, global_idx = 0;
+    // Build global index mapping
+    std::vector<uint64_t> merge_key_offsets(K);
+    std::vector<uint64_t> run_global_base(K);
+    uint64_t global_idx = 0;
     for (int r = 0; r < K; r++) {
-        run_key_offsets[r] = key_off;
         run_global_base[r] = global_idx;
-        // Extract keys from run r
-        const uint8_t* run_data = h_data + runs[r].host_offset;
-        uint8_t* key_dst = h_keys + key_off;
-        for (uint64_t i = 0; i < runs[r].num_records; i++) {
-            memcpy(key_dst + i * KEY_SIZE, run_data + i * RECORD_SIZE, KEY_SIZE);
-        }
-        key_off += runs[r].num_records * KEY_SIZE;
         global_idx += runs[r].num_records;
     }
-    printf("    Extracted in %.0f ms\n", ext_timer.end_ms());
 
-    // ── Step 2: Upload all keys to GPU ──
-    // Check if keys fit in GPU memory (need keys_in + keys_out + perm = N*10 + N*10 + N*4)
-    uint64_t gpu_needed = total_keys_bytes * 2 + total_perm_bytes;
-    size_t free_mem, total_mem;
-    CUDA_CHECK(cudaMemGetInfo(&free_mem, &total_mem));
+    // ── Step 1+2: Get keys onto GPU ──
+    // Check if keys were retained on GPU during run generation
+    bool keys_retained = (d_key_buffer != nullptr &&
+                          (int)run_key_offsets.size() == K);
 
-    if (gpu_needed > free_mem * 0.9) {
-        // Keys don't fit — this would need >2.4 billion records (240GB data).
-        // Fall back to iterative approach.
-        printf("  Keys too large for GPU (need %.2f GB, have %.2f GB free)\n",
-               gpu_needed/1e9, free_mem/1e9);
-        printf("  Falling back to CPU merge...\n");
-        // Simple CPU merge fallback (same as before)
-        // ... (for now, this case won't happen with our test sizes)
-        CUDA_CHECK(cudaFreeHost(h_keys));
-        ms = timer.end_ms(); passes = 0;
-        return;
-    }
-
-    printf("  Uploading %.2f GB keys to GPU...\n", total_keys_bytes/1e9);
     uint8_t *d_keys_in, *d_keys_out;
     uint32_t *d_perm_in, *d_perm_out;
-    CUDA_CHECK(cudaMalloc(&d_keys_in, total_keys_bytes));
+    uint8_t* h_keys = nullptr;  // only allocated if keys not retained
+    bool allocated_keys_gpu = false;
+
+    if (keys_retained) {
+        printf("  Keys already on GPU from run generation (%.2f GB, saved upload!)\n",
+               total_keys_bytes / 1e9);
+        // Keys are in d_key_buffer at known offsets — use directly as d_keys_in
+        d_keys_in = d_key_buffer;
+        for (int r = 0; r < K; r++) merge_key_offsets[r] = run_key_offsets[r];
+    } else {
+        // Fallback: extract keys on CPU and upload
+        printf("  Extracting %lu keys (%.2f GB) on CPU...\n", num_records, total_keys_bytes/1e9);
+        WallTimer ext_timer; ext_timer.begin();
+        CUDA_CHECK(cudaMallocHost(&h_keys, total_keys_bytes));
+        uint64_t key_off = 0;
+        for (int r = 0; r < K; r++) {
+            merge_key_offsets[r] = key_off;
+            const uint8_t* run_data = h_data + runs[r].host_offset;
+            uint8_t* key_dst = h_keys + key_off;
+            for (uint64_t i = 0; i < runs[r].num_records; i++)
+                memcpy(key_dst + i * KEY_SIZE, run_data + i * RECORD_SIZE, KEY_SIZE);
+            key_off += runs[r].num_records * KEY_SIZE;
+        }
+        printf("    Extracted in %.0f ms\n", ext_timer.end_ms());
+
+        printf("  Uploading %.2f GB keys to GPU...\n", total_keys_bytes/1e9);
+        CUDA_CHECK(cudaMalloc(&d_keys_in, total_keys_bytes));
+        allocated_keys_gpu = true;
+        CUDA_CHECK(cudaMemcpy(d_keys_in, h_keys, total_keys_bytes, cudaMemcpyHostToDevice));
+        h2d += total_keys_bytes;
+    }
+
+    // Allocate merge workspace
     CUDA_CHECK(cudaMalloc(&d_keys_out, total_keys_bytes));
     CUDA_CHECK(cudaMalloc(&d_perm_in, total_perm_bytes));
     CUDA_CHECK(cudaMalloc(&d_perm_out, total_perm_bytes));
-
-    CUDA_CHECK(cudaMemcpy(d_keys_in, h_keys, total_keys_bytes, cudaMemcpyHostToDevice));
-    h2d += total_keys_bytes;
 
     // ── Step 3: GPU iterative 2-way merge on keys only ──
     struct KeyRun { uint64_t key_byte_offset; uint64_t num_records; uint64_t perm_offset; };
     std::vector<KeyRun> key_runs(K);
     for (int r = 0; r < K; r++) {
-        key_runs[r] = {run_key_offsets[r], runs[r].num_records, run_global_base[r]};
+        key_runs[r] = {merge_key_offsets[r], runs[r].num_records, run_global_base[r]};
     }
 
     // Initialize permutation: identity mapping (global index)
@@ -448,11 +483,11 @@ void ExternalGpuSort::streaming_merge(
     CUDA_CHECK(cudaMemcpy(h_perm, d_perm_in, total_perm_bytes, cudaMemcpyDeviceToHost));
     d2h += total_perm_bytes;
 
-    CUDA_CHECK(cudaFree(d_keys_in));
+    if (allocated_keys_gpu) CUDA_CHECK(cudaFree(d_keys_in));
     CUDA_CHECK(cudaFree(d_keys_out));
     CUDA_CHECK(cudaFree(d_perm_in));
     CUDA_CHECK(cudaFree(d_perm_out));
-    CUDA_CHECK(cudaFreeHost(h_keys));
+    if (h_keys) CUDA_CHECK(cudaFreeHost(h_keys));
 
     // ── Step 5: CPU value gather using permutation ──
     printf("  CPU value gather (%.2f GB)...\n", total_bytes/1e9);
@@ -506,7 +541,18 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
         return r;
     }
 
-    printf("== Phase 1: Run Generation (pipelined) ==\n");
+    // Allocate persistent key buffer for key retention across run generation
+    uint64_t total_keys_bytes = num_records * KEY_SIZE;
+    if (total_keys_bytes <= key_buffer_capacity) {
+        CUDA_CHECK(cudaMalloc(&d_key_buffer, total_keys_bytes));
+        printf("  Key retention: %.2f GB GPU key buffer allocated\n", total_keys_bytes/1e9);
+    } else {
+        printf("  Key retention: keys too large (%.2f GB > %.2f GB budget), will extract on CPU\n",
+               total_keys_bytes/1e9, key_buffer_capacity/1e9);
+    }
+    run_key_offsets.clear();
+
+    printf("\n== Phase 1: Run Generation (pipelined) ==\n");
     double rg_h2d = 0, rg_d2h = 0;
     auto runs = generate_runs_pipelined(h_data, num_records,
                                          r.run_gen_ms, rg_h2d, rg_d2h);
