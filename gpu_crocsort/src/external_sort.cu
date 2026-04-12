@@ -304,10 +304,10 @@ void ExternalGpuSort::sort_chunk_on_gpu(uint8_t* d_in, uint8_t* d_scratch,
     reorder_records_kernel<<<nblks, nthreads, 0, s>>>(
         d_in, d_scratch, d_idx_buf.Current(), n);
 
-    // Copy sorted result back to d_in
+    // Copy sorted result back to d_in (async — no CPU sync needed)
     CUDA_CHECK(cudaMemcpyAsync(d_in, d_scratch, n * RECORD_SIZE,
                                 cudaMemcpyDeviceToDevice, s));
-    CUDA_CHECK(cudaStreamSynchronize(s));
+    // Don't sync here — let the caller manage dependencies via events
 }
 
 // gpu_merge_inplace removed — CUB radix sort replaced bitonic+K-way merge
@@ -360,12 +360,10 @@ ExternalGpuSort::generate_runs_pipelined(
         CUDA_CHECK(cudaEventRecord(events[0], streams[0]));
         CUDA_CHECK(cudaStreamWaitEvent(streams[1], events[0], 0));
 
-        // Also wait for previous D2H to finish (it reads d_buf[prev], not d_buf[cur],
-        // but the sort needs d_buf[scratch]=d_buf[2] which might still be in use
-        // by the previous sort's internal operations)
-        CUDA_CHECK(cudaStreamSynchronize(streams[2]));
-
         // Sort (GPU-side wait for H2D via event — no CPU blocking)
+        // Note: d_buf[scratch]=d_buf[2] is safe because the previous sort already
+        // completed (synced on stream[1] in key extraction). The D2H on stream[2]
+        // reads d_buf[prev_cur], not d_buf[2].
         sort_chunk_on_gpu(d_buf[cur], d_buf[scratch], cur_n, streams[1]);
 
         // Extract keys to persistent GPU key buffer
@@ -376,11 +374,16 @@ ExternalGpuSort::generate_runs_pipelined(
             int nblocks_k = (cur_n + nthreads - 1) / nthreads;
             extract_keys_kernel<<<nblocks_k, nthreads, 0, streams[1]>>>(
                 d_buf[cur], d_key_buffer + key_off, cur_n);
-            CUDA_CHECK(cudaStreamSynchronize(streams[1]));
+            // No sync needed — next sort uses d_buf[nxt], not d_buf[cur]
+            // Key extraction on stream[1] auto-orders before next sort on stream[1]
             run_key_offsets.push_back(key_off);
         }
 
-        // Download directly to h_data (pinned memory — no intermediate copy)
+        // Make D2H stream wait for sort+key extraction on stream[1] to finish
+        CUDA_CHECK(cudaEventRecord(events[1], streams[1]));
+        CUDA_CHECK(cudaStreamWaitEvent(streams[2], events[1], 0));
+
+        // Download directly to h_data (async, overlaps with next chunk's H2D+sort)
         CUDA_CHECK(cudaMemcpyAsync(h_data + offset * RECORD_SIZE, d_buf[cur], cur_bytes,
                                     cudaMemcpyDeviceToHost, streams[2]));
         d2h += cur_bytes;
