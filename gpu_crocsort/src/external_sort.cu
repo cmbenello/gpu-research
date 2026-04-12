@@ -238,10 +238,10 @@ private:
         uint8_t* h_data, uint64_t num_records,
         double& ms, double& h2d, double& d2h);
 
-    // Returns pointer to sorted output (allocated with malloc, caller frees)
     uint8_t* streaming_merge(uint8_t* h_data, uint64_t num_records,
                               std::vector<RunInfo>& runs,
-                              double& ms, int& passes, double& h2d, double& d2h);
+                              double& ms, int& passes, double& h2d, double& d2h,
+                              uint32_t* h_perm_prealloc);
 
 };
 
@@ -429,7 +429,8 @@ extern "C" void launch_merge_keys_only(
 uint8_t* ExternalGpuSort::streaming_merge(
     uint8_t* h_data, uint64_t num_records,
     std::vector<RunInfo>& runs,
-    double& ms, int& passes, double& h2d, double& d2h
+    double& ms, int& passes, double& h2d, double& d2h,
+    uint32_t* h_perm_prealloc
 ) {
     if (runs.size() <= 1) { ms = 0; passes = 0; h2d = d2h = 0; return nullptr; }
 
@@ -566,8 +567,8 @@ uint8_t* ExternalGpuSort::streaming_merge(
 
     d_perm_in = d_perm_buf.Current();
     printf("  Downloading permutation (%.2f GB)...\n", total_perm_bytes/1e9);
-    uint32_t* h_perm;
-    CUDA_CHECK(cudaMallocHost(&h_perm, total_perm_bytes));
+    uint32_t* h_perm = h_perm_prealloc;  // pre-allocated in sort() before run gen
+    if (!h_perm) { CUDA_CHECK(cudaMallocHost(&h_perm, total_perm_bytes)); } // fallback
     CUDA_CHECK(cudaMemcpy(h_perm, d_perm_in, total_perm_bytes, cudaMemcpyDeviceToHost));
     d2h += total_perm_bytes;
     tpoint("perm downloaded");
@@ -689,8 +690,12 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
     }
     run_key_offsets.clear();
 
-    // Pre-allocate sort workspace (OVC, sparse, merge descriptors) ONCE
+    // Pre-allocate sort workspace and host permutation buffer
     sort_ws.allocate(buf_records);
+    // Pre-allocate pinned host perm buffer NOW to avoid 1s cudaMallocHost during merge
+    uint32_t* h_perm_prealloc = nullptr;
+    uint64_t total_perm_bytes_prealloc = num_records * sizeof(uint32_t);
+    cudaMallocHost(&h_perm_prealloc, total_perm_bytes_prealloc); // non-critical if fails
 
     printf("\n== Phase 1: Run Generation (pipelined) ==\n");
     double rg_h2d = 0, rg_d2h = 0;
@@ -707,7 +712,8 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
     printf("== Phase 2: GPU Streaming Merge ==\n");
     double mg_h2d = 0, mg_d2h = 0;
     r.sorted_output = streaming_merge(h_data, num_records, runs,
-                                       r.merge_ms, r.merge_passes, mg_h2d, mg_d2h);
+                                       r.merge_ms, r.merge_passes, mg_h2d, mg_d2h,
+                                       h_perm_prealloc);
 
     r.pcie_h2d_gb = (rg_h2d + mg_h2d) / 1e9;
     r.pcie_d2h_gb = (rg_d2h + mg_d2h) / 1e9;
