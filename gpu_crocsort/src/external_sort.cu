@@ -87,6 +87,35 @@ __global__ void extract_keys_kernel(
     for (int b = 0; b < KEY_SIZE; b++) dst[b] = src[b];
 }
 
+// Pre-allocated workspace for sort_chunk_on_gpu (allocated once, reused per chunk)
+struct SortWorkspace {
+    uint32_t* d_ovc = nullptr;
+    SparseEntry* d_sp = nullptr;
+    int* d_sc = nullptr;
+    PairDesc2Way* d_merge_desc = nullptr;
+    uint64_t capacity = 0;
+
+    void allocate(uint64_t max_records) {
+        if (capacity >= max_records) return;
+        free();
+        capacity = max_records;
+        int nblocks = (max_records + RECORDS_PER_BLOCK - 1) / RECORDS_PER_BLOCK;
+        int max_sp = nblocks * ((RECORDS_PER_BLOCK + SPARSE_INDEX_STRIDE - 1) / SPARSE_INDEX_STRIDE);
+        int max_pairs = (max_records + 2 * RECORDS_PER_BLOCK - 1) / (2 * RECORDS_PER_BLOCK);
+        CUDA_CHECK(cudaMalloc(&d_ovc, max_records * sizeof(uint32_t)));
+        CUDA_CHECK(cudaMalloc(&d_sp, std::max(1, max_sp) * (int)sizeof(SparseEntry)));
+        CUDA_CHECK(cudaMalloc(&d_sc, std::max(1, nblocks) * (int)sizeof(int)));
+        CUDA_CHECK(cudaMalloc(&d_merge_desc, max_pairs * sizeof(PairDesc2Way)));
+    }
+    void free() {
+        if (d_ovc) { cudaFree(d_ovc); d_ovc = nullptr; }
+        if (d_sp) { cudaFree(d_sp); d_sp = nullptr; }
+        if (d_sc) { cudaFree(d_sc); d_sc = nullptr; }
+        if (d_merge_desc) { cudaFree(d_merge_desc); d_merge_desc = nullptr; }
+        capacity = 0;
+    }
+};
+
 // ============================================================================
 // External Sort Engine
 // ============================================================================
@@ -174,34 +203,6 @@ ExternalGpuSort::~ExternalGpuSort() {
 }
 
 // Pre-allocated workspace for sort_chunk_on_gpu (allocated once in sort())
-struct SortWorkspace {
-    uint32_t* d_ovc = nullptr;
-    SparseEntry* d_sp = nullptr;
-    int* d_sc = nullptr;
-    PairDesc2Way* d_merge_desc = nullptr;
-    uint64_t capacity = 0;  // max records this workspace supports
-
-    void allocate(uint64_t max_records) {
-        if (capacity >= max_records) return;
-        free();
-        capacity = max_records;
-        int nblocks = (max_records + RECORDS_PER_BLOCK - 1) / RECORDS_PER_BLOCK;
-        int max_sp = nblocks * ((RECORDS_PER_BLOCK + SPARSE_INDEX_STRIDE - 1) / SPARSE_INDEX_STRIDE);
-        int max_pairs = (max_records + 2 * RECORDS_PER_BLOCK - 1) / (2 * RECORDS_PER_BLOCK);
-        CUDA_CHECK(cudaMalloc(&d_ovc, max_records * sizeof(uint32_t)));
-        CUDA_CHECK(cudaMalloc(&d_sp, std::max(1, max_sp) * (int)sizeof(SparseEntry)));
-        CUDA_CHECK(cudaMalloc(&d_sc, std::max(1, nblocks) * (int)sizeof(int)));
-        CUDA_CHECK(cudaMalloc(&d_merge_desc, max_pairs * sizeof(PairDesc2Way)));
-    }
-    void free() {
-        if (d_ovc) { cudaFree(d_ovc); d_ovc = nullptr; }
-        if (d_sp) { cudaFree(d_sp); d_sp = nullptr; }
-        if (d_sc) { cudaFree(d_sc); d_sc = nullptr; }
-        if (d_merge_desc) { cudaFree(d_merge_desc); d_merge_desc = nullptr; }
-        capacity = 0;
-    }
-};
-
 // Sort a chunk on GPU: run generation + 2-way merge (no per-call allocations)
 void ExternalGpuSort::sort_chunk_on_gpu(uint8_t* d_in, uint8_t* d_scratch,
                                          uint64_t n, cudaStream_t s) {
