@@ -133,9 +133,10 @@ private:
 ExternalGpuSort::ExternalGpuSort() {
     size_t free_mem, total_mem;
     CUDA_CHECK(cudaMemGetInfo(&free_mem, &total_mem));
-    // Reserve 10% for key buffer, use 60% for sort buffers
-    gpu_budget = (size_t)(free_mem * 0.60);
-    key_buffer_capacity = (size_t)(free_mem * 0.10);  // ~2.5GB for keys
+    // Reserve up to 30% for key buffer (keys are 10% of records, so 30% covers 3x record capacity)
+    // Use 55% for sort buffers (3 buffers of ~4.6GB each)
+    gpu_budget = (size_t)(free_mem * 0.55);
+    key_buffer_capacity = (size_t)(free_mem * 0.30);  // ~7.5GB for keys = up to 75GB data
     d_key_buffer = nullptr; // allocated lazily in sort()
     buf_records = (gpu_budget / NBUFS) / RECORD_SIZE;
     buf_bytes = buf_records * RECORD_SIZE;
