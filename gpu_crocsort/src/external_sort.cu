@@ -387,13 +387,11 @@ ExternalGpuSort::generate_runs_pipelined(
         int cur = c % 2;
         int scratch = 2;
 
-        // Wait for any previous D2H into h_pin[cur] to finish
-        // (from 2 chunks ago using the same buffer)
+        // Wait for any previous D2H to finish
         CUDA_CHECK(cudaStreamSynchronize(streams[2]));
 
-        // Upload: stage to pinned then async H2D
-        memcpy(h_pin[cur], h_data + offset * RECORD_SIZE, cur_bytes);
-        CUDA_CHECK(cudaMemcpyAsync(d_buf[cur], h_pin[cur], cur_bytes,
+        // Upload directly from h_data (pinned memory — no staging copy needed)
+        CUDA_CHECK(cudaMemcpyAsync(d_buf[cur], h_data + offset * RECORD_SIZE, cur_bytes,
                                     cudaMemcpyHostToDevice, streams[0]));
         CUDA_CHECK(cudaStreamSynchronize(streams[0]));
         h2d += cur_bytes;
@@ -413,16 +411,8 @@ ExternalGpuSort::generate_runs_pipelined(
             run_key_offsets.push_back(key_off);
         }
 
-        // If previous chunk's D2H completed, copy its pinned data to final destination
-        int prev = 1 - cur;
-        if (c > 0) {
-            uint64_t prev_offset = (uint64_t)(c-1) * buf_records;
-            uint64_t prev_n = std::min(buf_records, num_records - prev_offset);
-            memcpy(h_data + prev_offset * RECORD_SIZE, h_pin[prev], prev_n * RECORD_SIZE);
-        }
-
-        // Start async D2H of current chunk (overlaps with next iteration's CPU staging)
-        CUDA_CHECK(cudaMemcpyAsync(h_pin[cur], d_buf[cur], cur_bytes,
+        // Download directly to h_data (pinned memory — no intermediate copy)
+        CUDA_CHECK(cudaMemcpyAsync(h_data + offset * RECORD_SIZE, d_buf[cur], cur_bytes,
                                     cudaMemcpyDeviceToHost, streams[2]));
         d2h += cur_bytes;
 
@@ -432,14 +422,8 @@ ExternalGpuSort::generate_runs_pipelined(
         fflush(stdout);
     }
 
-    // Finalize: wait for last D2H and copy to destination
+    // Finalize: wait for last D2H to complete
     CUDA_CHECK(cudaStreamSynchronize(streams[2]));
-    if (total_chunks > 0) {
-        int last = (total_chunks - 1) % 2;
-        uint64_t last_offset = (uint64_t)(total_chunks - 1) * buf_records;
-        uint64_t last_n = std::min(buf_records, num_records - last_offset);
-        memcpy(h_data + last_offset * RECORD_SIZE, h_pin[last], last_n * RECORD_SIZE);
-    }
     printf("\n");
     ms = timer.end_ms();
     return runs;
@@ -833,9 +817,14 @@ int main(int argc, char** argv) {
     printf("Data: %.2f GB (%lu records × %d bytes)\n\n",
            total_bytes/1e9, num_records, RECORD_SIZE);
 
-    printf("Allocating %.2f GB host memory...\n", total_bytes/1e9);
-    uint8_t* h_data = (uint8_t*)malloc(total_bytes);
-    if (!h_data) { fprintf(stderr,"malloc failed\n"); return 1; }
+    printf("Allocating %.2f GB pinned host memory...\n", total_bytes/1e9);
+    uint8_t* h_data;
+    cudaError_t alloc_err = cudaMallocHost(&h_data, total_bytes);
+    if (alloc_err != cudaSuccess) {
+        printf("  cudaMallocHost failed, falling back to malloc\n");
+        h_data = (uint8_t*)malloc(total_bytes);
+    }
+    if (!h_data) { fprintf(stderr,"allocation failed\n"); return 1; }
 
     printf("Generating random data...\n");
     WallTimer gt; gt.begin();
@@ -864,7 +853,8 @@ int main(int argc, char** argv) {
            result.pcie_h2d_gb + result.pcie_d2h_gb,
            (result.pcie_h2d_gb + result.pcie_d2h_gb) / (total_bytes/1e9));
 
-    free(h_data);
+    if (alloc_err == cudaSuccess) cudaFreeHost(h_data);
+    else free(h_data);
     return 0;
 }
 #endif
