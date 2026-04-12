@@ -194,8 +194,15 @@ void ExternalGpuSort::gpu_merge_inplace(uint8_t* d_src, uint8_t* d_dst,
     int items_per_blk = MERGE_ITEMS_PER_THREAD_CFG * MERGE_BLOCK_THREADS_CFG;
     int num_passes = 0;
 
+    // Pre-allocate descriptor buffer (max pairs = n / (2 * RECORDS_PER_BLOCK))
+    int max_pairs = (int)((n + 2 * RECORDS_PER_BLOCK - 1) / (2 * RECORDS_PER_BLOCK));
+    PairDesc2Way* dp;
+    CUDA_CHECK(cudaMalloc(&dp, max_pairs * sizeof(PairDesc2Way)));
+    std::vector<PairDesc2Way> pairs;
+    pairs.reserve(max_pairs);
+
     for (int run_sz = RECORDS_PER_BLOCK; run_sz < (int)n; run_sz *= 2) {
-        std::vector<PairDesc2Way> pairs;
+        pairs.clear();
         int total_mblks = 0;
 
         for (uint64_t off = 0; off < n; off += 2 * run_sz) {
@@ -214,17 +221,15 @@ void ExternalGpuSort::gpu_merge_inplace(uint8_t* d_src, uint8_t* d_dst,
             total_mblks += pblks;
         }
         if (!pairs.empty()) {
-            PairDesc2Way* dp;
-            CUDA_CHECK(cudaMalloc(&dp, pairs.size()*sizeof(PairDesc2Way)));
             CUDA_CHECK(cudaMemcpyAsync(dp, pairs.data(),
                 pairs.size()*sizeof(PairDesc2Way), cudaMemcpyHostToDevice, s));
             launch_merge_2way(d_src, d_dst, dp, pairs.size(), total_mblks, s);
             CUDA_CHECK(cudaStreamSynchronize(s));
-            cudaFree(dp);
         }
         std::swap(d_src, d_dst);
         num_passes++;
     }
+    CUDA_CHECK(cudaFree(dp));
     if (num_passes % 2 == 1) {
         CUDA_CHECK(cudaMemcpyAsync(d_dst, d_src, n*RECORD_SIZE,
                                     cudaMemcpyDeviceToDevice, s));
