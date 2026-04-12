@@ -605,6 +605,7 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
     // But merge workspace is allocated AFTER freeing sort buffers, so we have plenty
     if (total_keys_bytes < free_after_bufs * 0.8) {
         CUDA_CHECK(cudaMalloc(&d_key_buffer, total_keys_bytes));
+        key_buffer_capacity = total_keys_bytes;
         printf("  Key retention: %.2f GB GPU key buffer allocated\n", total_keys_bytes/1e9);
     } else {
         printf("  Key retention: keys too large (%.2f GB), will extract on CPU\n",
