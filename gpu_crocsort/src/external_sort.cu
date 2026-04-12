@@ -615,89 +615,79 @@ void ExternalGpuSort::streaming_merge(
     CUDA_CHECK(cudaFree(d_perm_out));
     if (h_keys) CUDA_CHECK(cudaFreeHost(h_keys));
 
-    // ── Step 5: Sort-by-source CPU gather ──
-    // Instead of random reads in output order, process each source run sequentially.
-    // Sequential DRAM reads hit ~40 GB/s vs ~2 GB/s for random access.
-    //
-    // Algorithm:
-    //   1. Bucket permutation entries by source run
-    //   2. Sort each bucket by index_in_run (for sequential source reads)
-    //   3. For each run: scan sequentially, scatter to output positions
-    //   Writes are random but writes are buffered (less latency-sensitive).
-
+    // ── Step 5: Multi-threaded CPU value gather using permutation ──
     int num_threads = std::min(48, (int)std::thread::hardware_concurrency());
-    printf("  CPU value gather (%.2f GB, %d threads, sort-by-source)...\n",
-           total_bytes/1e9, num_threads);
+    printf("  CPU value gather (%.2f GB, %d threads)...\n", total_bytes/1e9, num_threads);
     WallTimer gather_timer; gather_timer.begin();
 
     uint8_t* h_output;
     CUDA_CHECK(cudaMallocHost(&h_output, total_bytes));
 
-    // Step 5a: Build per-run buckets: (output_pos, index_in_run)
-    struct GatherEntry { uint32_t output_pos; uint32_t idx_in_run; };
-    std::vector<std::vector<GatherEntry>> buckets(K);
-    for (int r = 0; r < K; r++) buckets[r].reserve(runs[r].num_records);
+    // Pre-compute run lookup table for O(1) run_id lookup instead of O(K) scan
+    // run_global_base is sorted, so we can use it directly
+    // But for speed, build a direct lookup: global_idx → (run_id, idx_in_run)
+    // For K <= 64, binary search is fast enough
 
-    for (uint64_t i = 0; i < num_records; i++) {
-        uint32_t src_global = h_perm[i];
-        int run_id = K - 1;
-        for (int r = 0; r < K - 1; r++) {
-            if (src_global < run_global_base[r+1]) { run_id = r; break; }
-        }
-        uint32_t idx = (uint32_t)(src_global - run_global_base[run_id]);
-        buckets[run_id].push_back({(uint32_t)i, idx});
-    }
-
-    // Step 5b: Sort each bucket by idx_in_run (parallel, one thread per run)
-    {
-        std::vector<std::thread> threads;
-        for (int r = 0; r < K; r++) {
-            threads.emplace_back([&buckets, r]() {
-                std::sort(buckets[r].begin(), buckets[r].end(),
-                    [](const GatherEntry& a, const GatherEntry& b) {
-                        return a.idx_in_run < b.idx_in_run;
-                    });
-            });
-        }
-        for (auto& t : threads) t.join();
-    }
-
-    // Step 5c: Sequential read from each run, scatter to output (multi-threaded per run)
-    {
-        std::vector<std::thread> threads;
-        for (int r = 0; r < K; r++) {
-            threads.emplace_back([&, r]() {
-                const uint8_t* run_base = h_data + runs[r].host_offset;
-                const auto& bucket = buckets[r];
-                for (size_t j = 0; j < bucket.size(); j++) {
-                    // Prefetch ahead for sequential source reads
-                    if (j + 4 < bucket.size()) {
-                        __builtin_prefetch(run_base + (uint64_t)bucket[j+4].idx_in_run * RECORD_SIZE, 0, 0);
-                    }
-                    const uint8_t* src = run_base + (uint64_t)bucket[j].idx_in_run * RECORD_SIZE;
-                    uint8_t* dst = h_output + (uint64_t)bucket[j].output_pos * RECORD_SIZE;
-                    memcpy(dst, src, RECORD_SIZE);
+    auto gather_worker = [&](uint64_t start, uint64_t end) {
+        // Prefetch distance in records
+        constexpr int PREFETCH = 8;
+        for (uint64_t i = start; i < end; i++) {
+            // Prefetch future source record
+            if (i + PREFETCH < end) {
+                uint32_t future_global = h_perm[i + PREFETCH];
+                // Binary search for run_id
+                int lo = 0, hi = K;
+                while (lo < hi) {
+                    int mid = (lo + hi) / 2;
+                    if (run_global_base[mid] <= future_global) lo = mid + 1;
+                    else hi = mid;
                 }
+                int frun = lo - 1;
+                uint64_t fidx = future_global - run_global_base[frun];
+                const uint8_t* fptr = h_data + runs[frun].host_offset + fidx * RECORD_SIZE;
+                __builtin_prefetch(fptr, 0, 0);
+            }
+
+            uint32_t src_global = h_perm[i];
+            // Binary search for run_id (O(log K))
+            int lo = 0, hi = K;
+            while (lo < hi) {
+                int mid = (lo + hi) / 2;
+                if (run_global_base[mid] <= src_global) lo = mid + 1;
+                else hi = mid;
+            }
+            int run_id = lo - 1;
+            uint64_t idx_in_run = src_global - run_global_base[run_id];
+            const uint8_t* src = h_data + runs[run_id].host_offset + idx_in_run * RECORD_SIZE;
+            memcpy(h_output + i * RECORD_SIZE, src, RECORD_SIZE);
+        }
+    };
+
+    // Launch threads
+    std::vector<std::thread> threads;
+    uint64_t chunk_sz = (num_records + num_threads - 1) / num_threads;
+    for (int t = 0; t < num_threads; t++) {
+        uint64_t start = (uint64_t)t * chunk_sz;
+        uint64_t end = std::min(start + chunk_sz, num_records);
+        if (start < end) {
+            threads.emplace_back(gather_worker, start, end);
+        }
+    }
+    for (auto& t : threads) t.join();
+
+    // Copy result back (also multi-threaded)
+    threads.clear();
+    uint64_t copy_chunk = (total_bytes + num_threads - 1) / num_threads;
+    for (int t = 0; t < num_threads; t++) {
+        uint64_t start = (uint64_t)t * copy_chunk;
+        uint64_t len = std::min(copy_chunk, total_bytes - start);
+        if (start < total_bytes) {
+            threads.emplace_back([&, start, len]() {
+                memcpy(h_data + start, h_output + start, len);
             });
         }
-        for (auto& t : threads) t.join();
     }
-
-    // Copy result back (multi-threaded)
-    {
-        std::vector<std::thread> threads;
-        uint64_t copy_chunk = (total_bytes + num_threads - 1) / num_threads;
-        for (int t = 0; t < num_threads; t++) {
-            uint64_t start = (uint64_t)t * copy_chunk;
-            uint64_t len = std::min(copy_chunk, total_bytes - start);
-            if (start < total_bytes) {
-                threads.emplace_back([&, start, len]() {
-                    memcpy(h_data + start, h_output + start, len);
-                });
-            }
-        }
-        for (auto& t : threads) t.join();
-    }
+    for (auto& t : threads) t.join();
 
     double gather_ms = gather_timer.end_ms();
     printf("    Gathered in %.0f ms (%.2f GB/s)\n", gather_ms, total_bytes / (gather_ms * 1e6));
