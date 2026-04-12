@@ -295,10 +295,9 @@ void ExternalGpuSort::sort_chunk_on_gpu(uint8_t* d_in, uint8_t* d_scratch,
     cub::DoubleBuffer<uint64_t> d_keys_buf(sort_ws.d_keys, sort_ws.d_keys_alt);
     cub::DoubleBuffer<uint32_t> d_idx_buf(sort_ws.d_indices, sort_ws.d_indices_alt);
 
-    size_t temp_bytes = buf_bytes;  // d_scratch is buf_bytes large
+    size_t temp_bytes = buf_bytes;
     cub::DeviceRadixSort::SortPairs(d_scratch, temp_bytes,
         d_keys_buf, d_idx_buf, (int)n, 0, 64, s);
-    // No sync needed — CUB and reorder are on same stream, auto-ordered
 
     // Step 3: Reorder full records using sorted indices (d_in → d_scratch)
     reorder_records_kernel<<<nblks, nthreads, 0, s>>>(
@@ -636,7 +635,7 @@ uint8_t* ExternalGpuSort::streaming_merge(
     // the "copy data" phase (random source reads + sequential writes).
     // Deeper prefetch pipeline hides more DRAM latency.
     auto gather_worker = [&](uint64_t start, uint64_t end) {
-        constexpr int BLOCK = 256;  // process 256 records at a time
+        constexpr int BLOCK = 1024; // larger block = deeper prefetch pipeline
         const uint8_t* src_ptrs[BLOCK];
 
         for (uint64_t base = start; base < end; base += BLOCK) {
