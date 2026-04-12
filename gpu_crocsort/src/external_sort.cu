@@ -539,13 +539,10 @@ uint8_t* ExternalGpuSort::streaming_merge(
             d_sort_keys_alt = (uint64_t*)d_buf[1];
             d_perm_in = (uint32_t*)d_buf[2];
             d_perm_out = d_perm_in + num_records;
-            // Query CUB temp and allocate small buffer
-            cub::DoubleBuffer<uint64_t> dk(nullptr,nullptr);
-            cub::DoubleBuffer<uint32_t> dp(nullptr,nullptr);
-            cub_temp_bytes = 0;
-            cub::DeviceRadixSort::SortPairs(nullptr, cub_temp_bytes, dk, dp, (int)num_records, 0, 64, streams[0]);
-            CUDA_CHECK(cudaMalloc(&d_merge_arena, cub_temp_bytes));
-            d_temp = (void*)d_merge_arena;
+            // CUB temp fits after perm_out in d_buf[2] (0.6GB remaining)
+            d_temp = (void*)(d_perm_out + num_records);
+            cub_temp_bytes = buf_bytes - 2 * perm_sz;
+            // ZERO cudaMalloc in merge phase!
         } else {
             // Fallback: single arena alloc
             cub::DoubleBuffer<uint64_t> dk(nullptr,nullptr);
