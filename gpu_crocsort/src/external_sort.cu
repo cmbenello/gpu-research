@@ -523,19 +523,15 @@ uint8_t* ExternalGpuSort::streaming_merge(
         d_temp = (void*)(d_perm_out + num_records);
         cub_temp_bytes = buf_bytes - num_records * 2 * sizeof(uint32_t);
     } else {
-        // Free sort buffers and allocate arena using stream-ordered allocation
-        // cudaFreeAsync + cudaMallocAsync is faster than sync free + sync alloc
-        for (int i = 0; i < NBUFS; i++) {
-            if (d_buf[i]) { cudaFreeAsync(d_buf[i], streams[0]); d_buf[i] = nullptr; }
-        }
-        // Query CUB temp requirement
+        // Query CUB temp requirement first (before freeing sort bufs)
         cub::DoubleBuffer<uint64_t> dk(nullptr,nullptr);
         cub::DoubleBuffer<uint32_t> dp(nullptr,nullptr);
         cub_temp_bytes = 0;
         cub::DeviceRadixSort::SortPairs(nullptr, cub_temp_bytes, dk, dp, (int)num_records, 0, 64, streams[0]);
         size_t arena_sz = num_records * (2*sizeof(uint64_t) + 2*sizeof(uint32_t)) + cub_temp_bytes;
-        CUDA_CHECK(cudaMallocAsync(&d_merge_arena, arena_sz, streams[0]));
-        CUDA_CHECK(cudaStreamSynchronize(streams[0]));
+        // Free sort buffers then allocate arena
+        for (int i = 0; i < NBUFS; i++) { if (d_buf[i]) { cudaFree(d_buf[i]); d_buf[i] = nullptr; } }
+        CUDA_CHECK(cudaMalloc(&d_merge_arena, arena_sz));
         d_sort_keys = (uint64_t*)d_merge_arena;
         d_sort_keys_alt = d_sort_keys + num_records;
         d_perm_in = (uint32_t*)(d_sort_keys_alt + num_records);
@@ -571,30 +567,35 @@ uint8_t* ExternalGpuSort::streaming_merge(
 
     d_perm_in = d_perm_buf.Current();
     printf("  Downloading permutation (%.2f GB)...\n", total_perm_bytes/1e9);
-    uint32_t* h_perm = h_perm_prealloc;  // pre-allocated in sort() before run gen
-    if (!h_perm) { CUDA_CHECK(cudaMallocHost(&h_perm, total_perm_bytes)); } // fallback
-    CUDA_CHECK(cudaMemcpy(h_perm, d_perm_in, total_perm_bytes, cudaMemcpyDeviceToHost));
+    uint32_t* h_perm = h_perm_prealloc;
+    if (!h_perm) { CUDA_CHECK(cudaMallocHost(&h_perm, total_perm_bytes)); }
+
+    // Start async perm download — CPU continues with alloc/free work in parallel
+    CUDA_CHECK(cudaMemcpyAsync(h_perm, d_perm_in, total_perm_bytes,
+                                cudaMemcpyDeviceToHost, streams[0]));
     d2h += total_perm_bytes;
-    tpoint("perm downloaded");
 
-    // Free merge workspace (async to avoid blocking)
-    if (d_merge_arena) { cudaFreeAsync(d_merge_arena, streams[0]); }
-    for (int i = 0; i < NBUFS; i++) {
-        if (d_buf[i]) { cudaFreeAsync(d_buf[i], streams[0]); d_buf[i] = nullptr; }
-    }
-    if (h_keys) CUDA_CHECK(cudaFreeHost(h_keys));
-    tpoint("freed GPU memory");
-
-    // ── Step 5: Multi-threaded CPU value gather using permutation ──
+    // While perm downloads: allocate gather output buffer + free GPU memory
+    // These are CPU operations that run concurrently with the D2H DMA
     int num_threads = std::min(48, (int)std::thread::hardware_concurrency());
     printf("  CPU value gather (%.2f GB, %d threads)...\n", total_bytes/1e9, num_threads);
-    WallTimer gather_timer; gather_timer.begin();
 
-    // Use regular malloc for output buffer — pinned memory (cudaMallocHost) has
-    // slower write performance due to write-combining, which hurts the scatter pattern
     uint8_t* h_output = (uint8_t*)malloc(total_bytes);
     if (!h_output) { fprintf(stderr, "malloc failed for gather output\n"); ms = timer.end_ms(); return nullptr; }
     madvise(h_output, total_bytes, MADV_HUGEPAGE);
+
+    // Free GPU memory while perm downloads
+    if (d_merge_arena) { cudaFree(d_merge_arena); d_merge_arena = nullptr; }
+    for (int i = 0; i < NBUFS; i++) {
+        if (d_buf[i]) { cudaFree(d_buf[i]); d_buf[i] = nullptr; }
+    }
+    if (h_keys) { cudaFreeHost(h_keys); h_keys = nullptr; }
+
+    // NOW wait for perm download to complete before starting gather
+    CUDA_CHECK(cudaStreamSynchronize(streams[0]));
+    tpoint("perm downloaded + alloc + GPU freed (overlapped)");
+
+    WallTimer gather_timer; gather_timer.begin();
 
     // Pre-compute run lookup table for O(1) run_id lookup instead of O(K) scan
     // run_global_base is sorted, so we can use it directly
