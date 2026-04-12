@@ -577,7 +577,7 @@ uint8_t* ExternalGpuSort::streaming_merge(
     // Use regular malloc for output buffer — pinned memory (cudaMallocHost) has
     // slower write performance due to write-combining, which hurts the scatter pattern
     uint8_t* h_output = (uint8_t*)malloc(total_bytes);
-    if (!h_output) { fprintf(stderr, "malloc failed for gather output\n"); ms = timer.end_ms(); return; }
+    if (!h_output) { fprintf(stderr, "malloc failed for gather output\n"); ms = timer.end_ms(); return nullptr; }
 
     // Pre-compute run lookup table for O(1) run_id lookup instead of O(K) scan
     // run_global_base is sorted, so we can use it directly
