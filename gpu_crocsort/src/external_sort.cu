@@ -685,7 +685,10 @@ void ExternalGpuSort::streaming_merge(
     }
     for (auto& t : threads) t.join();
 
-    // Copy result back (also multi-threaded)
+    double scatter_ms = gather_timer.end_ms();
+
+    // Copy result back (multi-threaded)
+    WallTimer copy_timer; copy_timer.begin();
     threads.clear();
     uint64_t copy_chunk = (total_bytes + num_threads - 1) / num_threads;
     for (int t = 0; t < num_threads; t++) {
@@ -698,9 +701,11 @@ void ExternalGpuSort::streaming_merge(
         }
     }
     for (auto& t : threads) t.join();
+    double copy_ms = copy_timer.end_ms();
 
-    double gather_ms = gather_timer.end_ms();
-    printf("    Gathered in %.0f ms (%.2f GB/s)\n", gather_ms, total_bytes / (gather_ms * 1e6));
+    double gather_ms = scatter_ms + copy_ms;
+    printf("    Gathered in %.0f ms (scatter %.0f + copy %.0f) (%.2f GB/s)\n",
+           gather_ms, scatter_ms, copy_ms, total_bytes / (gather_ms * 1e6));
 
     free(h_output);
     CUDA_CHECK(cudaFreeHost(h_perm));
