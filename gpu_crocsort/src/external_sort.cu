@@ -561,6 +561,11 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
     printf("  %d runs in %.0f ms (%.2f GB/s effective)\n\n",
            r.num_runs, r.run_gen_ms, total_bytes/(r.run_gen_ms*1e6));
 
+    // Free sort buffers to reclaim GPU memory for merge workspace
+    for (int i = 0; i < NBUFS; i++) {
+        if (d_buf[i]) { cudaFree(d_buf[i]); d_buf[i] = nullptr; }
+    }
+
     printf("== Phase 2: GPU Streaming Merge ==\n");
     double mg_h2d = 0, mg_d2h = 0;
     streaming_merge(h_data, num_records, runs,
