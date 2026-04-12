@@ -526,20 +526,42 @@ uint8_t* ExternalGpuSort::streaming_merge(
         d_temp = (void*)(d_perm_out + num_records);
         cub_temp_bytes = buf_bytes - num_records * 2 * sizeof(uint32_t);
     } else {
-        // Query CUB temp requirement first (before freeing sort bufs)
-        cub::DoubleBuffer<uint64_t> dk(nullptr,nullptr);
-        cub::DoubleBuffer<uint32_t> dp(nullptr,nullptr);
-        cub_temp_bytes = 0;
-        cub::DeviceRadixSort::SortPairs(nullptr, cub_temp_bytes, dk, dp, (int)num_records, 0, 64, streams[0]);
-        size_t arena_sz = num_records * (2*sizeof(uint64_t) + 2*sizeof(uint32_t)) + cub_temp_bytes;
-        // Free sort buffers then allocate arena
-        for (int i = 0; i < NBUFS; i++) { if (d_buf[i]) { cudaFree(d_buf[i]); d_buf[i] = nullptr; } }
-        CUDA_CHECK(cudaMalloc(&d_merge_arena, arena_sz));
-        d_sort_keys = (uint64_t*)d_merge_arena;
-        d_sort_keys_alt = d_sort_keys + num_records;
-        d_perm_in = (uint32_t*)(d_sort_keys_alt + num_records);
-        d_perm_out = d_perm_in + num_records;
-        d_temp = (void*)(d_perm_out + num_records);
+        // Split merge workspace across sort buffers + one extra alloc.
+        // d_buf[0] (5.44GB): d_sort_keys (N×8B = 4.8GB)
+        // d_buf[1] (5.44GB): d_sort_keys_alt (N×8B = 4.8GB)
+        // d_buf[2] (5.44GB): d_perm_in (N×4B) + d_perm_out (N×4B) = 4.8GB
+        // CUB temp: allocate separately (small, ~100MB)
+        size_t keys_sz = num_records * sizeof(uint64_t);
+        size_t perm_sz = num_records * sizeof(uint32_t);
+        bool can_split = (d_buf[0] && d_buf[1] && d_buf[2] &&
+                          keys_sz <= buf_bytes && 2 * perm_sz <= buf_bytes);
+        if (can_split) {
+            d_sort_keys = (uint64_t*)d_buf[0];
+            d_sort_keys_alt = (uint64_t*)d_buf[1];
+            d_perm_in = (uint32_t*)d_buf[2];
+            d_perm_out = d_perm_in + num_records;
+            // Query CUB temp and allocate small buffer
+            cub::DoubleBuffer<uint64_t> dk(nullptr,nullptr);
+            cub::DoubleBuffer<uint32_t> dp(nullptr,nullptr);
+            cub_temp_bytes = 0;
+            cub::DeviceRadixSort::SortPairs(nullptr, cub_temp_bytes, dk, dp, (int)num_records, 0, 64, streams[0]);
+            CUDA_CHECK(cudaMalloc(&d_merge_arena, cub_temp_bytes));
+            d_temp = (void*)d_merge_arena;
+        } else {
+            // Fallback: single arena alloc
+            cub::DoubleBuffer<uint64_t> dk(nullptr,nullptr);
+            cub::DoubleBuffer<uint32_t> dp(nullptr,nullptr);
+            cub_temp_bytes = 0;
+            cub::DeviceRadixSort::SortPairs(nullptr, cub_temp_bytes, dk, dp, (int)num_records, 0, 64, streams[0]);
+            size_t arena_sz = num_records * (2*sizeof(uint64_t) + 2*sizeof(uint32_t)) + cub_temp_bytes;
+            for (int i = 0; i < NBUFS; i++) { if (d_buf[i]) { cudaFree(d_buf[i]); d_buf[i] = nullptr; } }
+            CUDA_CHECK(cudaMalloc(&d_merge_arena, arena_sz));
+            d_sort_keys = (uint64_t*)d_merge_arena;
+            d_sort_keys_alt = d_sort_keys + num_records;
+            d_perm_in = (uint32_t*)(d_sort_keys_alt + num_records);
+            d_perm_out = d_perm_in + num_records;
+            d_temp = (void*)(d_perm_out + num_records);
+        }
     }
 
     tpoint("alloc merge workspace");
