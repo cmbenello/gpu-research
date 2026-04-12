@@ -569,38 +569,33 @@ uint8_t* ExternalGpuSort::streaming_merge(
     // But for speed, build a direct lookup: global_idx → (run_id, idx_in_run)
     // For K <= 64, binary search is fast enough
 
+    // Pre-compute source pointers for all records in a block, then copy.
+    // This separates the "find source" phase (random permutation reads) from
+    // the "copy data" phase (random source reads + sequential writes).
+    // Deeper prefetch pipeline hides more DRAM latency.
     auto gather_worker = [&](uint64_t start, uint64_t end) {
-        // Prefetch distance in records
-        constexpr int PREFETCH = 16;
-        for (uint64_t i = start; i < end; i++) {
-            // Prefetch future source record
-            if (i + PREFETCH < end) {
-                uint32_t future_global = h_perm[i + PREFETCH];
-                // Binary search for run_id
-                int lo = 0, hi = K;
-                while (lo < hi) {
-                    int mid = (lo + hi) / 2;
-                    if (run_global_base[mid] <= future_global) lo = mid + 1;
-                    else hi = mid;
+        constexpr int BLOCK = 256;  // process 256 records at a time
+        const uint8_t* src_ptrs[BLOCK];
+
+        for (uint64_t base = start; base < end; base += BLOCK) {
+            int count = std::min((uint64_t)BLOCK, end - base);
+
+            // Phase 1: Resolve all source pointers + prefetch
+            for (int j = 0; j < count; j++) {
+                uint32_t src_global = h_perm[base + j];
+                int run_id = K - 1;
+                for (int r = 0; r < K - 1; r++) {
+                    if (src_global < run_global_base[r+1]) { run_id = r; break; }
                 }
-                int frun = lo - 1;
-                uint64_t fidx = future_global - run_global_base[frun];
-                const uint8_t* fptr = h_data + runs[frun].host_offset + fidx * RECORD_SIZE;
-                __builtin_prefetch(fptr, 0, 0);
+                uint64_t idx_in_run = src_global - run_global_base[run_id];
+                src_ptrs[j] = h_data + runs[run_id].host_offset + idx_in_run * RECORD_SIZE;
+                __builtin_prefetch(src_ptrs[j], 0, 0);  // prefetch source record
             }
 
-            uint32_t src_global = h_perm[i];
-            // Binary search for run_id (O(log K))
-            int lo = 0, hi = K;
-            while (lo < hi) {
-                int mid = (lo + hi) / 2;
-                if (run_global_base[mid] <= src_global) lo = mid + 1;
-                else hi = mid;
+            // Phase 2: Copy all records (sources should be in cache from prefetch)
+            for (int j = 0; j < count; j++) {
+                memcpy(h_output + (base + j) * RECORD_SIZE, src_ptrs[j], RECORD_SIZE);
             }
-            int run_id = lo - 1;
-            uint64_t idx_in_run = src_global - run_global_base[run_id];
-            const uint8_t* src = h_data + runs[run_id].host_offset + idx_in_run * RECORD_SIZE;
-            memcpy(h_output + i * RECORD_SIZE, src, RECORD_SIZE);
         }
     };
 
