@@ -488,62 +488,59 @@ uint8_t* ExternalGpuSort::streaming_merge(
         h2d += total_keys_bytes;
     }
 
-    // Allocate merge workspace
-    CUDA_CHECK(cudaMalloc(&d_keys_out, total_keys_bytes));
-    CUDA_CHECK(cudaMalloc(&d_perm_in, total_perm_bytes));
-    CUDA_CHECK(cudaMalloc(&d_perm_out, total_perm_bytes));
+    // ── Step 3: CUB radix sort ALL keys + permutation in ONE pass ──
+    // Allocate all merge buffers in a SINGLE cudaMalloc to minimize alloc overhead.
+    // Need: d_sort_keys(N×8) + d_sort_keys_alt(N×8) + d_perm_in(N×4) + d_perm_out(N×4) + temp
+    // Total: N×24 + temp. Query CUB temp size first.
+    passes = 1;
+    printf("  CUB radix sort on all %lu keys (single pass)...\n", num_records);
 
-    // ── Step 3: GPU iterative 2-way merge on keys only ──
-    struct KeyRun { uint64_t key_byte_offset; uint64_t num_records; uint64_t perm_offset; };
-    std::vector<KeyRun> key_runs(K);
-    for (int r = 0; r < K; r++) {
-        key_runs[r] = {merge_key_offsets[r], runs[r].num_records, run_global_base[r]};
-    }
+    // Compute CUB temp storage requirement
+    uint64_t* dummy_keys[2] = {nullptr, nullptr};
+    uint32_t* dummy_perm[2] = {nullptr, nullptr};
+    cub::DoubleBuffer<uint64_t> dummy_kbuf(dummy_keys[0], dummy_keys[1]);
+    cub::DoubleBuffer<uint32_t> dummy_pbuf(dummy_perm[0], dummy_perm[1]);
+    size_t cub_temp_bytes = 0;
+    cub::DeviceRadixSort::SortPairs(nullptr, cub_temp_bytes,
+        dummy_kbuf, dummy_pbuf, (int)num_records, 0, 64, streams[0]);
 
-    // Initialize permutation to identity [0,1,2,...,N-1] on GPU (avoids CPU loop + upload)
+    // Single allocation for all merge buffers
+    size_t merge_buf_size = num_records * (2*sizeof(uint64_t) + 2*sizeof(uint32_t)) + cub_temp_bytes;
+    uint8_t* d_merge_arena;
+    CUDA_CHECK(cudaMalloc(&d_merge_arena, merge_buf_size));
+
+    // Carve out sub-buffers from the arena
+    uint64_t* d_sort_keys = (uint64_t*)d_merge_arena;
+    uint64_t* d_sort_keys_alt = d_sort_keys + num_records;
+    d_perm_in = (uint32_t*)(d_sort_keys_alt + num_records);
+    d_perm_out = d_perm_in + num_records;
+    void* d_temp = (void*)(d_perm_out + num_records);
+
+    // Initialize permutation to identity on GPU
     {
         int nt = 256, nb = (num_records + nt - 1) / nt;
         init_identity_kernel<<<nb, nt, 0, streams[0]>>>(d_perm_in, num_records);
     }
 
-    passes = 1;
+    // Extract uint64 from 10-byte keys
+    {
+        int nt = 256, nb = (num_records + nt - 1) / nt;
+        extract_uint64_from_keys_kernel<<<nb, nt, 0, streams[0]>>>(
+            d_keys_in, d_sort_keys, num_records);
+    }
 
-    // ── Step 3: CUB radix sort ALL keys + permutation in ONE pass ──
-    // Instead of iterative 2-way merge (log2(K) passes), CUB re-sorts everything.
-    // 200M uint64 keys: CUB takes ~30ms vs ~1500ms for merge passes.
-    printf("  CUB radix sort on all %lu keys (single pass)...\n", num_records);
-
-    // Extract uint64 from 10-byte keys, then free key buffers to make room for CUB
-    int nthreads = 256, nblks = (num_records + nthreads - 1) / nthreads;
-    uint64_t* d_sort_keys;
-    uint64_t* d_sort_keys_alt;
-    CUDA_CHECK(cudaMalloc(&d_sort_keys, num_records * sizeof(uint64_t)));
-    extract_uint64_from_keys_kernel<<<nblks, nthreads, 0, streams[0]>>>(
-        d_keys_in, d_sort_keys, num_records);
-    CUDA_CHECK(cudaStreamSynchronize(streams[0]));
-
-    // Free key buffers — no longer needed after uint64 extraction
-    if (allocated_keys_gpu) { CUDA_CHECK(cudaFree(d_keys_in)); d_keys_in = nullptr; }
-    CUDA_CHECK(cudaFree(d_keys_out)); d_keys_out = nullptr;
+    // Free key buffers — no longer needed
+    if (allocated_keys_gpu && d_keys_in) { CUDA_CHECK(cudaFree(d_keys_in)); d_keys_in = nullptr; }
+    if (d_keys_out) { CUDA_CHECK(cudaFree(d_keys_out)); d_keys_out = nullptr; }
     if (d_key_buffer) { cudaFree(d_key_buffer); d_key_buffer = nullptr; }
-
-    CUDA_CHECK(cudaMalloc(&d_sort_keys_alt, num_records * sizeof(uint64_t)));
 
     // CUB sort (uint64 key, uint32 perm) pairs
     cub::DoubleBuffer<uint64_t> d_sortkey_buf(d_sort_keys, d_sort_keys_alt);
     cub::DoubleBuffer<uint32_t> d_perm_buf(d_perm_in, d_perm_out);
 
-    // Temp storage — reuse freed sort buffers
-    size_t temp_bytes = 0;
-    cub::DeviceRadixSort::SortPairs(nullptr, temp_bytes,
-        d_sortkey_buf, d_perm_buf, (int)num_records, 0, 64, streams[0]);
-    void* d_temp;
-    CUDA_CHECK(cudaMalloc(&d_temp, temp_bytes));
-    cub::DeviceRadixSort::SortPairs(d_temp, temp_bytes,
+    cub::DeviceRadixSort::SortPairs(d_temp, cub_temp_bytes,
         d_sortkey_buf, d_perm_buf, (int)num_records, 0, 64, streams[0]);
     CUDA_CHECK(cudaStreamSynchronize(streams[0]));
-    cudaFree(d_temp);
-    cudaFree(d_sort_keys); cudaFree(d_sort_keys_alt);
 
     // The sorted permutation is in d_perm_buf.Current()
     // Make sure d_perm_in points to the sorted result
@@ -554,10 +551,8 @@ uint8_t* ExternalGpuSort::streaming_merge(
     CUDA_CHECK(cudaMemcpy(h_perm, d_perm_in, total_perm_bytes, cudaMemcpyDeviceToHost));
     d2h += total_perm_bytes;
 
-    if (d_keys_in && allocated_keys_gpu) CUDA_CHECK(cudaFree(d_keys_in));
-    if (d_keys_out) CUDA_CHECK(cudaFree(d_keys_out));
-    CUDA_CHECK(cudaFree(d_perm_in));
-    CUDA_CHECK(cudaFree(d_perm_out));
+    // Free single merge arena (contains sort_keys, perm, temp)
+    CUDA_CHECK(cudaFree(d_merge_arena));
     if (h_keys) CUDA_CHECK(cudaFreeHost(h_keys));
 
     // ── Step 5: Multi-threaded CPU value gather using permutation ──
