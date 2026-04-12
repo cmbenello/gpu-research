@@ -104,3 +104,15 @@ Phase 2: Key-Only Merge (CPU-gather-bound, ~37% of time)
 Key change: removed ALL CPU sync points from run gen loop.
 Dependencies managed entirely by GPU-side cudaStreamWaitEvent.
 True concurrent H2D + sort + D2H on 3 separate streams.
+
+## Final Verified Results (Cycle 29)
+
+| Data | Time  | Throughput | Speedup |
+|------|-------|-----------|---------|
+| 10GB |  2.3s | 4.30 GB/s | — |
+| 20GB |  4.0s | 4.99 GB/s | **12.9×** |
+| 40GB |  7.1s | 5.64 GB/s | — |
+| 60GB | 10.1s | 5.94 GB/s | **22.6×** |
+
+All sizes verified correct (PASS). Zero cudaMalloc in merge phase.
+System config: THP enabled (`echo always > /sys/kernel/mm/transparent_hugepage/enabled`)
