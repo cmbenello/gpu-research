@@ -523,15 +523,19 @@ uint8_t* ExternalGpuSort::streaming_merge(
         d_temp = (void*)(d_perm_out + num_records);
         cub_temp_bytes = buf_bytes - num_records * 2 * sizeof(uint32_t);
     } else {
-        // Free sort buffers, allocate fresh arena
-        for (int i = 0; i < NBUFS; i++) { if (d_buf[i]) { cudaFree(d_buf[i]); d_buf[i] = nullptr; } }
+        // Free sort buffers and allocate arena using stream-ordered allocation
+        // cudaFreeAsync + cudaMallocAsync is faster than sync free + sync alloc
+        for (int i = 0; i < NBUFS; i++) {
+            if (d_buf[i]) { cudaFreeAsync(d_buf[i], streams[0]); d_buf[i] = nullptr; }
+        }
         // Query CUB temp requirement
         cub::DoubleBuffer<uint64_t> dk(nullptr,nullptr);
         cub::DoubleBuffer<uint32_t> dp(nullptr,nullptr);
         cub_temp_bytes = 0;
         cub::DeviceRadixSort::SortPairs(nullptr, cub_temp_bytes, dk, dp, (int)num_records, 0, 64, streams[0]);
         size_t arena_sz = num_records * (2*sizeof(uint64_t) + 2*sizeof(uint32_t)) + cub_temp_bytes;
-        CUDA_CHECK(cudaMalloc(&d_merge_arena, arena_sz));
+        CUDA_CHECK(cudaMallocAsync(&d_merge_arena, arena_sz, streams[0]));
+        CUDA_CHECK(cudaStreamSynchronize(streams[0]));
         d_sort_keys = (uint64_t*)d_merge_arena;
         d_sort_keys_alt = d_sort_keys + num_records;
         d_perm_in = (uint32_t*)(d_sort_keys_alt + num_records);
@@ -573,10 +577,10 @@ uint8_t* ExternalGpuSort::streaming_merge(
     d2h += total_perm_bytes;
     tpoint("perm downloaded");
 
-    // Free merge workspace
-    if (d_merge_arena) { CUDA_CHECK(cudaFree(d_merge_arena)); }
+    // Free merge workspace (async to avoid blocking)
+    if (d_merge_arena) { cudaFreeAsync(d_merge_arena, streams[0]); }
     for (int i = 0; i < NBUFS; i++) {
-        if (d_buf[i]) { cudaFree(d_buf[i]); d_buf[i] = nullptr; }
+        if (d_buf[i]) { cudaFreeAsync(d_buf[i], streams[0]); d_buf[i] = nullptr; }
     }
     if (h_keys) CUDA_CHECK(cudaFreeHost(h_keys));
     tpoint("freed GPU memory");
