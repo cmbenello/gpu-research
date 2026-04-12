@@ -192,7 +192,9 @@ struct SortWorkspace {
 // ============================================================================
 
 class ExternalGpuSort {
-    static constexpr int NBUFS = 3;
+    // 2 buffers: CUB sort is so fast (~50ms) that larger chunks
+    // (fewer PCIe round-trips) beats pipeline overlap.
+    static constexpr int NBUFS = 2;
     size_t gpu_budget;
     uint64_t buf_records;
     size_t buf_bytes;
@@ -241,9 +243,9 @@ private:
 ExternalGpuSort::ExternalGpuSort() {
     size_t free_mem, total_mem;
     CUDA_CHECK(cudaMemGetInfo(&free_mem, &total_mem));
-    // Sort buffers get 65% of GPU memory (3 × ~5.5GB each)
-    // Key buffer allocated separately in sort() based on actual data size
-    gpu_budget = (size_t)(free_mem * 0.65);
+    // Sort buffers: 80% GPU memory. With NBUFS=2: 2 × ~10GB each.
+    // CUB sort is ~50ms for any size, so bigger chunks = fewer PCIe round-trips.
+    gpu_budget = (size_t)(free_mem * 0.80);
     key_buffer_capacity = 0; // computed dynamically
     d_key_buffer = nullptr; // allocated lazily in sort()
     buf_records = (gpu_budget / NBUFS) / RECORD_SIZE;
@@ -336,30 +338,20 @@ ExternalGpuSort::generate_runs_pipelined(
     //   CPU staging of chunk N+1, then H2D of chunk N+1 on stream[0]
     //   overlaps with final D2H→host memcpy of chunk N
 
+    // Sequential: upload → CUB sort → download per chunk
+    // With CUB sort at ~50ms, the per-chunk time is dominated by PCIe transfers.
     for (int c = 0; c < total_chunks; c++) {
         uint64_t offset = (uint64_t)c * buf_records;
         uint64_t cur_n = std::min(buf_records, num_records - offset);
         uint64_t cur_bytes = cur_n * RECORD_SIZE;
-        int cur = c % 2;
-        int scratch = 2;
 
-        // Start H2D upload on stream[0] — runs concurrently with previous D2H on stream[2]
-        // (bidirectional PCIe: H2D and D2H use separate DMA engines)
-        CUDA_CHECK(cudaMemcpyAsync(d_buf[cur], h_data + offset * RECORD_SIZE, cur_bytes,
-                                    cudaMemcpyHostToDevice, streams[0]));
+        // Upload
+        CUDA_CHECK(cudaMemcpy(d_buf[0], h_data + offset * RECORD_SIZE, cur_bytes,
+                               cudaMemcpyHostToDevice));
         h2d += cur_bytes;
 
-        // Record event when H2D completes, make sort stream wait for it
-        CUDA_CHECK(cudaEventRecord(events[0], streams[0]));
-        CUDA_CHECK(cudaStreamWaitEvent(streams[1], events[0], 0));
-
-        // Also wait for previous D2H to finish (it reads d_buf[prev], not d_buf[cur],
-        // but the sort needs d_buf[scratch]=d_buf[2] which might still be in use
-        // by the previous sort's internal operations)
-        CUDA_CHECK(cudaStreamSynchronize(streams[2]));
-
-        // Sort (GPU-side wait for H2D via event — no CPU blocking)
-        sort_chunk_on_gpu(d_buf[cur], d_buf[scratch], cur_n, streams[1]);
+        // CUB sort: d_buf[0]=input/output, d_buf[1]=scratch
+        sort_chunk_on_gpu(d_buf[0], d_buf[1], cur_n, streams[0]);
 
         // Extract keys to persistent GPU key buffer
         uint64_t key_off = run_key_offsets.empty() ? 0 :
@@ -367,15 +359,15 @@ ExternalGpuSort::generate_runs_pipelined(
         if (d_key_buffer && (key_off + cur_n * KEY_SIZE) <= key_buffer_capacity) {
             int nthreads = 256;
             int nblocks_k = (cur_n + nthreads - 1) / nthreads;
-            extract_keys_kernel<<<nblocks_k, nthreads, 0, streams[1]>>>(
-                d_buf[cur], d_key_buffer + key_off, cur_n);
-            CUDA_CHECK(cudaStreamSynchronize(streams[1]));
+            extract_keys_kernel<<<nblocks_k, nthreads, 0, streams[0]>>>(
+                d_buf[0], d_key_buffer + key_off, cur_n);
+            CUDA_CHECK(cudaStreamSynchronize(streams[0]));
             run_key_offsets.push_back(key_off);
         }
 
-        // Download directly to h_data (pinned memory — no intermediate copy)
-        CUDA_CHECK(cudaMemcpyAsync(h_data + offset * RECORD_SIZE, d_buf[cur], cur_bytes,
-                                    cudaMemcpyDeviceToHost, streams[2]));
+        // Download
+        CUDA_CHECK(cudaMemcpy(h_data + offset * RECORD_SIZE, d_buf[0], cur_bytes,
+                               cudaMemcpyDeviceToHost));
         d2h += cur_bytes;
 
         runs.push_back({offset * RECORD_SIZE, cur_n});
@@ -383,9 +375,6 @@ ExternalGpuSort::generate_runs_pipelined(
                cur_bytes/(1024.0*1024.0));
         fflush(stdout);
     }
-
-    // Finalize: wait for last D2H to complete
-    CUDA_CHECK(cudaStreamSynchronize(streams[2]));
     printf("\n");
     ms = timer.end_ms();
     return runs;
