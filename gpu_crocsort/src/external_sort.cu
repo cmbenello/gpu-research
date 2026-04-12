@@ -487,6 +487,11 @@ void ExternalGpuSort::streaming_merge(
     passes = 0;
     int items_per_blk = MERGE_ITEMS_PER_THREAD_CFG * MERGE_BLOCK_THREADS_CFG;
 
+    // Pre-allocate merge descriptor buffer (max K/2 pairs per pass)
+    int max_pairs = (K + 1) / 2;
+    KeyMergePair* d_key_pairs;
+    CUDA_CHECK(cudaMalloc(&d_key_pairs, max_pairs * sizeof(KeyMergePair)));
+
     printf("  GPU key-only merge (%d runs, %.2f GB keys in HBM)...\n",
            K, total_keys_bytes / 1e9);
 
@@ -530,16 +535,13 @@ void ExternalGpuSort::streaming_merge(
             new_runs.push_back({out_key_off, rl.num_records, out_perm_off});
         }
 
-        // Upload descriptors and launch
-        KeyMergePair* d_pairs;
-        CUDA_CHECK(cudaMalloc(&d_pairs, npairs * sizeof(KeyMergePair)));
-        CUDA_CHECK(cudaMemcpy(d_pairs, pairs.data(),
+        // Upload descriptors to pre-allocated buffer and launch
+        CUDA_CHECK(cudaMemcpy(d_key_pairs, pairs.data(),
             npairs * sizeof(KeyMergePair), cudaMemcpyHostToDevice));
 
         launch_merge_keys_only(d_keys_in, d_keys_out, d_perm_in, d_perm_out,
-                                d_pairs, npairs, total_blocks, streams[0]);
+                                d_key_pairs, npairs, total_blocks, streams[0]);
         CUDA_CHECK(cudaStreamSynchronize(streams[0]));
-        cudaFree(d_pairs);
 
         printf("    Pass %d: %d -> %d runs, %d blocks (keys only, %.1f MB traffic)\n",
                passes, cur_runs, (int)new_runs.size(), total_blocks,
@@ -549,6 +551,8 @@ void ExternalGpuSort::streaming_merge(
         std::swap(d_keys_in, d_keys_out);
         std::swap(d_perm_in, d_perm_out);
     }
+
+    CUDA_CHECK(cudaFree(d_key_pairs));
 
     // ── Step 4: Download permutation ──
     printf("  Downloading permutation (%.2f GB)...\n", total_perm_bytes/1e9);
@@ -625,9 +629,13 @@ void ExternalGpuSort::streaming_merge(
     }
     for (auto& t : threads) t.join();
 
-    double scatter_ms = gather_timer.end_ms();
+    double gather_ms = gather_timer.end_ms();
+    printf("    Gathered in %.0f ms (%.2f GB/s)\n",
+           gather_ms, total_bytes / (gather_ms * 1e6));
 
-    // Copy result back (multi-threaded)
+    // Swap: h_output has sorted data, h_data has sorted runs (stale).
+    // Copy back to h_data so caller sees sorted result.
+    // Use multi-threaded memcpy for speed.
     WallTimer copy_timer; copy_timer.begin();
     threads.clear();
     uint64_t copy_chunk = (total_bytes + num_threads - 1) / num_threads;
@@ -641,11 +649,7 @@ void ExternalGpuSort::streaming_merge(
         }
     }
     for (auto& t : threads) t.join();
-    double copy_ms = copy_timer.end_ms();
-
-    double gather_ms = scatter_ms + copy_ms;
-    printf("    Gathered in %.0f ms (scatter %.0f + copy %.0f) (%.2f GB/s)\n",
-           gather_ms, scatter_ms, copy_ms, total_bytes / (gather_ms * 1e6));
+    printf("    Copy back: %.0f ms\n", copy_timer.end_ms());
 
     free(h_output);
     CUDA_CHECK(cudaFreeHost(h_perm));
