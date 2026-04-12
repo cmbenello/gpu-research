@@ -628,8 +628,10 @@ void ExternalGpuSort::streaming_merge(
     printf("  CPU value gather (%.2f GB, %d threads)...\n", total_bytes/1e9, num_threads);
     WallTimer gather_timer; gather_timer.begin();
 
-    uint8_t* h_output;
-    CUDA_CHECK(cudaMallocHost(&h_output, total_bytes));
+    // Use regular malloc for output buffer — pinned memory (cudaMallocHost) has
+    // slower write performance due to write-combining, which hurts the scatter pattern
+    uint8_t* h_output = (uint8_t*)malloc(total_bytes);
+    if (!h_output) { fprintf(stderr, "malloc failed for gather output\n"); ms = timer.end_ms(); return; }
 
     // Pre-compute run lookup table for O(1) run_id lookup instead of O(K) scan
     // run_global_base is sorted, so we can use it directly
@@ -638,7 +640,7 @@ void ExternalGpuSort::streaming_merge(
 
     auto gather_worker = [&](uint64_t start, uint64_t end) {
         // Prefetch distance in records
-        constexpr int PREFETCH = 8;
+        constexpr int PREFETCH = 16;
         for (uint64_t i = start; i < end; i++) {
             // Prefetch future source record
             if (i + PREFETCH < end) {
@@ -700,7 +702,7 @@ void ExternalGpuSort::streaming_merge(
     double gather_ms = gather_timer.end_ms();
     printf("    Gathered in %.0f ms (%.2f GB/s)\n", gather_ms, total_bytes / (gather_ms * 1e6));
 
-    CUDA_CHECK(cudaFreeHost(h_output));
+    free(h_output);
     CUDA_CHECK(cudaFreeHost(h_perm));
     ms = timer.end_ms();
 }
