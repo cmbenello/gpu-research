@@ -298,7 +298,7 @@ void ExternalGpuSort::sort_chunk_on_gpu(uint8_t* d_in, uint8_t* d_scratch,
     size_t temp_bytes = buf_bytes;  // d_scratch is buf_bytes large
     cub::DeviceRadixSort::SortPairs(d_scratch, temp_bytes,
         d_keys_buf, d_idx_buf, (int)n, 0, 64, s);
-    CUDA_CHECK(cudaStreamSynchronize(s));  // ensure sort done before reusing d_scratch
+    // No sync needed — CUB and reorder are on same stream, auto-ordered
 
     // Step 3: Reorder full records using sorted indices (d_in → d_scratch)
     reorder_records_kernel<<<nblks, nthreads, 0, s>>>(
