@@ -134,10 +134,10 @@ private:
 ExternalGpuSort::ExternalGpuSort() {
     size_t free_mem, total_mem;
     CUDA_CHECK(cudaMemGetInfo(&free_mem, &total_mem));
-    // Reserve up to 30% for key buffer (keys are 10% of records, so 30% covers 3x record capacity)
-    // Use 55% for sort buffers (3 buffers of ~4.6GB each)
-    gpu_budget = (size_t)(free_mem * 0.55);
-    key_buffer_capacity = (size_t)(free_mem * 0.30);  // ~7.5GB for keys = up to 75GB data
+    // Sort buffers get 65% of GPU memory (3 × ~5.5GB each)
+    // Key buffer allocated separately in sort() based on actual data size
+    gpu_budget = (size_t)(free_mem * 0.65);
+    key_buffer_capacity = 0; // computed dynamically
     d_key_buffer = nullptr; // allocated lazily in sort()
     buf_records = (gpu_budget / NBUFS) / RECORD_SIZE;
     buf_bytes = buf_records * RECORD_SIZE;
@@ -596,14 +596,19 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
         return r;
     }
 
-    // Allocate persistent key buffer for key retention across run generation
+    // Allocate persistent key buffer sized to actual data
+    // Keys = 10% of record data, so they always fit if we have enough GPU memory
     uint64_t total_keys_bytes = num_records * KEY_SIZE;
-    if (total_keys_bytes <= key_buffer_capacity) {
+    size_t free_after_bufs, dummy;
+    CUDA_CHECK(cudaMemGetInfo(&free_after_bufs, &dummy));
+    // Need: key_buffer + later merge workspace (keys_out + perm_in + perm_out = keys + 2*perm)
+    // But merge workspace is allocated AFTER freeing sort buffers, so we have plenty
+    if (total_keys_bytes < free_after_bufs * 0.4) {
         CUDA_CHECK(cudaMalloc(&d_key_buffer, total_keys_bytes));
         printf("  Key retention: %.2f GB GPU key buffer allocated\n", total_keys_bytes/1e9);
     } else {
-        printf("  Key retention: keys too large (%.2f GB > %.2f GB budget), will extract on CPU\n",
-               total_keys_bytes/1e9, key_buffer_capacity/1e9);
+        printf("  Key retention: keys too large (%.2f GB), will extract on CPU\n",
+               total_keys_bytes/1e9);
     }
     run_key_offsets.clear();
 
