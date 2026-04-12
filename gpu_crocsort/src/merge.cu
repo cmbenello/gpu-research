@@ -385,11 +385,9 @@ __global__ void merge_keys_only_kernel(
         uint32_t global_idx = take_a ? perm_A[ai] : perm_B[bi];
         if (take_a) ai++; else bi++;
 
-        // Write key (10 bytes)
+        // Write key (10 bytes, byte-by-byte to avoid alignment issues)
         uint8_t* dk = out_keys + (uint64_t)i * KEY_SIZE;
-        *(uint32_t*)(dk + 0) = *(const uint32_t*)(src + 0);
-        *(uint32_t*)(dk + 4) = *(const uint32_t*)(src + 4);
-        *(uint16_t*)(dk + 8) = *(const uint16_t*)(src + 8);
+        for (int b = 0; b < KEY_SIZE; b++) dk[b] = src[b];
 
         // Write permutation index (original global record index)
         out_perm[i] = global_idx;
