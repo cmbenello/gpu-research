@@ -507,14 +507,21 @@ uint8_t* ExternalGpuSort::streaming_merge(
     // 200M uint64 keys: CUB takes ~30ms vs ~1500ms for merge passes.
     printf("  CUB radix sort on all %lu keys (single pass)...\n", num_records);
 
-    // Extract uint64 from 10-byte keys at KEY_SIZE stride
+    // Extract uint64 from 10-byte keys, then free key buffers to make room for CUB
     int nthreads = 256, nblks = (num_records + nthreads - 1) / nthreads;
     uint64_t* d_sort_keys;
     uint64_t* d_sort_keys_alt;
     CUDA_CHECK(cudaMalloc(&d_sort_keys, num_records * sizeof(uint64_t)));
-    CUDA_CHECK(cudaMalloc(&d_sort_keys_alt, num_records * sizeof(uint64_t)));
     extract_uint64_from_keys_kernel<<<nblks, nthreads, 0, streams[0]>>>(
         d_keys_in, d_sort_keys, num_records);
+    CUDA_CHECK(cudaStreamSynchronize(streams[0]));
+
+    // Free key buffers — no longer needed after uint64 extraction
+    if (allocated_keys_gpu) { CUDA_CHECK(cudaFree(d_keys_in)); d_keys_in = nullptr; }
+    CUDA_CHECK(cudaFree(d_keys_out)); d_keys_out = nullptr;
+    if (d_key_buffer) { cudaFree(d_key_buffer); d_key_buffer = nullptr; }
+
+    CUDA_CHECK(cudaMalloc(&d_sort_keys_alt, num_records * sizeof(uint64_t)));
 
     // CUB sort (uint64 key, uint32 perm) pairs
     cub::DoubleBuffer<uint64_t> d_sortkey_buf(d_sort_keys, d_sort_keys_alt);
@@ -541,8 +548,8 @@ uint8_t* ExternalGpuSort::streaming_merge(
     CUDA_CHECK(cudaMemcpy(h_perm, d_perm_in, total_perm_bytes, cudaMemcpyDeviceToHost));
     d2h += total_perm_bytes;
 
-    if (allocated_keys_gpu) CUDA_CHECK(cudaFree(d_keys_in));
-    CUDA_CHECK(cudaFree(d_keys_out));
+    if (d_keys_in && allocated_keys_gpu) CUDA_CHECK(cudaFree(d_keys_in));
+    if (d_keys_out) CUDA_CHECK(cudaFree(d_keys_out));
     CUDA_CHECK(cudaFree(d_perm_in));
     CUDA_CHECK(cudaFree(d_perm_out));
     if (h_keys) CUDA_CHECK(cudaFreeHost(h_keys));
