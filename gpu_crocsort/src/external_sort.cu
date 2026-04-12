@@ -646,6 +646,7 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
     // Fast path: fits in one buffer
     if (num_records <= buf_records) {
         printf("  Data fits in GPU — single-chunk sort\n");
+        sort_ws.allocate(num_records);
         WallTimer t; t.begin();
         CUDA_CHECK(cudaMemcpy(d_buf[0], h_data, total_bytes, cudaMemcpyHostToDevice));
         sort_chunk_on_gpu(d_buf[0], d_buf[1], num_records, streams[0]);
