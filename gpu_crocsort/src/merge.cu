@@ -306,7 +306,109 @@ smem_kway_merge_kernel(
     }
 }
 
+// ────────────────────────────────────────────────────────────────────
+// KEY-ONLY MERGE: merges keys (KEY_SIZE stride), outputs permutation
+// Used by external sort to avoid sending full records over PCIe.
+// ────────────────────────────────────────────────────────────────────
+
+__device__ int merge_path_search_keys(
+    const uint8_t* __restrict__ A, int a_len,
+    const uint8_t* __restrict__ B, int b_len,
+    int diag
+) {
+    int lo = max(0, diag - b_len);
+    int hi = min(diag, a_len);
+    while (lo < hi) {
+        int a_mid = (lo + hi) >> 1;
+        int b_mid = diag - 1 - a_mid;
+        bool a_greater;
+        if (a_mid >= a_len) a_greater = true;
+        else if (b_mid < 0 || b_mid >= b_len) a_greater = false;
+        else a_greater = (key_compare(A + (uint64_t)a_mid * KEY_SIZE,
+                                       B + (uint64_t)b_mid * KEY_SIZE, KEY_SIZE) > 0);
+        if (a_greater) hi = a_mid;
+        else lo = a_mid + 1;
+    }
+    return lo;
+}
+
+// Descriptor for key-only merge pair
+struct KeyMergePair {
+    uint64_t a_key_offset;    // byte offset of A keys in d_keys_in
+    int      a_count;
+    uint64_t b_key_offset;    // byte offset of B keys in d_keys_in
+    int      b_count;
+    uint64_t out_key_offset;  // byte offset of output keys
+    uint64_t out_perm_offset; // element offset of output permutation
+    uint64_t a_perm_offset;   // element offset of A's permutation in d_perm_in
+    uint64_t b_perm_offset;   // element offset of B's permutation in d_perm_in
+    int      first_block;
+};
+
+__global__ void merge_keys_only_kernel(
+    const uint8_t* __restrict__ keys_in,
+    uint8_t* __restrict__ keys_out,
+    const uint32_t* __restrict__ perm_in,  // input permutation (carried forward)
+    uint32_t* __restrict__ perm_out,       // output permutation
+    const KeyMergePair* __restrict__ pairs,
+    int num_pairs
+) {
+    int pair_id = 0;
+    { int lo = 0, hi = num_pairs;
+      while (lo < hi) { int m = (lo+hi)>>1;
+        if (pairs[m].first_block <= (int)blockIdx.x) { pair_id = m; lo = m+1; } else hi = m; } }
+
+    const KeyMergePair& p = pairs[pair_id];
+    const uint8_t* A = keys_in + p.a_key_offset;
+    const uint8_t* B = keys_in + p.b_key_offset;
+    const uint32_t* perm_A = perm_in + p.a_perm_offset;
+    const uint32_t* perm_B = perm_in + p.b_perm_offset;
+    int total = p.a_count + p.b_count;
+    int block_in_pair = blockIdx.x - p.first_block;
+    int items_per_block = MP2_ITEMS_PER_THREAD * MP2_BLOCK_THREADS;
+    int t_start = block_in_pair * items_per_block + threadIdx.x * MP2_ITEMS_PER_THREAD;
+    int t_end = min(t_start + MP2_ITEMS_PER_THREAD, min((block_in_pair+1)*items_per_block, total));
+    if (t_start >= total) return;
+
+    int ai = merge_path_search_keys(A, p.a_count, B, p.b_count, t_start);
+    int bi = t_start - ai;
+
+    uint8_t* out_keys = keys_out + p.out_key_offset;
+    uint32_t* out_perm = perm_out + p.out_perm_offset;
+
+    for (int i = t_start; i < t_end; i++) {
+        bool take_a = (ai < p.a_count) && (bi >= p.b_count ||
+            key_compare(A + (uint64_t)ai * KEY_SIZE, B + (uint64_t)bi * KEY_SIZE, KEY_SIZE) <= 0);
+
+        const uint8_t* src = take_a ? A + (uint64_t)ai * KEY_SIZE : B + (uint64_t)bi * KEY_SIZE;
+        // Carry forward the original global index from the input permutation
+        uint32_t global_idx = take_a ? perm_A[ai] : perm_B[bi];
+        if (take_a) ai++; else bi++;
+
+        // Write key (10 bytes)
+        uint8_t* dk = out_keys + (uint64_t)i * KEY_SIZE;
+        *(uint32_t*)(dk + 0) = *(const uint32_t*)(src + 0);
+        *(uint32_t*)(dk + 4) = *(const uint32_t*)(src + 4);
+        *(uint16_t*)(dk + 8) = *(const uint16_t*)(src + 8);
+
+        // Write permutation index (original global record index)
+        out_perm[i] = global_idx;
+    }
+}
+
 // ── Host interfaces ────────────────────────────────────────────────
+
+extern "C" void launch_merge_keys_only(
+    const uint8_t* d_keys_in, uint8_t* d_keys_out,
+    const uint32_t* d_perm_in, uint32_t* d_perm_out,
+    const KeyMergePair* d_pairs, int num_pairs, int total_blocks,
+    cudaStream_t stream
+) {
+    if (total_blocks > 0) {
+        merge_keys_only_kernel<<<total_blocks, MP2_BLOCK_THREADS, 0, stream>>>(
+            d_keys_in, d_keys_out, d_perm_in, d_perm_out, d_pairs, num_pairs);
+    }
+}
 
 extern "C" void launch_merge_2way(
     const uint8_t* d_input, uint8_t* d_output,
