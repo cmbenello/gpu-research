@@ -200,6 +200,7 @@ public:
         double run_gen_ms, merge_ms, total_ms;
         int num_runs, merge_passes;
         double pcie_h2d_gb, pcie_d2h_gb;
+        uint8_t* sorted_output;  // pointer to sorted data (caller must free())
     };
 
     ExternalGpuSort();
@@ -216,9 +217,10 @@ private:
         uint8_t* h_data, uint64_t num_records,
         double& ms, double& h2d, double& d2h);
 
-    void streaming_merge(uint8_t* h_data, uint64_t num_records,
-                          std::vector<RunInfo>& runs,
-                          double& ms, int& passes, double& h2d, double& d2h);
+    // Returns pointer to sorted output (allocated with malloc, caller frees)
+    uint8_t* streaming_merge(uint8_t* h_data, uint64_t num_records,
+                              std::vector<RunInfo>& runs,
+                              double& ms, int& passes, double& h2d, double& d2h);
 
 };
 
@@ -403,12 +405,12 @@ extern "C" void launch_merge_keys_only(
     const uint8_t*, uint8_t*, const uint32_t*, uint32_t*,
     const KeyMergePair*, int, int, cudaStream_t);
 
-void ExternalGpuSort::streaming_merge(
+uint8_t* ExternalGpuSort::streaming_merge(
     uint8_t* h_data, uint64_t num_records,
     std::vector<RunInfo>& runs,
     double& ms, int& passes, double& h2d, double& d2h
 ) {
-    if (runs.size() <= 1) { ms = 0; passes = 0; h2d = d2h = 0; return; }
+    if (runs.size() <= 1) { ms = 0; passes = 0; h2d = d2h = 0; return nullptr; }
 
     int K = (int)runs.size();
     uint64_t total_bytes = num_records * RECORD_SIZE;
@@ -633,27 +635,9 @@ void ExternalGpuSort::streaming_merge(
     printf("    Gathered in %.0f ms (%.2f GB/s)\n",
            gather_ms, total_bytes / (gather_ms * 1e6));
 
-    // Swap: h_output has sorted data, h_data has sorted runs (stale).
-    // Copy back to h_data so caller sees sorted result.
-    // Use multi-threaded memcpy for speed.
-    WallTimer copy_timer; copy_timer.begin();
-    threads.clear();
-    uint64_t copy_chunk = (total_bytes + num_threads - 1) / num_threads;
-    for (int t = 0; t < num_threads; t++) {
-        uint64_t start = (uint64_t)t * copy_chunk;
-        uint64_t len = std::min(copy_chunk, total_bytes - start);
-        if (start < total_bytes) {
-            threads.emplace_back([&, start, len]() {
-                memcpy(h_data + start, h_output + start, len);
-            });
-        }
-    }
-    for (auto& t : threads) t.join();
-    printf("    Copy back: %.0f ms\n", copy_timer.end_ms());
-
-    free(h_output);
     CUDA_CHECK(cudaFreeHost(h_perm));
     ms = timer.end_ms();
+    return h_output;  // caller owns this buffer (allocated with malloc)
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -677,6 +661,7 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
         r.total_ms = r.run_gen_ms = t.end_ms();
         r.num_runs = 1;
         r.pcie_h2d_gb = r.pcie_d2h_gb = total_bytes / 1e9;
+        r.sorted_output = nullptr; // sorted in-place in h_data
         return r;
     }
 
@@ -716,8 +701,8 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
 
     printf("== Phase 2: GPU Streaming Merge ==\n");
     double mg_h2d = 0, mg_d2h = 0;
-    streaming_merge(h_data, num_records, runs,
-                     r.merge_ms, r.merge_passes, mg_h2d, mg_d2h);
+    r.sorted_output = streaming_merge(h_data, num_records, runs,
+                                       r.merge_ms, r.merge_passes, mg_h2d, mg_d2h);
 
     r.pcie_h2d_gb = (rg_h2d + mg_h2d) / 1e9;
     r.pcie_d2h_gb = (rg_d2h + mg_d2h) / 1e9;
@@ -791,15 +776,19 @@ int main(int argc, char** argv) {
     ExternalGpuSort sorter;
     auto result = sorter.sort(h_data, num_records);
 
+    // sorted_output points to sorted data (either h_data for single-chunk, or malloc'd buffer)
+    const uint8_t* sorted = result.sorted_output ? result.sorted_output : h_data;
+
     if (verify) {
         printf("\nVerifying...\n");
         uint64_t bad = 0;
         for (uint64_t i = 1; i < num_records && bad < 10; i++)
-            if (key_compare(h_data+(i-1)*RECORD_SIZE, h_data+i*RECORD_SIZE, KEY_SIZE)>0)
+            if (key_compare(sorted+(i-1)*RECORD_SIZE, sorted+i*RECORD_SIZE, KEY_SIZE)>0)
                 { if (bad<5) printf("  VIOLATION at %lu\n",i); bad++; }
         printf(bad==0 ? "  PASS: %lu records sorted\n" : "  FAIL: %lu violations\n",
                bad==0 ? num_records : bad);
     }
+    if (result.sorted_output) free(result.sorted_output);
 
     printf("\nCSV,%s,%.2f,%lu,%d,%d,%.2f,%.2f,%.2f,%.4f,%.2f,%.2f,%.2f,%.1f\n",
            props.name, total_bytes/1e9, num_records,
