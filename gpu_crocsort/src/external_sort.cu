@@ -494,15 +494,38 @@ uint8_t* ExternalGpuSort::streaming_merge(
     passes = 1;
     printf("  CUB radix sort on all %lu keys (single pass)...\n", num_records);
 
-    // Carve merge sub-buffers from existing sort buffers
-    // d_buf[0]: d_sort_keys(N×8) + d_sort_keys_alt(N×8) = N×16B
-    // d_buf[1]: d_perm_in(N×4) + d_perm_out(N×4) + CUB temp = N×8B + temp
-    uint64_t* d_sort_keys = (uint64_t*)d_buf[0];
-    uint64_t* d_sort_keys_alt = d_sort_keys + num_records;
-    d_perm_in = (uint32_t*)d_buf[1];
-    d_perm_out = d_perm_in + num_records;
-    void* d_temp = (void*)(d_perm_out + num_records);
-    size_t cub_temp_bytes = buf_bytes - num_records * 2 * sizeof(uint32_t);  // remaining space in d_buf[1]
+    // Try to reuse sort buffers as merge workspace. Falls back to fresh alloc if too small.
+    size_t needed_buf0 = num_records * 2 * sizeof(uint64_t); // keys + keys_alt
+    size_t needed_buf1 = num_records * 2 * sizeof(uint32_t) + 256*1024*1024; // perm + perm_alt + temp estimate
+    bool reuse_bufs = (d_buf[0] && d_buf[1] && needed_buf0 <= buf_bytes && needed_buf1 <= buf_bytes);
+
+    uint64_t* d_sort_keys; uint64_t* d_sort_keys_alt;
+    void* d_temp; size_t cub_temp_bytes;
+    uint8_t* d_merge_arena = nullptr;
+
+    if (reuse_bufs) {
+        d_sort_keys = (uint64_t*)d_buf[0];
+        d_sort_keys_alt = d_sort_keys + num_records;
+        d_perm_in = (uint32_t*)d_buf[1];
+        d_perm_out = d_perm_in + num_records;
+        d_temp = (void*)(d_perm_out + num_records);
+        cub_temp_bytes = buf_bytes - num_records * 2 * sizeof(uint32_t);
+    } else {
+        // Free sort buffers, allocate fresh arena
+        for (int i = 0; i < NBUFS; i++) { if (d_buf[i]) { cudaFree(d_buf[i]); d_buf[i] = nullptr; } }
+        // Query CUB temp requirement
+        cub::DoubleBuffer<uint64_t> dk(nullptr,nullptr);
+        cub::DoubleBuffer<uint32_t> dp(nullptr,nullptr);
+        cub_temp_bytes = 0;
+        cub::DeviceRadixSort::SortPairs(nullptr, cub_temp_bytes, dk, dp, (int)num_records, 0, 64, streams[0]);
+        size_t arena_sz = num_records * (2*sizeof(uint64_t) + 2*sizeof(uint32_t)) + cub_temp_bytes;
+        CUDA_CHECK(cudaMalloc(&d_merge_arena, arena_sz));
+        d_sort_keys = (uint64_t*)d_merge_arena;
+        d_sort_keys_alt = d_sort_keys + num_records;
+        d_perm_in = (uint32_t*)(d_sort_keys_alt + num_records);
+        d_perm_out = d_perm_in + num_records;
+        d_temp = (void*)(d_perm_out + num_records);
+    }
 
     // Initialize permutation to identity on GPU
     {
@@ -539,7 +562,8 @@ uint8_t* ExternalGpuSort::streaming_merge(
     CUDA_CHECK(cudaMemcpy(h_perm, d_perm_in, total_perm_bytes, cudaMemcpyDeviceToHost));
     d2h += total_perm_bytes;
 
-    // Merge workspace was carved from sort buffers — free those
+    // Free merge workspace
+    if (d_merge_arena) { CUDA_CHECK(cudaFree(d_merge_arena)); }
     for (int i = 0; i < NBUFS; i++) {
         if (d_buf[i]) { cudaFree(d_buf[i]); d_buf[i] = nullptr; }
     }
