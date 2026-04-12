@@ -129,6 +129,20 @@ __global__ void reorder_records_kernel(
     }
 }
 
+// Extract uint64 sort key from KEY_SIZE-stride key buffer (for CUB merge sort)
+__global__ void extract_uint64_from_keys_kernel(
+    const uint8_t* __restrict__ key_buffer,
+    uint64_t* __restrict__ sort_keys,
+    uint64_t num_records
+) {
+    uint64_t i = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= num_records) return;
+    const uint8_t* k = key_buffer + i * KEY_SIZE;
+    uint64_t v = 0;
+    for (int b = 0; b < 8; b++) v = (v << 8) | k[b];
+    sort_keys[i] = v;
+}
+
 // ── GPU key extraction kernel ────────────────────────────────────────
 // Extract KEY_SIZE bytes from each sorted record into a contiguous key array.
 // Runs at HBM bandwidth (~672 GB/s), essentially free compared to PCIe.
@@ -486,78 +500,41 @@ uint8_t* ExternalGpuSort::streaming_merge(
         CUDA_CHECK(cudaMemcpy(d_perm_in, h_perm_init.data(), total_perm_bytes, cudaMemcpyHostToDevice));
     }
 
-    passes = 0;
-    int items_per_blk = MERGE_ITEMS_PER_THREAD_CFG * MERGE_BLOCK_THREADS_CFG;
+    passes = 1;
 
-    // Pre-allocate merge descriptor buffer (max K/2 pairs per pass)
-    int max_pairs = (K + 1) / 2;
-    KeyMergePair* d_key_pairs;
-    CUDA_CHECK(cudaMalloc(&d_key_pairs, max_pairs * sizeof(KeyMergePair)));
+    // ── Step 3: CUB radix sort ALL keys + permutation in ONE pass ──
+    // Instead of iterative 2-way merge (log2(K) passes), CUB re-sorts everything.
+    // 200M uint64 keys: CUB takes ~30ms vs ~1500ms for merge passes.
+    printf("  CUB radix sort on all %lu keys (single pass)...\n", num_records);
 
-    printf("  GPU key-only merge (%d runs, %.2f GB keys in HBM)...\n",
-           K, total_keys_bytes / 1e9);
+    // Extract uint64 from 10-byte keys at KEY_SIZE stride
+    int nthreads = 256, nblks = (num_records + nthreads - 1) / nthreads;
+    uint64_t* d_sort_keys;
+    uint64_t* d_sort_keys_alt;
+    CUDA_CHECK(cudaMalloc(&d_sort_keys, num_records * sizeof(uint64_t)));
+    CUDA_CHECK(cudaMalloc(&d_sort_keys_alt, num_records * sizeof(uint64_t)));
+    extract_uint64_from_keys_kernel<<<nblks, nthreads, 0, streams[0]>>>(
+        d_keys_in, d_sort_keys, num_records);
 
-    while (key_runs.size() > 1) {
-        passes++;
-        int cur_runs = (int)key_runs.size();
-        int npairs = cur_runs / 2;
-        bool leftover = (cur_runs % 2 == 1);
+    // CUB sort (uint64 key, uint32 perm) pairs
+    cub::DoubleBuffer<uint64_t> d_sortkey_buf(d_sort_keys, d_sort_keys_alt);
+    cub::DoubleBuffer<uint32_t> d_perm_buf(d_perm_in, d_perm_out);
 
-        std::vector<KeyMergePair> pairs(npairs);
-        std::vector<KeyRun> new_runs;
-        int total_blocks = 0;
-        uint64_t out_key_off = 0;
-        uint64_t out_perm_off = 0;
-
-        for (int p = 0; p < npairs; p++) {
-            KeyRun& ra = key_runs[2*p];
-            KeyRun& rb = key_runs[2*p+1];
-            uint64_t pair_n = ra.num_records + rb.num_records;
-            int pair_blocks = (pair_n + items_per_blk - 1) / items_per_blk;
-
-            pairs[p] = {ra.key_byte_offset, (int)ra.num_records,
-                        rb.key_byte_offset, (int)rb.num_records,
-                        out_key_off, out_perm_off,
-                        ra.perm_offset, rb.perm_offset,
-                        total_blocks};
-            total_blocks += pair_blocks;
-            new_runs.push_back({out_key_off, pair_n, out_perm_off});
-            out_key_off += pair_n * KEY_SIZE;
-            out_perm_off += pair_n;
-        }
-
-        if (leftover) {
-            KeyRun& rl = key_runs[cur_runs-1];
-            CUDA_CHECK(cudaMemcpyAsync(d_keys_out + out_key_off,
-                d_keys_in + rl.key_byte_offset,
-                rl.num_records * KEY_SIZE, cudaMemcpyDeviceToDevice, streams[0]));
-            CUDA_CHECK(cudaMemcpyAsync(d_perm_out + out_perm_off,
-                d_perm_in + rl.perm_offset,
-                rl.num_records * sizeof(uint32_t), cudaMemcpyDeviceToDevice, streams[0]));
-            new_runs.push_back({out_key_off, rl.num_records, out_perm_off});
-        }
-
-        // Upload descriptors and launch — all on stream[0], no CPU sync between passes
-        CUDA_CHECK(cudaMemcpyAsync(d_key_pairs, pairs.data(),
-            npairs * sizeof(KeyMergePair), cudaMemcpyHostToDevice, streams[0]));
-
-        launch_merge_keys_only(d_keys_in, d_keys_out, d_perm_in, d_perm_out,
-                                d_key_pairs, npairs, total_blocks, streams[0]);
-        // No sync here — next pass's descriptor upload auto-orders on same stream
-
-        printf("    Pass %d: %d -> %d runs, %d blocks (keys only, %.1f MB traffic)\n",
-               passes, cur_runs, (int)new_runs.size(), total_blocks,
-               2.0 * num_records * (KEY_SIZE + sizeof(uint32_t)) / (1024.0*1024.0));
-
-        key_runs = new_runs;
-        std::swap(d_keys_in, d_keys_out);
-        std::swap(d_perm_in, d_perm_out);
-    }
-
-    CUDA_CHECK(cudaFree(d_key_pairs));
-
-    // ── Step 4: Download permutation (sync here to ensure all merge passes done) ──
+    // Temp storage — reuse freed sort buffers
+    size_t temp_bytes = 0;
+    cub::DeviceRadixSort::SortPairs(nullptr, temp_bytes,
+        d_sortkey_buf, d_perm_buf, (int)num_records, 0, 64, streams[0]);
+    void* d_temp;
+    CUDA_CHECK(cudaMalloc(&d_temp, temp_bytes));
+    cub::DeviceRadixSort::SortPairs(d_temp, temp_bytes,
+        d_sortkey_buf, d_perm_buf, (int)num_records, 0, 64, streams[0]);
     CUDA_CHECK(cudaStreamSynchronize(streams[0]));
+    cudaFree(d_temp);
+    cudaFree(d_sort_keys); cudaFree(d_sort_keys_alt);
+
+    // The sorted permutation is in d_perm_buf.Current()
+    // Make sure d_perm_in points to the sorted result
+    d_perm_in = d_perm_buf.Current();
     printf("  Downloading permutation (%.2f GB)...\n", total_perm_bytes/1e9);
     uint32_t* h_perm;
     CUDA_CHECK(cudaMallocHost(&h_perm, total_perm_bytes));
