@@ -25,3 +25,23 @@
 ## Current Bottleneck (20GB, 7.5s total)
 - Run gen: 3.1s (42%) — PCIe-limited, GPU sort ~50ms
 - Merge: 4.4s (58%) — GPU key merge 2.0s + gather 1.9s + copy 0.7s
+
+## Updated Results (cycles 14-18)
+
+### 20GB
+| Cycle | Change | Total | GB/s |
+|-------|--------|-------|------|
+| 14 | CUB radix for in-chunk sort | 7.5s | 2.68 |
+| 16 | Skip copy-back | 6.1s | 3.28 |
+| 18 | **CUB radix for key merge** | **5.8s** | **3.43** |
+
+### 60GB
+| Cycle | Change | Total | GB/s |
+|-------|--------|-------|------|
+| 14 | CUB radix for in-chunk sort | 23.3s | 2.58 |
+| 16 | Skip copy-back | 18.8s | 3.19 |
+| 18 | **CUB radix for key merge** | **17.2s** | **3.49** |
+
+### Total Speedup
+- 20GB: 51.5s → 5.8s = **8.9× faster**
+- 60GB: 228s → 17.2s = **13.3× faster**
