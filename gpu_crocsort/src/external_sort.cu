@@ -45,6 +45,27 @@ extern "C" void launch_run_generation(
 extern "C" void launch_merge_2way(
     const uint8_t*, uint8_t*, const PairDesc2Way*, int, int, cudaStream_t);
 
+// K-way merge tree (from merge.cu + host_sort.cu)
+static constexpr int KWAY_K = 8;
+struct KWayPartition {
+    int      src_rec_start[KWAY_K];
+    int      src_rec_count[KWAY_K];
+    uint64_t src_byte_off[KWAY_K];
+    uint64_t out_byte_offset;
+    int      total_records;
+};
+extern "C" void launch_merge_kway(
+    const uint8_t*, uint8_t*, const KWayPartition*, int, int, cudaStream_t);
+
+// Run struct matching host_sort.cu's Run (identical layout)
+struct Run { uint64_t byte_offset; uint64_t num_records; };
+
+// Sample-based partitioning (from host_sort.cu, made non-static)
+void compute_sample_partitions(
+    const uint8_t* d_runs, const std::vector<Run>& group_runs,
+    int K, int P, uint64_t out_base_offset,
+    std::vector<KWayPartition>& out_partitions);
+
 // ── Timing ──────────────────────────────────────────────────────────
 
 struct WallTimer {
@@ -222,44 +243,87 @@ void ExternalGpuSort::sort_chunk_on_gpu(uint8_t* d_in, uint8_t* d_scratch,
 
 void ExternalGpuSort::gpu_merge_inplace(uint8_t* d_src, uint8_t* d_dst,
                                           uint64_t n, cudaStream_t s) {
-    int items_per_blk = MERGE_ITEMS_PER_THREAD_CFG * MERGE_BLOCK_THREADS_CFG;
+    // Build initial run list from bitonic-sorted blocks
+    int num_runs_initial = (n + RECORDS_PER_BLOCK - 1) / RECORDS_PER_BLOCK;
+    std::vector<Run> runs(num_runs_initial);
+    for (int i = 0; i < num_runs_initial; i++) {
+        runs[i].byte_offset = (uint64_t)i * RECORDS_PER_BLOCK * RECORD_SIZE;
+        runs[i].num_records = std::min((uint64_t)RECORDS_PER_BLOCK,
+                                       n - (uint64_t)i * RECORDS_PER_BLOCK);
+    }
+
+    // Query max records per K-way partition (shared memory limit)
+    int device; cudaGetDevice(&device);
+    cudaDeviceProp props; cudaGetDeviceProperties(&props, device);
+    int max_smem = props.sharedMemPerBlockOptin;
+    int max_recs_per_part = (max_smem - 1024) / (2 * RECORD_SIZE);
+
     int num_passes = 0;
 
-    // Use pre-allocated descriptor buffer from sort_ws
-    PairDesc2Way* dp = sort_ws.d_merge_desc;
-    std::vector<PairDesc2Way> pairs;
-    int max_pairs = (int)((n + 2 * RECORDS_PER_BLOCK - 1) / (2 * RECORDS_PER_BLOCK));
-    pairs.reserve(max_pairs);
+    while (runs.size() > 1) {
+        num_passes++;
+        int current_runs = (int)runs.size();
+        int group_size = std::min(KWAY_K, current_runs);
+        int num_groups = (current_runs + group_size - 1) / group_size;
 
-    for (int run_sz = RECORDS_PER_BLOCK; run_sz < (int)n; run_sz *= 2) {
-        pairs.clear();
-        int total_mblks = 0;
+        std::vector<Run> new_runs;
+        uint64_t out_offset = 0;
 
-        for (uint64_t off = 0; off < n; off += 2 * run_sz) {
-            uint64_t ac = std::min((uint64_t)run_sz, n - off);
-            uint64_t bs = off + run_sz;
-            uint64_t bc = (bs < n) ? std::min((uint64_t)run_sz, n - bs) : 0;
-            if (bc == 0) {
-                CUDA_CHECK(cudaMemcpyAsync(d_dst + off*RECORD_SIZE,
-                    d_src + off*RECORD_SIZE, ac*RECORD_SIZE,
-                    cudaMemcpyDeviceToDevice, s));
+        for (int g = 0; g < num_groups; g++) {
+            int g_start = g * group_size;
+            int g_end = std::min(g_start + group_size, current_runs);
+            int g_size = g_end - g_start;
+
+            if (g_size == 1) {
+                Run& r = runs[g_start];
+                CUDA_CHECK(cudaMemcpyAsync(d_dst + out_offset, d_src + r.byte_offset,
+                    r.num_records * RECORD_SIZE, cudaMemcpyDeviceToDevice, s));
+                new_runs.push_back({out_offset, r.num_records});
+                out_offset += r.num_records * RECORD_SIZE;
                 continue;
             }
-            int pblks = (ac+bc+items_per_blk-1) / items_per_blk;
-            pairs.push_back({off*RECORD_SIZE, (int)ac, bs*RECORD_SIZE, (int)bc,
-                             off*RECORD_SIZE, total_mblks});
-            total_mblks += pblks;
-        }
-        if (!pairs.empty()) {
-            CUDA_CHECK(cudaMemcpyAsync(dp, pairs.data(),
-                pairs.size()*sizeof(PairDesc2Way), cudaMemcpyHostToDevice, s));
-            launch_merge_2way(d_src, d_dst, dp, pairs.size(), total_mblks, s);
+
+            std::vector<Run> group_runs(runs.begin() + g_start, runs.begin() + g_end);
+
+            // Compute total records and partition count
+            uint64_t group_total = 0;
+            for (auto& r : group_runs) group_total += r.num_records;
+
+            int min_partitions = (int)((group_total + max_recs_per_part - 1) / max_recs_per_part);
+            int num_partitions = std::max(min_partitions * 2, 64);
+
+            // Sample-based partitioning with retry for oversized partitions
+            std::vector<KWayPartition> partitions;
+            int max_rec;
+            for (int attempt = 0; attempt < 4; attempt++) {
+                partitions.clear();
+                compute_sample_partitions(d_src, group_runs, g_size,
+                                          num_partitions, out_offset, partitions);
+                max_rec = 0;
+                for (auto& p : partitions) max_rec = std::max(max_rec, p.total_records);
+                if (max_rec <= max_recs_per_part) break;
+                num_partitions *= 2;
+            }
+
+            // Upload partition descriptors and launch K-way merge
+            KWayPartition* d_parts;
+            CUDA_CHECK(cudaMalloc(&d_parts, partitions.size() * sizeof(KWayPartition)));
+            CUDA_CHECK(cudaMemcpyAsync(d_parts, partitions.data(),
+                partitions.size() * sizeof(KWayPartition), cudaMemcpyHostToDevice, s));
+            launch_merge_kway(d_src, d_dst, d_parts, (int)partitions.size(), max_rec, s);
             CUDA_CHECK(cudaStreamSynchronize(s));
+            cudaFree(d_parts);
+
+            uint64_t merged_records = 0;
+            for (auto& r : group_runs) merged_records += r.num_records;
+            new_runs.push_back({out_offset, merged_records});
+            out_offset += merged_records * RECORD_SIZE;
         }
+
+        runs = new_runs;
         std::swap(d_src, d_dst);
-        num_passes++;
     }
-    // dp is pre-allocated — don't free here
+
     if (num_passes % 2 == 1) {
         CUDA_CHECK(cudaMemcpyAsync(d_dst, d_src, n*RECORD_SIZE,
                                     cudaMemcpyDeviceToDevice, s));

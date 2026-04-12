@@ -139,7 +139,7 @@ __global__ void compute_partition_ranges_kernel(
 }
 
 // Host orchestrator: compute sample-based partitions for a group of K runs
-static void compute_sample_partitions(
+void compute_sample_partitions(
     const uint8_t* d_runs,
     const std::vector<Run>& group_runs,
     int K, int P,
