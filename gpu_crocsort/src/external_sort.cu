@@ -170,17 +170,29 @@ ExternalGpuSort::~ExternalGpuSort() {
     if (d_key_buffer) cudaFree(d_key_buffer);
 }
 
-// Sort a chunk on GPU using the in-HBM K-way merge sort
-// This uses sample-based partitioning + 8-way shared-memory merge tree
-// (5 HBM passes instead of 17 with 2-way merge)
+// Sort a chunk on GPU: run generation + 2-way merge
+// d_in has input data, d_scratch is temp workspace. Result ends up in d_in.
 void ExternalGpuSort::sort_chunk_on_gpu(uint8_t* d_in, uint8_t* d_scratch,
                                          uint64_t n, cudaStream_t s) {
-    // gpu_crocsort_in_hbm sorts d_in in-place, allocates its own buffers internally
-    // It uses the K-way merge strategy by default (STRATEGY_KWAY)
-    // d_scratch is unused here since gpu_crocsort_in_hbm manages its own workspace
-    (void)d_scratch;
-    (void)s;  // gpu_crocsort_in_hbm uses default stream internally
-    gpu_crocsort_in_hbm(d_in, n, false, STRATEGY_KWAY);
+    int nblocks = (n + RECORDS_PER_BLOCK - 1) / RECORDS_PER_BLOCK;
+    int max_sp = nblocks * ((RECORDS_PER_BLOCK + SPARSE_INDEX_STRIDE - 1) / SPARSE_INDEX_STRIDE);
+
+    uint32_t* d_ovc; SparseEntry* d_sp; int* d_sc;
+    CUDA_CHECK(cudaMalloc(&d_ovc, n * sizeof(uint32_t)));
+    CUDA_CHECK(cudaMalloc(&d_sp, std::max(1, max_sp) * (int)sizeof(SparseEntry)));
+    CUDA_CHECK(cudaMalloc(&d_sc, std::max(1, nblocks) * (int)sizeof(int)));
+
+    launch_run_generation(d_in, d_scratch, d_ovc, n, d_sp, d_sc, nblocks, s);
+    CUDA_CHECK(cudaStreamSynchronize(s));
+    cudaFree(d_ovc); cudaFree(d_sp); cudaFree(d_sc);
+
+    // Iterative 2-way merge: result ends up in d_scratch
+    gpu_merge_inplace(d_scratch, d_in, n, s);
+
+    // Copy result back to d_in
+    CUDA_CHECK(cudaMemcpyAsync(d_in, d_scratch, n * RECORD_SIZE,
+                                cudaMemcpyDeviceToDevice, s));
+    CUDA_CHECK(cudaStreamSynchronize(s));
 }
 
 void ExternalGpuSort::gpu_merge_inplace(uint8_t* d_src, uint8_t* d_dst,
@@ -256,24 +268,34 @@ ExternalGpuSort::generate_runs_pipelined(
     // fully overlap all 3 stages. Instead: overlap upload with download,
     // sort sequentially (it uses 2 of the 3 buffers).
 
+    // Pipelined run generation:
+    // - Use 2 main buffers (d_buf[0], d_buf[1]) alternating, d_buf[2] as sort scratch
+    // - Overlap: D2H of chunk N on stream[2] runs concurrently with
+    //   CPU staging of chunk N+1, then H2D of chunk N+1 on stream[0]
+    //   overlaps with final D2H→host memcpy of chunk N
+
     for (int c = 0; c < total_chunks; c++) {
         uint64_t offset = (uint64_t)c * buf_records;
         uint64_t cur_n = std::min(buf_records, num_records - offset);
         uint64_t cur_bytes = cur_n * RECORD_SIZE;
-        int cur = c % 2;  // alternate between buf 0 and 1
-        int scratch = 2;   // buf 2 is always scratch
+        int cur = c % 2;
+        int scratch = 2;
 
-        // Upload
+        // Wait for any previous D2H into h_pin[cur] to finish
+        // (from 2 chunks ago using the same buffer)
+        CUDA_CHECK(cudaStreamSynchronize(streams[2]));
+
+        // Upload: stage to pinned then async H2D
         memcpy(h_pin[cur], h_data + offset * RECORD_SIZE, cur_bytes);
         CUDA_CHECK(cudaMemcpyAsync(d_buf[cur], h_pin[cur], cur_bytes,
                                     cudaMemcpyHostToDevice, streams[0]));
         CUDA_CHECK(cudaStreamSynchronize(streams[0]));
         h2d += cur_bytes;
 
-        // Sort (uses d_buf[cur] as input, d_buf[scratch] as temp)
+        // Sort
         sort_chunk_on_gpu(d_buf[cur], d_buf[scratch], cur_n, streams[1]);
 
-        // Extract keys to persistent GPU key buffer (essentially free at HBM bandwidth)
+        // Extract keys to persistent GPU key buffer
         uint64_t key_off = run_key_offsets.empty() ? 0 :
             run_key_offsets.back() + (runs.empty() ? 0 : runs.back().num_records * KEY_SIZE);
         if (d_key_buffer && (key_off + cur_n * KEY_SIZE) <= key_buffer_capacity) {
@@ -285,17 +307,32 @@ ExternalGpuSort::generate_runs_pipelined(
             run_key_offsets.push_back(key_off);
         }
 
-        // Download sorted records (result is in d_buf[cur])
+        // If previous chunk's D2H completed, copy its pinned data to final destination
+        int prev = 1 - cur;
+        if (c > 0) {
+            uint64_t prev_offset = (uint64_t)(c-1) * buf_records;
+            uint64_t prev_n = std::min(buf_records, num_records - prev_offset);
+            memcpy(h_data + prev_offset * RECORD_SIZE, h_pin[prev], prev_n * RECORD_SIZE);
+        }
+
+        // Start async D2H of current chunk (overlaps with next iteration's CPU staging)
         CUDA_CHECK(cudaMemcpyAsync(h_pin[cur], d_buf[cur], cur_bytes,
                                     cudaMemcpyDeviceToHost, streams[2]));
-        CUDA_CHECK(cudaStreamSynchronize(streams[2]));
-        memcpy(h_data + offset * RECORD_SIZE, h_pin[cur], cur_bytes);
         d2h += cur_bytes;
 
         runs.push_back({offset * RECORD_SIZE, cur_n});
         printf("\r  Run %d/%d: %.1f MB sorted    ", c+1, total_chunks,
                cur_bytes/(1024.0*1024.0));
         fflush(stdout);
+    }
+
+    // Finalize: wait for last D2H and copy to destination
+    CUDA_CHECK(cudaStreamSynchronize(streams[2]));
+    if (total_chunks > 0) {
+        int last = (total_chunks - 1) % 2;
+        uint64_t last_offset = (uint64_t)(total_chunks - 1) * buf_records;
+        uint64_t last_n = std::min(buf_records, num_records - last_offset);
+        memcpy(h_data + last_offset * RECORD_SIZE, h_pin[last], last_n * RECORD_SIZE);
     }
     printf("\n");
     ms = timer.end_ms();
