@@ -489,32 +489,20 @@ uint8_t* ExternalGpuSort::streaming_merge(
     }
 
     // ── Step 3: CUB radix sort ALL keys + permutation in ONE pass ──
-    // Allocate all merge buffers in a SINGLE cudaMalloc to minimize alloc overhead.
-    // Need: d_sort_keys(N×8) + d_sort_keys_alt(N×8) + d_perm_in(N×4) + d_perm_out(N×4) + temp
-    // Total: N×24 + temp. Query CUB temp size first.
+    // Reuse sort buffers (d_buf[0], d_buf[1]) as merge workspace — NO new allocation!
+    // d_buf[0] + d_buf[1] = 2 × buf_bytes = ~10-16GB, plenty for N×24B merge buffers.
     passes = 1;
     printf("  CUB radix sort on all %lu keys (single pass)...\n", num_records);
 
-    // Compute CUB temp storage requirement
-    uint64_t* dummy_keys[2] = {nullptr, nullptr};
-    uint32_t* dummy_perm[2] = {nullptr, nullptr};
-    cub::DoubleBuffer<uint64_t> dummy_kbuf(dummy_keys[0], dummy_keys[1]);
-    cub::DoubleBuffer<uint32_t> dummy_pbuf(dummy_perm[0], dummy_perm[1]);
-    size_t cub_temp_bytes = 0;
-    cub::DeviceRadixSort::SortPairs(nullptr, cub_temp_bytes,
-        dummy_kbuf, dummy_pbuf, (int)num_records, 0, 64, streams[0]);
-
-    // Single allocation for all merge buffers
-    size_t merge_buf_size = num_records * (2*sizeof(uint64_t) + 2*sizeof(uint32_t)) + cub_temp_bytes;
-    uint8_t* d_merge_arena;
-    CUDA_CHECK(cudaMalloc(&d_merge_arena, merge_buf_size));
-
-    // Carve out sub-buffers from the arena
-    uint64_t* d_sort_keys = (uint64_t*)d_merge_arena;
+    // Carve merge sub-buffers from existing sort buffers
+    // d_buf[0]: d_sort_keys(N×8) + d_sort_keys_alt(N×8) = N×16B
+    // d_buf[1]: d_perm_in(N×4) + d_perm_out(N×4) + CUB temp = N×8B + temp
+    uint64_t* d_sort_keys = (uint64_t*)d_buf[0];
     uint64_t* d_sort_keys_alt = d_sort_keys + num_records;
-    d_perm_in = (uint32_t*)(d_sort_keys_alt + num_records);
+    d_perm_in = (uint32_t*)d_buf[1];
     d_perm_out = d_perm_in + num_records;
     void* d_temp = (void*)(d_perm_out + num_records);
+    size_t cub_temp_bytes = buf_bytes - num_records * 2 * sizeof(uint32_t);  // remaining space in d_buf[1]
 
     // Initialize permutation to identity on GPU
     {
@@ -551,8 +539,10 @@ uint8_t* ExternalGpuSort::streaming_merge(
     CUDA_CHECK(cudaMemcpy(h_perm, d_perm_in, total_perm_bytes, cudaMemcpyDeviceToHost));
     d2h += total_perm_bytes;
 
-    // Free single merge arena (contains sort_keys, perm, temp)
-    CUDA_CHECK(cudaFree(d_merge_arena));
+    // Merge workspace was carved from sort buffers — free those
+    for (int i = 0; i < NBUFS; i++) {
+        if (d_buf[i]) { cudaFree(d_buf[i]); d_buf[i] = nullptr; }
+    }
     if (h_keys) CUDA_CHECK(cudaFreeHost(h_keys));
 
     // ── Step 5: Multi-threaded CPU value gather using permutation ──
@@ -675,11 +665,9 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
     printf("  %d runs in %.0f ms (%.2f GB/s effective)\n\n",
            r.num_runs, r.run_gen_ms, total_bytes/(r.run_gen_ms*1e6));
 
-    // Free sort buffers and workspace to reclaim GPU memory for merge
+    // Free sort workspace but KEEP sort buffers — reuse as merge arena
     sort_ws.free();
-    for (int i = 0; i < NBUFS; i++) {
-        if (d_buf[i]) { cudaFree(d_buf[i]); d_buf[i] = nullptr; }
-    }
+    // d_buf[0..NBUFS-1] stay allocated — total ~16GB available for merge
 
     printf("== Phase 2: GPU Streaming Merge ==\n");
     double mg_h2d = 0, mg_d2h = 0;
