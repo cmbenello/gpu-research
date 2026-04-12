@@ -28,6 +28,11 @@
 #include <chrono>
 #include <thread>
 
+// Forward-declare the in-HBM sort from host_sort.cu (uses K-way merge tree)
+enum MergeStrategy { STRATEGY_2WAY, STRATEGY_KWAY };
+void gpu_crocsort_in_hbm(uint8_t* d_data, uint64_t num_records,
+                           bool verify, MergeStrategy strategy);
+
 // Forward-declare kernel launchers
 struct PairDesc2Way {
     uint64_t a_byte_offset; int a_count;
@@ -165,28 +170,17 @@ ExternalGpuSort::~ExternalGpuSort() {
     if (d_key_buffer) cudaFree(d_key_buffer);
 }
 
-// Sort a chunk on GPU: run generation + iterative 2-way merge
+// Sort a chunk on GPU using the in-HBM K-way merge sort
+// This uses sample-based partitioning + 8-way shared-memory merge tree
+// (5 HBM passes instead of 17 with 2-way merge)
 void ExternalGpuSort::sort_chunk_on_gpu(uint8_t* d_in, uint8_t* d_scratch,
                                          uint64_t n, cudaStream_t s) {
-    int nblocks = (n + RECORDS_PER_BLOCK - 1) / RECORDS_PER_BLOCK;
-    int max_sp = nblocks * ((RECORDS_PER_BLOCK + SPARSE_INDEX_STRIDE - 1) / SPARSE_INDEX_STRIDE);
-
-    uint32_t* d_ovc; SparseEntry* d_sp; int* d_sc;
-    CUDA_CHECK(cudaMalloc(&d_ovc, n * sizeof(uint32_t)));
-    CUDA_CHECK(cudaMalloc(&d_sp, std::max(1, max_sp) * (int)sizeof(SparseEntry)));
-    CUDA_CHECK(cudaMalloc(&d_sc, std::max(1, nblocks) * (int)sizeof(int)));
-
-    launch_run_generation(d_in, d_scratch, d_ovc, n, d_sp, d_sc, nblocks, s);
-    CUDA_CHECK(cudaStreamSynchronize(s));
-    cudaFree(d_ovc); cudaFree(d_sp); cudaFree(d_sc);
-
-    // Iterative 2-way merge within GPU
-    gpu_merge_inplace(d_scratch, d_in, n, s);
-
-    // Ensure result is in d_in
-    CUDA_CHECK(cudaMemcpyAsync(d_in, d_scratch, n * RECORD_SIZE,
-                                cudaMemcpyDeviceToDevice, s));
-    CUDA_CHECK(cudaStreamSynchronize(s));
+    // gpu_crocsort_in_hbm sorts d_in in-place, allocates its own buffers internally
+    // It uses the K-way merge strategy by default (STRATEGY_KWAY)
+    // d_scratch is unused here since gpu_crocsort_in_hbm manages its own workspace
+    (void)d_scratch;
+    (void)s;  // gpu_crocsort_in_hbm uses default stream internally
+    gpu_crocsort_in_hbm(d_in, n, false, STRATEGY_KWAY);
 }
 
 void ExternalGpuSort::gpu_merge_inplace(uint8_t* d_src, uint8_t* d_dst,

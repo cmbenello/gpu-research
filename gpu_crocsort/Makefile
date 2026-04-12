@@ -110,8 +110,8 @@ test-edge: experiments/test_edge_cases.cu src/run_generation.cu src/merge.cu src
 	./test_edge_cases
 
 # External sort (data > GPU memory)
-external-sort: src/external_sort.cu src/run_generation.cu src/merge.cu $(HDRS)
-	$(NVCC) $(NVCC_FLAGS) $(INCLUDES) -DEXTERNAL_SORT_MAIN src/external_sort.cu src/run_generation.cu src/merge.cu -o external_sort
+external-sort: src/external_sort.cu src/run_generation.cu src/merge.cu src/host_sort.cu $(HDRS)
+	$(NVCC) $(NVCC_FLAGS) $(INCLUDES) -DEXTERNAL_SORT_MAIN src/external_sort.cu src/run_generation.cu src/merge.cu src/host_sort.cu -o external_sort
 
 # ── Build all experiments ───────────────────────────────────────────
 
