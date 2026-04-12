@@ -101,11 +101,13 @@ class ExternalGpuSort {
     cudaStream_t streams[NBUFS];
     cudaEvent_t events[NBUFS];
 
-    // Persistent key buffer: holds sorted keys from ALL runs
-    // Stays on GPU across run generation, used directly by merge phase
+    // Persistent key buffer
     uint8_t* d_key_buffer;
-    uint64_t key_buffer_capacity;  // total bytes allocated
-    std::vector<uint64_t> run_key_offsets;  // byte offset per run in d_key_buffer
+    uint64_t key_buffer_capacity;
+    std::vector<uint64_t> run_key_offsets;
+
+    // Pre-allocated sort workspace (avoids cudaMalloc per chunk)
+    SortWorkspace sort_ws;
 
 public:
     struct TimingResult {
@@ -168,31 +170,53 @@ ExternalGpuSort::~ExternalGpuSort() {
         cudaEventDestroy(events[i]);
     }
     if (d_key_buffer) cudaFree(d_key_buffer);
+    sort_ws.free();
 }
 
-// Sort a chunk on GPU using the K-way merge tree from host_sort.cu.
-// Temporarily frees the other sort buffer to make room (gpu_crocsort_in_hbm
-// allocates its own d_sorted + d_merge_buf internally).
+// Pre-allocated workspace for sort_chunk_on_gpu (allocated once in sort())
+struct SortWorkspace {
+    uint32_t* d_ovc = nullptr;
+    SparseEntry* d_sp = nullptr;
+    int* d_sc = nullptr;
+    PairDesc2Way* d_merge_desc = nullptr;
+    uint64_t capacity = 0;  // max records this workspace supports
+
+    void allocate(uint64_t max_records) {
+        if (capacity >= max_records) return;
+        free();
+        capacity = max_records;
+        int nblocks = (max_records + RECORDS_PER_BLOCK - 1) / RECORDS_PER_BLOCK;
+        int max_sp = nblocks * ((RECORDS_PER_BLOCK + SPARSE_INDEX_STRIDE - 1) / SPARSE_INDEX_STRIDE);
+        int max_pairs = (max_records + 2 * RECORDS_PER_BLOCK - 1) / (2 * RECORDS_PER_BLOCK);
+        CUDA_CHECK(cudaMalloc(&d_ovc, max_records * sizeof(uint32_t)));
+        CUDA_CHECK(cudaMalloc(&d_sp, std::max(1, max_sp) * (int)sizeof(SparseEntry)));
+        CUDA_CHECK(cudaMalloc(&d_sc, std::max(1, nblocks) * (int)sizeof(int)));
+        CUDA_CHECK(cudaMalloc(&d_merge_desc, max_pairs * sizeof(PairDesc2Way)));
+    }
+    void free() {
+        if (d_ovc) { cudaFree(d_ovc); d_ovc = nullptr; }
+        if (d_sp) { cudaFree(d_sp); d_sp = nullptr; }
+        if (d_sc) { cudaFree(d_sc); d_sc = nullptr; }
+        if (d_merge_desc) { cudaFree(d_merge_desc); d_merge_desc = nullptr; }
+        capacity = 0;
+    }
+};
+
+// Sort a chunk on GPU: run generation + 2-way merge (no per-call allocations)
 void ExternalGpuSort::sort_chunk_on_gpu(uint8_t* d_in, uint8_t* d_scratch,
                                          uint64_t n, cudaStream_t s) {
-    (void)s;
-    int scratch_idx = -1;
-    // Find which d_buf[] is the scratch buffer and free it
-    for (int i = 0; i < NBUFS; i++) {
-        if (d_buf[i] == d_scratch) { scratch_idx = i; break; }
-    }
-    if (scratch_idx >= 0) {
-        cudaFree(d_buf[scratch_idx]);
-        d_buf[scratch_idx] = nullptr;
-    }
+    // Use pre-allocated workspace (sort_ws must be allocated before calling)
+    int nblocks = (n + RECORDS_PER_BLOCK - 1) / RECORDS_PER_BLOCK;
 
-    // K-way merge tree: 5-6 HBM passes instead of 17
-    gpu_crocsort_in_hbm(d_in, n, false, STRATEGY_KWAY);
+    launch_run_generation(d_in, d_scratch, sort_ws.d_ovc, n,
+                          sort_ws.d_sp, sort_ws.d_sc, nblocks, s);
+    CUDA_CHECK(cudaStreamSynchronize(s));
 
-    // Re-allocate scratch buffer
-    if (scratch_idx >= 0) {
-        CUDA_CHECK(cudaMalloc(&d_buf[scratch_idx], buf_bytes));
-    }
+    gpu_merge_inplace(d_scratch, d_in, n, s);
+
+    CUDA_CHECK(cudaMemcpyAsync(d_in, d_scratch, n * RECORD_SIZE,
+                                cudaMemcpyDeviceToDevice, s));
+    CUDA_CHECK(cudaStreamSynchronize(s));
 }
 
 void ExternalGpuSort::gpu_merge_inplace(uint8_t* d_src, uint8_t* d_dst,
@@ -200,11 +224,10 @@ void ExternalGpuSort::gpu_merge_inplace(uint8_t* d_src, uint8_t* d_dst,
     int items_per_blk = MERGE_ITEMS_PER_THREAD_CFG * MERGE_BLOCK_THREADS_CFG;
     int num_passes = 0;
 
-    // Pre-allocate descriptor buffer (max pairs = n / (2 * RECORDS_PER_BLOCK))
-    int max_pairs = (int)((n + 2 * RECORDS_PER_BLOCK - 1) / (2 * RECORDS_PER_BLOCK));
-    PairDesc2Way* dp;
-    CUDA_CHECK(cudaMalloc(&dp, max_pairs * sizeof(PairDesc2Way)));
+    // Use pre-allocated descriptor buffer from sort_ws
+    PairDesc2Way* dp = sort_ws.d_merge_desc;
     std::vector<PairDesc2Way> pairs;
+    int max_pairs = (int)((n + 2 * RECORDS_PER_BLOCK - 1) / (2 * RECORDS_PER_BLOCK));
     pairs.reserve(max_pairs);
 
     for (int run_sz = RECORDS_PER_BLOCK; run_sz < (int)n; run_sz *= 2) {
@@ -235,7 +258,7 @@ void ExternalGpuSort::gpu_merge_inplace(uint8_t* d_src, uint8_t* d_dst,
         std::swap(d_src, d_dst);
         num_passes++;
     }
-    CUDA_CHECK(cudaFree(dp));
+    // dp is pre-allocated — don't free here
     if (num_passes % 2 == 1) {
         CUDA_CHECK(cudaMemcpyAsync(d_dst, d_src, n*RECORD_SIZE,
                                     cudaMemcpyDeviceToDevice, s));
@@ -649,6 +672,9 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
     }
     run_key_offsets.clear();
 
+    // Pre-allocate sort workspace (OVC, sparse, merge descriptors) ONCE
+    sort_ws.allocate(buf_records);
+
     printf("\n== Phase 1: Run Generation (pipelined) ==\n");
     double rg_h2d = 0, rg_d2h = 0;
     auto runs = generate_runs_pipelined(h_data, num_records,
@@ -657,7 +683,8 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
     printf("  %d runs in %.0f ms (%.2f GB/s effective)\n\n",
            r.num_runs, r.run_gen_ms, total_bytes/(r.run_gen_ms*1e6));
 
-    // Free sort buffers to reclaim GPU memory for merge workspace
+    // Free sort buffers and workspace to reclaim GPU memory for merge
+    sort_ws.free();
     for (int i = 0; i < NBUFS; i++) {
         if (d_buf[i]) { cudaFree(d_buf[i]); d_buf[i] = nullptr; }
     }
