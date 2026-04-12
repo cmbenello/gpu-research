@@ -27,6 +27,7 @@
 #include <vector>
 #include <chrono>
 #include <thread>
+#include <cub/cub.cuh>
 
 // Forward-declare the in-HBM sort from host_sort.cu
 enum MergeStrategy { STRATEGY_2WAY, STRATEGY_KWAY };
@@ -91,6 +92,43 @@ static uint64_t host_upper_bound(const uint8_t* data, uint64_t n, const uint8_t*
     return lo;
 }
 
+// ── GPU kernels for CUB radix sort pipeline ─────────────────────────
+
+// Extract 8-byte sort key (big-endian) from each record for CUB radix sort
+__global__ void extract_sort_keys_kernel(
+    const uint8_t* __restrict__ records,
+    uint64_t* __restrict__ keys,
+    uint32_t* __restrict__ indices,
+    uint64_t num_records
+) {
+    uint64_t i = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= num_records) return;
+    const uint8_t* rec = records + i * RECORD_SIZE;
+    // Big-endian 8-byte key for correct lexicographic ordering
+    uint64_t k = 0;
+    for (int b = 0; b < 8; b++) k = (k << 8) | rec[b];
+    keys[i] = k;
+    indices[i] = (uint32_t)i;
+}
+
+// Reorder records from src to dst using sorted index array
+__global__ void reorder_records_kernel(
+    const uint8_t* __restrict__ src,
+    uint8_t* __restrict__ dst,
+    const uint32_t* __restrict__ sorted_indices,
+    uint64_t num_records
+) {
+    uint64_t i = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= num_records) return;
+    uint32_t src_idx = sorted_indices[i];
+    const uint8_t* s = src + (uint64_t)src_idx * RECORD_SIZE;
+    uint8_t* d = dst + i * RECORD_SIZE;
+    // Copy 100-byte record (25 × uint32)
+    for (int b = 0; b < RECORD_SIZE; b += 4) {
+        *reinterpret_cast<uint32_t*>(d + b) = *reinterpret_cast<const uint32_t*>(s + b);
+    }
+}
+
 // ── GPU key extraction kernel ────────────────────────────────────────
 // Extract KEY_SIZE bytes from each sorted record into a contiguous key array.
 // Runs at HBM bandwidth (~672 GB/s), essentially free compared to PCIe.
@@ -110,39 +148,28 @@ __global__ void extract_keys_kernel(
 
 // Pre-allocated workspace for sort_chunk_on_gpu (allocated once, reused per chunk)
 struct SortWorkspace {
-    uint32_t* d_ovc = nullptr;
-    SparseEntry* d_sp = nullptr;
-    int* d_sc = nullptr;
-    PairDesc2Way* d_merge_desc = nullptr;
-    KWayPartition* d_kway_parts = nullptr;  // pre-allocated K-way partition buffer
-    int kway_parts_capacity = 0;            // max partitions this buffer supports
+    // CUB radix sort workspace
+    uint64_t* d_keys = nullptr;
+    uint64_t* d_keys_alt = nullptr;
+    uint32_t* d_indices = nullptr;
+    uint32_t* d_indices_alt = nullptr;
     uint64_t capacity = 0;
 
     void allocate(uint64_t max_records) {
         if (capacity >= max_records) return;
         free();
         capacity = max_records;
-        int nblocks = (max_records + RECORDS_PER_BLOCK - 1) / RECORDS_PER_BLOCK;
-        int max_sp = nblocks * ((RECORDS_PER_BLOCK + SPARSE_INDEX_STRIDE - 1) / SPARSE_INDEX_STRIDE);
-        int max_pairs = (max_records + 2 * RECORDS_PER_BLOCK - 1) / (2 * RECORDS_PER_BLOCK);
-        // K-way partitions: max ~2x records/max_recs_per_part, with headroom
-        int device; cudaGetDevice(&device);
-        cudaDeviceProp props; cudaGetDeviceProperties(&props, device);
-        int max_recs_per_part = (props.sharedMemPerBlockOptin - 1024) / (2 * RECORD_SIZE);
-        kway_parts_capacity = std::max(256, (int)((max_records / max_recs_per_part) * 4));
-        CUDA_CHECK(cudaMalloc(&d_ovc, max_records * sizeof(uint32_t)));
-        CUDA_CHECK(cudaMalloc(&d_sp, std::max(1, max_sp) * (int)sizeof(SparseEntry)));
-        CUDA_CHECK(cudaMalloc(&d_sc, std::max(1, nblocks) * (int)sizeof(int)));
-        CUDA_CHECK(cudaMalloc(&d_merge_desc, max_pairs * sizeof(PairDesc2Way)));
-        CUDA_CHECK(cudaMalloc(&d_kway_parts, kway_parts_capacity * sizeof(KWayPartition)));
+        CUDA_CHECK(cudaMalloc(&d_keys, max_records * sizeof(uint64_t)));
+        CUDA_CHECK(cudaMalloc(&d_keys_alt, max_records * sizeof(uint64_t)));
+        CUDA_CHECK(cudaMalloc(&d_indices, max_records * sizeof(uint32_t)));
+        CUDA_CHECK(cudaMalloc(&d_indices_alt, max_records * sizeof(uint32_t)));
     }
     void free() {
-        if (d_ovc) { cudaFree(d_ovc); d_ovc = nullptr; }
-        if (d_sp) { cudaFree(d_sp); d_sp = nullptr; }
-        if (d_sc) { cudaFree(d_sc); d_sc = nullptr; }
-        if (d_merge_desc) { cudaFree(d_merge_desc); d_merge_desc = nullptr; }
-        if (d_kway_parts) { cudaFree(d_kway_parts); d_kway_parts = nullptr; }
-        capacity = 0; kway_parts_capacity = 0;
+        if (d_keys) { cudaFree(d_keys); d_keys = nullptr; }
+        if (d_keys_alt) { cudaFree(d_keys_alt); d_keys_alt = nullptr; }
+        if (d_indices) { cudaFree(d_indices); d_indices = nullptr; }
+        if (d_indices_alt) { cudaFree(d_indices_alt); d_indices_alt = nullptr; }
+        capacity = 0;
     }
 };
 
@@ -232,19 +259,31 @@ ExternalGpuSort::~ExternalGpuSort() {
     sort_ws.free();
 }
 
-// Pre-allocated workspace for sort_chunk_on_gpu (allocated once in sort())
-// Sort a chunk on GPU: run generation + 2-way merge (no per-call allocations)
+// Sort a chunk on GPU using CUB radix sort on 8-byte key prefix + record reorder.
+// CUB does 8 radix passes at near-HBM bandwidth — replaces bitonic sort + K-way merge.
 void ExternalGpuSort::sort_chunk_on_gpu(uint8_t* d_in, uint8_t* d_scratch,
                                          uint64_t n, cudaStream_t s) {
-    // Use pre-allocated workspace (sort_ws must be allocated before calling)
-    int nblocks = (n + RECORDS_PER_BLOCK - 1) / RECORDS_PER_BLOCK;
+    int nthreads = 256;
+    int nblks = (n + nthreads - 1) / nthreads;
 
-    launch_run_generation(d_in, d_scratch, sort_ws.d_ovc, n,
-                          sort_ws.d_sp, sort_ws.d_sc, nblocks, s);
-    CUDA_CHECK(cudaStreamSynchronize(s));
+    // Step 1: Extract big-endian uint64 keys + initialize index array
+    extract_sort_keys_kernel<<<nblks, nthreads, 0, s>>>(
+        d_in, sort_ws.d_keys, sort_ws.d_indices, n);
 
-    gpu_merge_inplace(d_scratch, d_in, n, s);
+    // Step 2: CUB radix sort (key, index) pairs — pre-allocated double buffers
+    cub::DoubleBuffer<uint64_t> d_keys_buf(sort_ws.d_keys, sort_ws.d_keys_alt);
+    cub::DoubleBuffer<uint32_t> d_idx_buf(sort_ws.d_indices, sort_ws.d_indices_alt);
 
+    size_t temp_bytes = buf_bytes;  // d_scratch is buf_bytes large
+    cub::DeviceRadixSort::SortPairs(d_scratch, temp_bytes,
+        d_keys_buf, d_idx_buf, (int)n, 0, 64, s);
+    CUDA_CHECK(cudaStreamSynchronize(s));  // ensure sort done before reusing d_scratch
+
+    // Step 3: Reorder full records using sorted indices (d_in → d_scratch)
+    reorder_records_kernel<<<nblks, nthreads, 0, s>>>(
+        d_in, d_scratch, d_idx_buf.Current(), n);
+
+    // Copy sorted result back to d_in
     CUDA_CHECK(cudaMemcpyAsync(d_in, d_scratch, n * RECORD_SIZE,
                                 cudaMemcpyDeviceToDevice, s));
     CUDA_CHECK(cudaStreamSynchronize(s));
