@@ -528,22 +528,22 @@ uint8_t* ExternalGpuSort::streaming_merge(
 
         if (leftover) {
             KeyRun& rl = key_runs[cur_runs-1];
-            CUDA_CHECK(cudaMemcpy(d_keys_out + out_key_off,
+            CUDA_CHECK(cudaMemcpyAsync(d_keys_out + out_key_off,
                 d_keys_in + rl.key_byte_offset,
-                rl.num_records * KEY_SIZE, cudaMemcpyDeviceToDevice));
-            CUDA_CHECK(cudaMemcpy(d_perm_out + out_perm_off,
+                rl.num_records * KEY_SIZE, cudaMemcpyDeviceToDevice, streams[0]));
+            CUDA_CHECK(cudaMemcpyAsync(d_perm_out + out_perm_off,
                 d_perm_in + rl.perm_offset,
-                rl.num_records * sizeof(uint32_t), cudaMemcpyDeviceToDevice));
+                rl.num_records * sizeof(uint32_t), cudaMemcpyDeviceToDevice, streams[0]));
             new_runs.push_back({out_key_off, rl.num_records, out_perm_off});
         }
 
-        // Upload descriptors to pre-allocated buffer and launch
-        CUDA_CHECK(cudaMemcpy(d_key_pairs, pairs.data(),
-            npairs * sizeof(KeyMergePair), cudaMemcpyHostToDevice));
+        // Upload descriptors and launch — all on stream[0], no CPU sync between passes
+        CUDA_CHECK(cudaMemcpyAsync(d_key_pairs, pairs.data(),
+            npairs * sizeof(KeyMergePair), cudaMemcpyHostToDevice, streams[0]));
 
         launch_merge_keys_only(d_keys_in, d_keys_out, d_perm_in, d_perm_out,
                                 d_key_pairs, npairs, total_blocks, streams[0]);
-        CUDA_CHECK(cudaStreamSynchronize(streams[0]));
+        // No sync here — next pass's descriptor upload auto-orders on same stream
 
         printf("    Pass %d: %d -> %d runs, %d blocks (keys only, %.1f MB traffic)\n",
                passes, cur_runs, (int)new_runs.size(), total_blocks,
@@ -556,7 +556,8 @@ uint8_t* ExternalGpuSort::streaming_merge(
 
     CUDA_CHECK(cudaFree(d_key_pairs));
 
-    // ── Step 4: Download permutation ──
+    // ── Step 4: Download permutation (sync here to ensure all merge passes done) ──
+    CUDA_CHECK(cudaStreamSynchronize(streams[0]));
     printf("  Downloading permutation (%.2f GB)...\n", total_perm_bytes/1e9);
     uint32_t* h_perm;
     CUDA_CHECK(cudaMallocHost(&h_perm, total_perm_bytes));
