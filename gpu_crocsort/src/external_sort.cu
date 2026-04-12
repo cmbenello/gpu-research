@@ -211,8 +211,6 @@ private:
 
     void sort_chunk_on_gpu(uint8_t* d_in, uint8_t* d_scratch,
                             uint64_t n, cudaStream_t s);
-    void gpu_merge_inplace(uint8_t* d_src, uint8_t* d_dst,
-                            uint64_t n, cudaStream_t s);
 
     std::vector<RunInfo> generate_runs_pipelined(
         uint8_t* h_data, uint64_t num_records,
@@ -289,104 +287,7 @@ void ExternalGpuSort::sort_chunk_on_gpu(uint8_t* d_in, uint8_t* d_scratch,
     CUDA_CHECK(cudaStreamSynchronize(s));
 }
 
-void ExternalGpuSort::gpu_merge_inplace(uint8_t* d_src, uint8_t* d_dst,
-                                          uint64_t n, cudaStream_t s) {
-    // Build initial run list from bitonic-sorted blocks
-    int num_runs_initial = (n + RECORDS_PER_BLOCK - 1) / RECORDS_PER_BLOCK;
-    std::vector<Run> runs(num_runs_initial);
-    for (int i = 0; i < num_runs_initial; i++) {
-        runs[i].byte_offset = (uint64_t)i * RECORDS_PER_BLOCK * RECORD_SIZE;
-        runs[i].num_records = std::min((uint64_t)RECORDS_PER_BLOCK,
-                                       n - (uint64_t)i * RECORDS_PER_BLOCK);
-    }
-
-    // Query max records per K-way partition (shared memory limit)
-    int device; cudaGetDevice(&device);
-    cudaDeviceProp props; cudaGetDeviceProperties(&props, device);
-    int max_smem = props.sharedMemPerBlockOptin;
-    int max_recs_per_part = (max_smem - 1024) / (2 * RECORD_SIZE);
-
-    int num_passes = 0;
-
-    while (runs.size() > 1) {
-        num_passes++;
-        int current_runs = (int)runs.size();
-        int group_size = std::min(KWAY_K, current_runs);
-        int num_groups = (current_runs + group_size - 1) / group_size;
-
-        std::vector<Run> new_runs;
-        uint64_t out_offset = 0;
-
-        for (int g = 0; g < num_groups; g++) {
-            int g_start = g * group_size;
-            int g_end = std::min(g_start + group_size, current_runs);
-            int g_size = g_end - g_start;
-
-            if (g_size == 1) {
-                Run& r = runs[g_start];
-                CUDA_CHECK(cudaMemcpyAsync(d_dst + out_offset, d_src + r.byte_offset,
-                    r.num_records * RECORD_SIZE, cudaMemcpyDeviceToDevice, s));
-                new_runs.push_back({out_offset, r.num_records});
-                out_offset += r.num_records * RECORD_SIZE;
-                continue;
-            }
-
-            std::vector<Run> group_runs(runs.begin() + g_start, runs.begin() + g_end);
-
-            // Compute total records and partition count
-            uint64_t group_total = 0;
-            for (auto& r : group_runs) group_total += r.num_records;
-
-            int min_partitions = (int)((group_total + max_recs_per_part - 1) / max_recs_per_part);
-            int num_partitions = std::max(min_partitions * 2, 64);
-
-            // Sample-based partitioning with retry for oversized partitions
-            std::vector<KWayPartition> partitions;
-            int max_rec;
-            for (int attempt = 0; attempt < 4; attempt++) {
-                partitions.clear();
-                compute_sample_partitions(d_src, group_runs, g_size,
-                                          num_partitions, out_offset, partitions);
-                max_rec = 0;
-                for (auto& p : partitions) max_rec = std::max(max_rec, p.total_records);
-                if (max_rec <= max_recs_per_part) break;
-                num_partitions *= 2;
-            }
-
-            // Upload partition descriptors to pre-allocated buffer and launch
-            if ((int)partitions.size() <= sort_ws.kway_parts_capacity) {
-                CUDA_CHECK(cudaMemcpyAsync(sort_ws.d_kway_parts, partitions.data(),
-                    partitions.size() * sizeof(KWayPartition), cudaMemcpyHostToDevice, s));
-                launch_merge_kway(d_src, d_dst, sort_ws.d_kway_parts,
-                                  (int)partitions.size(), max_rec, s);
-                CUDA_CHECK(cudaStreamSynchronize(s));
-            } else {
-                // Fallback: allocate if pre-allocated buffer too small
-                KWayPartition* d_parts;
-                CUDA_CHECK(cudaMalloc(&d_parts, partitions.size() * sizeof(KWayPartition)));
-                CUDA_CHECK(cudaMemcpyAsync(d_parts, partitions.data(),
-                    partitions.size() * sizeof(KWayPartition), cudaMemcpyHostToDevice, s));
-                launch_merge_kway(d_src, d_dst, d_parts, (int)partitions.size(), max_rec, s);
-                CUDA_CHECK(cudaStreamSynchronize(s));
-                cudaFree(d_parts);
-            }
-
-            uint64_t merged_records = 0;
-            for (auto& r : group_runs) merged_records += r.num_records;
-            new_runs.push_back({out_offset, merged_records});
-            out_offset += merged_records * RECORD_SIZE;
-        }
-
-        runs = new_runs;
-        std::swap(d_src, d_dst);
-    }
-
-    if (num_passes % 2 == 1) {
-        CUDA_CHECK(cudaMemcpyAsync(d_dst, d_src, n*RECORD_SIZE,
-                                    cudaMemcpyDeviceToDevice, s));
-        CUDA_CHECK(cudaStreamSynchronize(s));
-    }
-}
+// gpu_merge_inplace removed — CUB radix sort replaced bitonic+K-way merge
 
 // ════════════════════════════════════════════════════════════════════
 // Phase 1: Triple-Buffered Run Generation
