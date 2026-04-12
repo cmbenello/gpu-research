@@ -635,7 +635,7 @@ uint8_t* ExternalGpuSort::streaming_merge(
     // the "copy data" phase (random source reads + sequential writes).
     // Deeper prefetch pipeline hides more DRAM latency.
     auto gather_worker = [&](uint64_t start, uint64_t end) {
-        constexpr int BLOCK = 1024; // larger block = deeper prefetch pipeline
+        constexpr int BLOCK = 256;  // balanced: enough prefetch depth without cache pressure
         const uint8_t* src_ptrs[BLOCK];
 
         for (uint64_t base = start; base < end; base += BLOCK) {
