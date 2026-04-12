@@ -391,25 +391,14 @@ ExternalGpuSort::generate_runs_pipelined(
         // (from 2 chunks ago using the same buffer)
         CUDA_CHECK(cudaStreamSynchronize(streams[2]));
 
-        // If previous chunk's D2H completed, copy its pinned data to final destination
-        // (moved here from after sort to overlap CPU memcpy with upload)
-        int prev = 1 - cur;
-        if (c > 0) {
-            uint64_t prev_offset = (uint64_t)(c-1) * buf_records;
-            uint64_t prev_n = std::min(buf_records, num_records - prev_offset);
-            memcpy(h_data + prev_offset * RECORD_SIZE, h_pin[prev], prev_n * RECORD_SIZE);
-        }
-
         // Upload: stage to pinned then async H2D
         memcpy(h_pin[cur], h_data + offset * RECORD_SIZE, cur_bytes);
         CUDA_CHECK(cudaMemcpyAsync(d_buf[cur], h_pin[cur], cur_bytes,
                                     cudaMemcpyHostToDevice, streams[0]));
-        // Use event to let sort stream wait for upload, instead of CPU sync
-        CUDA_CHECK(cudaEventRecord(events[0], streams[0]));
-        CUDA_CHECK(cudaStreamWaitEvent(streams[1], events[0], 0));
+        CUDA_CHECK(cudaStreamSynchronize(streams[0]));
         h2d += cur_bytes;
 
-        // Sort (waits for H2D via event, not CPU sync — CPU is free to do other work)
+        // Sort
         sort_chunk_on_gpu(d_buf[cur], d_buf[scratch], cur_n, streams[1]);
 
         // Extract keys to persistent GPU key buffer
@@ -422,6 +411,14 @@ ExternalGpuSort::generate_runs_pipelined(
                 d_buf[cur], d_key_buffer + key_off, cur_n);
             CUDA_CHECK(cudaStreamSynchronize(streams[1]));
             run_key_offsets.push_back(key_off);
+        }
+
+        // If previous chunk's D2H completed, copy its pinned data to final destination
+        int prev = 1 - cur;
+        if (c > 0) {
+            uint64_t prev_offset = (uint64_t)(c-1) * buf_records;
+            uint64_t prev_n = std::min(buf_records, num_records - prev_offset);
+            memcpy(h_data + prev_offset * RECORD_SIZE, h_pin[prev], prev_n * RECORD_SIZE);
         }
 
         // Start async D2H of current chunk (overlaps with next iteration's CPU staging)
