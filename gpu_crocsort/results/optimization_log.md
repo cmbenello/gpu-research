@@ -89,3 +89,18 @@ Phase 2: Key-Only Merge (CPU-gather-bound, ~37% of time)
   - Reduces TLB misses: gather went from 15.5 → 19.7 GB/s
   - 60GB: 13.5s → 12.7s (4.73 GB/s)
 
+
+## After Cycle 26 (Event-Only GPU Sync + THP)
+
+| Data | Time | Throughput | vs Original |
+|------|------|-----------|-------------|
+| 10GB | 2.4s | 4.21 GB/s | — |
+| 20GB | 4.1s | 4.92 GB/s | **12.6×** |
+| 30GB | 5.6s | 5.32 GB/s | — |
+| 40GB | 7.5s | 5.31 GB/s | — |
+| 50GB | 9.1s | 5.49 GB/s | — |
+| 60GB | 10.6s | 5.63 GB/s | **21.5×** |
+
+Key change: removed ALL CPU sync points from run gen loop.
+Dependencies managed entirely by GPU-side cudaStreamWaitEvent.
+True concurrent H2D + sort + D2H on 3 separate streams.
