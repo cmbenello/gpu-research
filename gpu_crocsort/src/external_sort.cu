@@ -28,6 +28,7 @@
 #include <chrono>
 #include <thread>
 #include <cub/cub.cuh>
+#include <sys/mman.h>  // madvise for huge pages
 
 // Forward-declare the in-HBM sort from host_sort.cu
 enum MergeStrategy { STRATEGY_2WAY, STRATEGY_KWAY };
@@ -563,6 +564,7 @@ uint8_t* ExternalGpuSort::streaming_merge(
     // slower write performance due to write-combining, which hurts the scatter pattern
     uint8_t* h_output = (uint8_t*)malloc(total_bytes);
     if (!h_output) { fprintf(stderr, "malloc failed for gather output\n"); ms = timer.end_ms(); return nullptr; }
+    madvise(h_output, total_bytes, MADV_HUGEPAGE);
 
     // Pre-compute run lookup table for O(1) run_id lookup instead of O(K) scan
     // run_global_base is sorted, so we can use it directly
@@ -747,6 +749,8 @@ int main(int argc, char** argv) {
         h_data = (uint8_t*)malloc(total_bytes);
     }
     if (!h_data) { fprintf(stderr,"allocation failed\n"); return 1; }
+    // Request transparent huge pages for less TLB pressure during random gather
+    madvise(h_data, total_bytes, MADV_HUGEPAGE);
 
     printf("Generating random data...\n");
     WallTimer gt; gt.begin();
