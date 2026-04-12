@@ -376,7 +376,7 @@ void ExternalGpuSort::streaming_merge(
     }
 
     passes = 0;
-    int items_per_blk = MP2_ITEMS_PER_THREAD * MP2_BLOCK_THREADS;
+    int items_per_blk = MERGE_ITEMS_PER_THREAD_CFG * MERGE_BLOCK_THREADS_CFG;
 
     printf("  GPU key-only merge (%d runs, %.2f GB keys in HBM)...\n",
            K, total_keys_bytes / 1e9);
