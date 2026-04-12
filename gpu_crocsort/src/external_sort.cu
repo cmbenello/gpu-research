@@ -130,6 +130,12 @@ __global__ void reorder_records_kernel(
     }
 }
 
+// Initialize uint32 array to identity [0, 1, 2, ..., N-1]
+__global__ void init_identity_kernel(uint32_t* __restrict__ arr, uint64_t n) {
+    uint64_t i = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) arr[i] = (uint32_t)i;
+}
+
 // Extract uint64 sort key from KEY_SIZE-stride key buffer (for CUB merge sort)
 __global__ void extract_uint64_from_keys_kernel(
     const uint8_t* __restrict__ key_buffer,
@@ -494,11 +500,10 @@ uint8_t* ExternalGpuSort::streaming_merge(
         key_runs[r] = {merge_key_offsets[r], runs[r].num_records, run_global_base[r]};
     }
 
-    // Initialize permutation: identity mapping (global index)
+    // Initialize permutation to identity [0,1,2,...,N-1] on GPU (avoids CPU loop + upload)
     {
-        std::vector<uint32_t> h_perm_init(num_records);
-        for (uint64_t i = 0; i < num_records; i++) h_perm_init[i] = (uint32_t)i;
-        CUDA_CHECK(cudaMemcpy(d_perm_in, h_perm_init.data(), total_perm_bytes, cudaMemcpyHostToDevice));
+        int nt = 256, nb = (num_records + nt - 1) / nt;
+        init_identity_kernel<<<nb, nt, 0, streams[0]>>>(d_perm_in, num_records);
     }
 
     passes = 1;
