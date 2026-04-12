@@ -81,3 +81,11 @@ Phase 2: Key-Only Merge (CPU-gather-bound, ~37% of time)
 - DRAM gather: 60GB / 40 GB/s sequential = 1.5s (we do 3.9s random = 2.6× overhead)
 - Maximum possible: ~9.4s for 60GB (PCIe + gather, no overhead)
 - Current: 13.5s = within 1.4× of theoretical maximum
+
+
+## System Tuning (not in code)
+- `echo always > /sys/kernel/mm/transparent_hugepage/enabled`
+  - Enables 2MB transparent huge pages system-wide
+  - Reduces TLB misses: gather went from 15.5 → 19.7 GB/s
+  - 60GB: 13.5s → 12.7s (4.73 GB/s)
+
