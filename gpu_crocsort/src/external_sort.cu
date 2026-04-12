@@ -387,16 +387,22 @@ ExternalGpuSort::generate_runs_pipelined(
         int cur = c % 2;
         int scratch = 2;
 
-        // Wait for any previous D2H to finish
-        CUDA_CHECK(cudaStreamSynchronize(streams[2]));
-
-        // Upload directly from h_data (pinned memory — no staging copy needed)
+        // Start H2D upload on stream[0] — runs concurrently with previous D2H on stream[2]
+        // (bidirectional PCIe: H2D and D2H use separate DMA engines)
         CUDA_CHECK(cudaMemcpyAsync(d_buf[cur], h_data + offset * RECORD_SIZE, cur_bytes,
                                     cudaMemcpyHostToDevice, streams[0]));
-        CUDA_CHECK(cudaStreamSynchronize(streams[0]));
         h2d += cur_bytes;
 
-        // Sort
+        // Record event when H2D completes, make sort stream wait for it
+        CUDA_CHECK(cudaEventRecord(events[0], streams[0]));
+        CUDA_CHECK(cudaStreamWaitEvent(streams[1], events[0], 0));
+
+        // Also wait for previous D2H to finish (it reads d_buf[prev], not d_buf[cur],
+        // but the sort needs d_buf[scratch]=d_buf[2] which might still be in use
+        // by the previous sort's internal operations)
+        CUDA_CHECK(cudaStreamSynchronize(streams[2]));
+
+        // Sort (GPU-side wait for H2D via event — no CPU blocking)
         sort_chunk_on_gpu(d_buf[cur], d_buf[scratch], cur_n, streams[1]);
 
         // Extract keys to persistent GPU key buffer
