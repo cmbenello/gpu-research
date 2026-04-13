@@ -2,10 +2,16 @@
 #include <cstdint>
 #include <cstdio>
 
-// Record format matching GenSort: 10-byte key + 90-byte value = 100 bytes
-static constexpr int KEY_SIZE = 10;
-static constexpr int VALUE_SIZE = 90;
-static constexpr int RECORD_SIZE = KEY_SIZE + VALUE_SIZE; // 100 bytes
+// Record format: configurable via compile flags
+// GenSort: KEY_SIZE=10, VALUE_SIZE=90, RECORD_SIZE=100
+// TPC-H lineitem: KEY_SIZE=88, VALUE_SIZE=32, RECORD_SIZE=120
+#ifndef KEY_SIZE
+#define KEY_SIZE 10
+#endif
+#ifndef VALUE_SIZE
+#define VALUE_SIZE 90
+#endif
+static constexpr int RECORD_SIZE = KEY_SIZE + VALUE_SIZE;
 
 // Run generation config
 static constexpr int RECORDS_PER_BLOCK = 512;    // Records sorted per thread block

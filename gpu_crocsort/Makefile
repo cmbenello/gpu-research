@@ -109,9 +109,13 @@ test-edge: experiments/test_edge_cases.cu src/run_generation.cu src/merge.cu src
 	$(NVCC) $(NVCC_FLAGS) $(INCLUDES) experiments/test_edge_cases.cu src/run_generation.cu src/merge.cu src/host_sort.cu -o test_edge_cases
 	./test_edge_cases
 
-# External sort (data > GPU memory)
+# External sort (data > GPU memory) — GenSort format (10B key, 100B record)
 external-sort: src/external_sort.cu src/run_generation.cu src/merge.cu src/host_sort.cu $(HDRS)
 	$(NVCC) $(NVCC_FLAGS) $(INCLUDES) -DEXTERNAL_SORT_MAIN src/external_sort.cu src/run_generation.cu src/merge.cu src/host_sort.cu -o external_sort
+
+# External sort — TPC-H lineitem format (88B key, 120B record)
+external-sort-tpch: src/external_sort.cu src/run_generation.cu src/merge.cu src/host_sort.cu $(HDRS)
+	$(NVCC) $(NVCC_FLAGS) $(INCLUDES) -DEXTERNAL_SORT_MAIN -DKEY_SIZE=88 -DVALUE_SIZE=32 src/external_sort.cu src/run_generation.cu src/merge.cu src/host_sort.cu -o external_sort_tpch
 
 # ── Build all experiments ───────────────────────────────────────────
 
