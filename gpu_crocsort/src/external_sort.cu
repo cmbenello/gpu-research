@@ -724,45 +724,26 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
 
     WallTimer phase_timer;
 
-    // ── Step 1: CPU key extraction (parallel, sequential read at ~40 GB/s) ──
-    printf("== Step 1: CPU Key Extraction ==\n");
-    phase_timer.begin();
-    uint8_t* h_keys;
-    CUDA_CHECK(cudaMallocHost(&h_keys, total_keys_bytes));
-
-    {
-        int num_threads = std::min(48, (int)std::thread::hardware_concurrency());
-        std::vector<std::thread> threads;
-        uint64_t chunk = (num_records + num_threads - 1) / num_threads;
-        for (int t = 0; t < num_threads; t++) {
-            uint64_t start = (uint64_t)t * chunk;
-            uint64_t end = std::min(start + chunk, num_records);
-            if (start < end) {
-                threads.emplace_back([=]() {
-                    for (uint64_t i = start; i < end; i++)
-                        memcpy(h_keys + i * KEY_SIZE, h_data + i * RECORD_SIZE, KEY_SIZE);
-                });
-            }
-        }
-        for (auto& t : threads) t.join();
-    }
-    double extract_ms = phase_timer.end_ms();
-    printf("  Extracted %lu keys (%.2f GB) in %.0f ms (%.2f GB/s)\n",
-           num_records, total_keys_bytes/1e9, extract_ms, total_bytes/(extract_ms*1e6));
-
-    // ── Step 2: Upload keys to GPU ──
-    printf("== Step 2: Upload Keys to GPU ==\n");
+    // ── Step 1+2: GPU-direct key extraction via cudaMemcpy2D ──
+    // Transfer only KEY_SIZE bytes from each RECORD_SIZE-stride record
+    // directly from pinned h_data to GPU — no CPU extraction needed!
+    printf("== Step 1+2: GPU-Direct Key Upload (strided) ==\n");
     phase_timer.begin();
 
-    // Free sort buffers to make room for key sort workspace
+    // Free sort buffers to make room
     for (int i = 0; i < NBUFS; i++) { if (d_buf[i]) { cudaFree(d_buf[i]); d_buf[i] = nullptr; } }
 
-    // Allocate: d_keys_10byte (N×10), d_sort_keys (N×8), d_sort_keys_alt (N×8),
-    //           d_perm_in (N×4), d_perm_out (N×4), CUB temp
     uint8_t* d_keys_10byte;
     CUDA_CHECK(cudaMalloc(&d_keys_10byte, total_keys_bytes));
-    CUDA_CHECK(cudaMemcpy(d_keys_10byte, h_keys, total_keys_bytes, cudaMemcpyHostToDevice));
-    r.pcie_h2d_gb = total_keys_bytes / 1e9;
+
+    // cudaMemcpy2D: copy KEY_SIZE bytes per row, RECORD_SIZE stride in source, KEY_SIZE stride in dest
+    CUDA_CHECK(cudaMemcpy2D(
+        d_keys_10byte, KEY_SIZE,         // dst, dst pitch
+        h_data, RECORD_SIZE,             // src, src pitch
+        KEY_SIZE, num_records,            // width (bytes to copy per row), height (num rows)
+        cudaMemcpyHostToDevice));
+    r.pcie_h2d_gb = total_keys_bytes / 1e9;  // only keys transferred
+    uint8_t* h_keys = nullptr;  // not needed — keys went directly to GPU
 
     // Query CUB temp
     size_t cub_temp_bytes = 0;
@@ -784,7 +765,8 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
     void* d_temp = (void*)(d_perm_out + num_records);
 
     double upload_ms = phase_timer.end_ms();
-    printf("  Uploaded %.2f GB keys + alloc in %.0f ms\n", total_keys_bytes/1e9, upload_ms);
+    printf("  Uploaded %.2f GB keys (strided, GPU-direct) in %.0f ms (%.2f GB/s effective)\n",
+           total_keys_bytes/1e9, upload_ms, total_bytes/(upload_ms*1e6));
 
     // ── Step 3: GPU sort (extract uint64, init perm, CUB radix sort) ──
     printf("== Step 3: GPU CUB Radix Sort ==\n");
@@ -816,7 +798,7 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
     r.pcie_d2h_gb = total_perm_bytes / 1e9;
 
     cudaFree(d_arena);
-    cudaFreeHost(h_keys);
+    if (h_keys) cudaFreeHost(h_keys);
 
     double download_ms = phase_timer.end_ms();
     printf("  Downloaded %.2f GB perm in %.0f ms\n", total_perm_bytes/1e9, download_ms);
