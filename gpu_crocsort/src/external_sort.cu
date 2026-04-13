@@ -1001,6 +1001,153 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
     size_t free_mem_now, dummy2;
     CUDA_CHECK(cudaMemGetInfo(&free_mem_now, &dummy2));
     size_t est_arena = num_records * (2*sizeof(uint64_t) + 2*sizeof(uint32_t)) + 512*1024*1024;
+    // For large keys: try PREFIX SORT (8B GPU sort + CPU fixup for ties).
+    // This avoids uploading full records: PCIe = 8B×N up + 4B×N down vs 2×RECORD_SIZE×N.
+    // Only viable if 8B prefixes fit in GPU and groups are small enough for CPU fixup.
+    size_t prefix_8_bytes = num_records * 8;
+    size_t prefix_arena = num_records * (2*sizeof(uint64_t) + 2*sizeof(uint32_t)) + 512*1024*1024;
+    bool use_prefix_sort = (KEY_SIZE > 16 && prefix_8_bytes + prefix_arena < free_mem_now * 0.9);
+
+    if (use_prefix_sort) {
+        printf("  Using PREFIX SORT: 8B prefix on GPU + CPU fixup for ties\n");
+        printf("  PCIe: %.1f GB keys H2D + %.1f GB perm D2H (vs %.1f GB full-record round-trip)\n",
+               prefix_8_bytes/1e9, total_perm_bytes/1e9, 2*total_bytes/1e9);
+
+        // Allocate prefix keys and permutation on GPU
+        uint8_t* d_prefix_keys;
+        CUDA_CHECK(cudaMalloc(&d_prefix_keys, prefix_8_bytes));
+        CUDA_CHECK(cudaMalloc(&d_perm_in, num_records * sizeof(uint32_t)));
+        CUDA_CHECK(cudaMalloc(&d_perm_out, num_records * sizeof(uint32_t)));
+        uint64_t* d_sort_keys, *d_sort_keys_alt;
+        CUDA_CHECK(cudaMalloc(&d_sort_keys, num_records * sizeof(uint64_t)));
+        CUDA_CHECK(cudaMalloc(&d_sort_keys_alt, num_records * sizeof(uint64_t)));
+
+        // Step 1: Strided DMA — upload only first 8 bytes of each record's key
+        CUDA_CHECK(cudaMemcpy2D(d_prefix_keys, 8, h_data, RECORD_SIZE,
+                                 8, num_records, cudaMemcpyHostToDevice));
+        double upload_ms = phase_timer.end_ms();
+        r.pcie_h2d_gb = prefix_8_bytes / 1e9;
+        printf("  Uploaded %.2f GB prefix keys in %.0f ms (%.2f GB/s effective)\n",
+               prefix_8_bytes/1e9, upload_ms, total_bytes/(upload_ms*1e6));
+
+        // Step 2: GPU sort by 8-byte prefix (single CUB pass on uint64)
+        phase_timer.begin();
+        int nthreads = 256;
+        int nblks = (num_records + nthreads - 1) / nthreads;
+
+        // Extract big-endian uint64 from prefix keys
+        extract_uint64_from_keys_kernel<<<nblks, nthreads>>>(
+            d_prefix_keys, d_sort_keys, d_perm_in, num_records);
+
+        cub::DoubleBuffer<uint64_t> keys_buf(d_sort_keys, d_sort_keys_alt);
+        cub::DoubleBuffer<uint32_t> idx_buf(d_perm_in, d_perm_out);
+
+        // CUB needs temp storage
+        size_t cub_temp_bytes = 0;
+        cub::DeviceRadixSort::SortPairs(nullptr, cub_temp_bytes,
+            keys_buf, idx_buf, (int)num_records, 0, 64);
+        void* d_cub_temp;
+        CUDA_CHECK(cudaMalloc(&d_cub_temp, cub_temp_bytes));
+        cub::DeviceRadixSort::SortPairs(d_cub_temp, cub_temp_bytes,
+            keys_buf, idx_buf, (int)num_records, 0, 64);
+        CUDA_CHECK(cudaDeviceSynchronize());
+        double sort_ms = phase_timer.end_ms();
+        printf("  GPU prefix sort: %.0f ms\n", sort_ms);
+
+        // Step 3: Download sorted prefix keys + permutation
+        phase_timer.begin();
+        CUDA_CHECK(cudaMemcpy(h_perm, idx_buf.Current(),
+                               total_perm_bytes, cudaMemcpyDeviceToHost));
+        // Also download sorted prefix keys for group detection
+        uint8_t* h_sorted_prefixes = (uint8_t*)malloc(prefix_8_bytes);
+        CUDA_CHECK(cudaMemcpy(h_sorted_prefixes, keys_buf.Current(),
+                               num_records * sizeof(uint64_t), cudaMemcpyDeviceToHost));
+        r.pcie_d2h_gb = (total_perm_bytes + num_records * 8) / 1e9;
+        double dl_ms = phase_timer.end_ms();
+        printf("  Downloaded perm + prefixes in %.0f ms\n", dl_ms);
+
+        // Free GPU memory
+        cudaFree(d_prefix_keys); cudaFree(d_perm_in); cudaFree(d_perm_out);
+        cudaFree(d_sort_keys); cudaFree(d_sort_keys_alt); cudaFree(d_cub_temp);
+        d_perm_in = d_perm_out = nullptr;
+
+        // Step 4: CPU fixup — sort within groups of equal 8-byte prefixes
+        phase_timer.begin();
+        printf("  CPU fixup: sorting within groups of equal 8B prefixes...\n");
+
+        // Find group boundaries (sorted uint64 prefixes)
+        uint64_t* sorted_u64 = (uint64_t*)h_sorted_prefixes;
+        std::vector<std::pair<uint64_t, uint64_t>> groups; // (start, count)
+        uint64_t grp_start = 0;
+        for (uint64_t i = 1; i <= num_records; i++) {
+            if (i == num_records || sorted_u64[i] != sorted_u64[grp_start]) {
+                groups.push_back({grp_start, i - grp_start});
+                grp_start = i;
+            }
+        }
+        printf("    %lu groups (avg %.0f records/group)\n",
+               groups.size(), (double)num_records / groups.size());
+
+        // Multi-threaded: sort within each group using full key comparison
+        int hw_threads = std::max(1, (int)std::thread::hardware_concurrency());
+        // Distribute groups across threads (batch adjacent groups per thread)
+        uint64_t groups_per_thread = (groups.size() + hw_threads - 1) / hw_threads;
+        std::vector<std::thread> threads;
+        for (int t = 0; t < hw_threads; t++) {
+            threads.emplace_back([&, t]() {
+                uint64_t gs = t * groups_per_thread;
+                uint64_t ge = std::min(gs + groups_per_thread, (uint64_t)groups.size());
+                for (uint64_t g = gs; g < ge; g++) {
+                    auto [start, count] = groups[g];
+                    if (count <= 1) continue;
+                    // Sort h_perm[start..start+count) by full key
+                    std::sort(h_perm + start, h_perm + start + count,
+                        [&](uint32_t a, uint32_t b) {
+                            return key_compare(h_data + (uint64_t)a * RECORD_SIZE,
+                                               h_data + (uint64_t)b * RECORD_SIZE,
+                                               KEY_SIZE) < 0;
+                        });
+                }
+            });
+        }
+        for (auto& t : threads) t.join();
+        double fixup_ms = phase_timer.end_ms();
+        printf("    Fixup: %.0f ms (%d threads)\n", fixup_ms, hw_threads);
+        free(h_sorted_prefixes);
+
+        // Step 5: CPU gather using fixed permutation
+        phase_timer.begin();
+        printf("  CPU gather...\n");
+        int PREFETCH_AHEAD = 256;
+        uint64_t chunk_size = (num_records + hw_threads - 1) / hw_threads;
+        threads.clear();
+        for (int t = 0; t < hw_threads; t++) {
+            threads.emplace_back([&, t]() {
+                uint64_t lo = t * chunk_size;
+                uint64_t hi = std::min(lo + chunk_size, num_records);
+                for (uint64_t i = lo; i < hi; i++) {
+                    if (i + PREFETCH_AHEAD < hi)
+                        __builtin_prefetch(h_data + (uint64_t)h_perm[i+PREFETCH_AHEAD] * RECORD_SIZE, 0);
+                    memcpy(h_output + i * RECORD_SIZE,
+                           h_data + (uint64_t)h_perm[i] * RECORD_SIZE, RECORD_SIZE);
+                }
+            });
+        }
+        for (auto& t : threads) t.join();
+        double gather_ms = phase_timer.end_ms();
+        printf("  Gathered %.2f GB in %.0f ms (%.2f GB/s)\n",
+               total_bytes/1e9, gather_ms, total_bytes/(gather_ms*1e6));
+
+        r.run_gen_ms = upload_ms + sort_ms + dl_ms;
+        r.merge_ms = fixup_ms + gather_ms;
+        r.total_ms = r.run_gen_ms + r.merge_ms;
+        r.num_runs = 1; r.merge_passes = 1;
+        r.sorted_output = h_output;
+        r.sorted_output_size = total_bytes;
+        r.sorted_output_is_mmap = h_output_is_mmap;
+        return r;
+    }
+
     if (total_keys_bytes + est_arena > free_mem_now * 0.9) {
         printf("  Keys too large for GPU (%.1f GB keys > %.1f GB available)\n",
                total_keys_bytes/1e9, free_mem_now/1e9);
