@@ -794,6 +794,11 @@ struct KeyMergePair {
     int      first_block;
 };
 
+extern "C" void launch_merge_ovc(
+    const uint32_t*, uint32_t*, const uint64_t*, uint64_t*,
+    const uint32_t*, uint32_t*,
+    const void*, int, int, cudaStream_t);
+
 extern "C" void launch_merge_keys_only(
     const uint8_t*, uint8_t*, const uint32_t*, uint32_t*,
     const KeyMergePair*, int, int, cudaStream_t);
@@ -1406,13 +1411,20 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
         uint32_t* pm_in = d_global_perm;
         uint32_t* pm_out = d_perm_out2;
 
+        // Must match OvcMergePair in merge.cu exactly
         struct OvcMergePair {
-            uint64_t a_ovc_offset, a_prefix_offset, a_perm_offset;
-            int a_count;
-            uint64_t b_ovc_offset, b_prefix_offset, b_perm_offset;
-            int b_count;
-            uint64_t out_ovc_offset, out_prefix_offset, out_perm_offset;
-            int first_block;
+            uint64_t a_ovc_offset;
+            int      a_count;
+            uint64_t b_ovc_offset;
+            int      b_count;
+            uint64_t out_ovc_offset;
+            uint64_t out_perm_offset;
+            uint64_t a_perm_offset;
+            uint64_t b_perm_offset;
+            uint64_t a_prefix_offset;
+            uint64_t b_prefix_offset;
+            uint64_t out_prefix_offset;
+            int      first_block;
         };
 
         int pass = 0;
@@ -1472,12 +1484,8 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
                                    cudaMemcpyHostToDevice));
 
             // Launch OVC merge kernel
-            extern "C" void launch_merge_ovc(
-                const uint32_t*, uint32_t*, const uint64_t*, uint64_t*,
-                const uint32_t*, uint32_t*,
-                const void*, int, int, cudaStream_t);
             launch_merge_ovc(ovc_in, ovc_out, pfx_in, pfx_out, pm_in, pm_out,
-                            d_pairs, npairs, total_blocks, 0);
+                            (const void*)d_pairs, npairs, total_blocks, 0);
             CUDA_CHECK(cudaDeviceSynchronize());
             cudaFree(d_pairs);
 
