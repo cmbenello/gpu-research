@@ -109,8 +109,9 @@ Total              8.9s  100%
 
 | System | Dataset | Record Size | Hardware | Time | **GB/s** |
 |--------|---------|------------|----------|------|---------|
-| **GPU CrocSort (ours)** | **60GB GenSort** | **100B** | **RTX 6000 (PCIe3)** | **7.5s** | **8.0** |
-| **GPU CrocSort (ours)** | **30GB TPC-H** | **100B** | **RTX 6000 (PCIe3)** | **3.7s** | **8.0** |
+| **GPU CrocSort (ours)** | **60GB GenSort** | **100B** | **RTX 6000 (PCIe3)** | **7.2s** | **8.4** |
+| **GPU CrocSort (ours)** | **36GB TPC-H SF50** | **120B (88B key)** | **RTX 6000 (PCIe3)** | **8.9s** | **4.1** |
+| **GPU CrocSort (ours)** | **30GB TPC-H SF50** | **100B (10B key)** | **RTX 6000 (PCIe3)** | **3.7s** | **8.0** |
 | MendSort (JouleSort'23) | 1TB GenSort | 100B | Ryzen 7900, 8×NVMe | 304s | 3.3 |
 | DuckDB v1.4 (2025) | 27GB TPC-H SF100 | variable | M1 Max, SSD | 81s | 0.33 |
 | ClickHouse | 13GB (1B rows) | 2-col | 8-core EPYC | 20s | 0.69 |
