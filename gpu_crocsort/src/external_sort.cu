@@ -797,77 +797,51 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
     double sort_ms = phase_timer.end_ms();
     printf("  Sorted %lu keys in %.0f ms\n", num_records, sort_ms);
 
-    // ── Steps 4+5: Pipelined perm download + gather ──
-    // Download permutation in chunks, start gathering each chunk immediately.
-    // Overlap: while chunk N+1 downloads (D2H on DMA engine), CPU gathers chunk N.
-    printf("== Steps 4+5: Pipelined Download + Gather ==\n");
+    // ── Step 4: Download permutation ──
+    printf("== Step 4: Download Permutation ==\n");
     phase_timer.begin();
 
     d_perm_in = d_perm_buf.Current();
+    CUDA_CHECK(cudaMemcpy(h_perm, d_perm_in, total_perm_bytes, cudaMemcpyDeviceToHost));
     r.pcie_d2h_gb = total_perm_bytes / 1e9;
 
-    int num_threads = std::min(48, (int)std::thread::hardware_concurrency());
-    constexpr int PERM_CHUNKS = 8;
-    uint64_t perm_chunk_records = (num_records + PERM_CHUNKS - 1) / PERM_CHUNKS;
-
-    // Download first chunk synchronously
-    uint64_t first_n = std::min(perm_chunk_records, num_records);
-    CUDA_CHECK(cudaMemcpy(h_perm, d_perm_in, first_n * sizeof(uint32_t), cudaMemcpyDeviceToHost));
-
-    for (int c = 0; c < PERM_CHUNKS; c++) {
-        uint64_t start = (uint64_t)c * perm_chunk_records;
-        uint64_t end = std::min(start + perm_chunk_records, num_records);
-        if (start >= num_records) break;
-
-        // Start downloading NEXT perm chunk async while CPU gathers current chunk
-        if (c + 1 < PERM_CHUNKS) {
-            uint64_t next_start = (uint64_t)(c+1) * perm_chunk_records;
-            uint64_t next_end = std::min(next_start + perm_chunk_records, num_records);
-            if (next_start < num_records) {
-                CUDA_CHECK(cudaMemcpyAsync(
-                    h_perm + next_start, d_perm_in + next_start,
-                    (next_end - next_start) * sizeof(uint32_t),
-                    cudaMemcpyDeviceToHost, streams[0]));
-            }
-        }
-
-        // Gather current chunk with all threads
-        {
-            std::vector<std::thread> threads;
-            uint64_t per_thread = (end - start + num_threads - 1) / num_threads;
-            for (int t = 0; t < num_threads; t++) {
-                uint64_t ts = start + (uint64_t)t * per_thread;
-                uint64_t te = std::min(ts + per_thread, end);
-                if (ts < end) {
-                    threads.emplace_back([=, &h_data, &h_output, &h_perm]() {
-                        constexpr int BLOCK = 256;
-                        const uint8_t* src_ptrs[BLOCK];
-                        for (uint64_t base = ts; base < te; base += BLOCK) {
-                            int count = std::min((uint64_t)BLOCK, te - base);
-                            for (int j = 0; j < count; j++) {
-                                uint32_t idx = h_perm[base + j];
-                                src_ptrs[j] = h_data + (uint64_t)idx * RECORD_SIZE;
-                                __builtin_prefetch(src_ptrs[j], 0, 0);
-                            }
-                            for (int j = 0; j < count; j++) {
-                                memcpy(h_output + (base + j) * RECORD_SIZE, src_ptrs[j], RECORD_SIZE);
-                            }
-                        }
-                    });
-                }
-            }
-            for (auto& t : threads) t.join();
-        }
-
-        // Wait for next perm chunk to finish downloading
-        if (c + 1 < PERM_CHUNKS) {
-            CUDA_CHECK(cudaStreamSynchronize(streams[0]));
-        }
-    }
-
-    // Free GPU memory
     cudaFree(d_arena);
     if (h_keys) cudaFreeHost(h_keys);
+
+    double download_ms = phase_timer.end_ms();
+    printf("  Downloaded %.2f GB perm in %.0f ms\n", total_perm_bytes/1e9, download_ms);
+
+    // ── Step 5: CPU multi-threaded gather ──
+    printf("== Step 5: CPU Gather ==\n");
+    phase_timer.begin();
+
+    {
+        int num_threads = std::min(48, (int)std::thread::hardware_concurrency());
+        std::vector<std::thread> threads;
+        uint64_t chunk = (num_records + num_threads - 1) / num_threads;
+        for (int t = 0; t < num_threads; t++) {
+            uint64_t start = (uint64_t)t * chunk;
+            uint64_t end = std::min(start + chunk, num_records);
+            if (start < end) {
+                threads.emplace_back([=, &h_data, &h_output, &h_perm]() {
+                    constexpr int BLOCK = 256;
+                    const uint8_t* src_ptrs[BLOCK];
+                    for (uint64_t base = start; base < end; base += BLOCK) {
+                        int count = std::min((uint64_t)BLOCK, end - base);
+                        for (int j = 0; j < count; j++) {
+                            uint32_t idx = h_perm[base + j];
+                            src_ptrs[j] = h_data + (uint64_t)idx * RECORD_SIZE;
+                            __builtin_prefetch(src_ptrs[j], 0, 0);
+                        }
+                        for (int j = 0; j < count; j++) {
+                            memcpy(h_output + (base + j) * RECORD_SIZE, src_ptrs[j], RECORD_SIZE);
+                        }
+                    }
+                });
+            }
+        }
+        for (auto& t : threads) t.join();
+    }
 
     double gather_ms = phase_timer.end_ms();
     printf("  Gathered %.2f GB in %.0f ms (%.2f GB/s)\n",
