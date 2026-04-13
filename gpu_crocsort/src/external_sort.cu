@@ -1002,7 +1002,6 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
                     }
                 }
                 for (auto& t : threads) t.join();
-                }
 
                 // Copy leftover run
                 if (leftover) {
