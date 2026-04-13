@@ -1035,10 +1035,39 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
         int nthreads = 256;
         int nblks = (num_records + nthreads - 1) / nthreads;
 
-        // Initialize identity permutation + extract big-endian uint64 from prefix keys
+        // Initialize identity permutation
         init_identity_kernel<<<nblks, nthreads>>>(d_perm_in, num_records);
-        extract_uint64_from_keys_kernel<<<nblks, nthreads>>>(
-            d_prefix_keys, d_sort_keys, num_records);
+        // Extract uint64 from contiguous 8B prefix buffer (identity perm, stride=8)
+        // Reinterpret 8-byte keys as big-endian uint64 via direct byte extraction
+        {
+            auto extract = [=] __device__ (uint64_t i) -> uint64_t {
+                const uint8_t* k = d_prefix_keys + i * 8;
+                uint64_t v = 0;
+                for (int b = 0; b < 8; b++) v = (v << 8) | k[b];
+                return v;
+            };
+            // Simple kernel via thrust transform or just use extract_sort_keys_kernel analog
+        }
+        // Simpler: just use a lambda-free approach — copy as uint64 and byte-swap
+        // The prefix keys are big-endian. On little-endian GPU, just extract manually.
+        // Use extract_uint64_chunk_kernel which reads from KEY_SIZE-stride key buffer
+        // with identity permutation (chunk 0, 8 bytes). But we need stride=8 not KEY_SIZE.
+        // Solution: just use a tiny dedicated kernel via extract_uint64_from_records_kernel
+        // with RECORD_SIZE=8 — but RECORD_SIZE is a compile constant. Use the packed keys
+        // extraction kernel from compact path which has configurable stride.
+        // Actually simplest: thrust transform
+        {
+            thrust::device_ptr<uint8_t> keys_ptr(d_prefix_keys);
+            thrust::device_ptr<uint64_t> sort_ptr(d_sort_keys);
+            thrust::counting_iterator<uint64_t> idx(0);
+            thrust::transform(idx, idx + num_records, sort_ptr,
+                [d_prefix_keys] __device__ (uint64_t i) {
+                    const uint8_t* k = d_prefix_keys + i * 8;
+                    uint64_t v = 0;
+                    for (int b = 0; b < 8; b++) v = (v << 8) | k[b];
+                    return v;
+                });
+        }
 
         cub::DoubleBuffer<uint64_t> keys_buf(d_sort_keys, d_sort_keys_alt);
         cub::DoubleBuffer<uint32_t> idx_buf(d_perm_in, d_perm_out);
