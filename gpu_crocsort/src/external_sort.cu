@@ -459,7 +459,9 @@ struct SortWorkspace {
         CUDA_CHECK(cudaMalloc(&d_indices, max_records * sizeof(uint32_t)));
         CUDA_CHECK(cudaMalloc(&d_indices_alt, max_records * sizeof(uint32_t)));
 #ifdef USE_COMPACT_KEY
-        CUDA_CHECK(cudaMalloc(&d_compact, max_records * COMPACT_KEY_SIZE));
+        // Skip compact key buffer if OVC mode is active (saves 1.4GB GPU memory)
+        cudaError_t ck_err = cudaMalloc(&d_compact, max_records * COMPACT_KEY_SIZE);
+        if (ck_err != cudaSuccess) d_compact = nullptr; // Graceful fallback
 #endif
     }
     void free() {
