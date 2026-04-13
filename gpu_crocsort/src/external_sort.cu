@@ -162,24 +162,23 @@ __global__ void gather_uint64_kernel(
     if (i < n) out[i] = src[perm[i]];
 }
 
-// Extract uint64 from a specific 8-byte chunk of the key, in permutation order.
-// Reads key[perm[i]][byte_offset : byte_offset + chunk_bytes] as big-endian uint64.
-__global__ void extract_uint64_chunk_kernel(
+// Extract uint128 from a specific 16-byte chunk of the key, in permutation order.
+__global__ void extract_uint128_chunk_kernel(
     const uint8_t* __restrict__ key_buffer,
     const uint32_t* __restrict__ perm,
-    uint64_t* __restrict__ sort_keys,
+    unsigned __int128* __restrict__ sort_keys,
     uint64_t num_records,
     int byte_offset,
-    int chunk_bytes  // 1-8
+    int chunk_bytes  // 1-16
 ) {
     uint64_t i = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= num_records) return;
     uint32_t orig_idx = perm[i];
     const uint8_t* k = key_buffer + (uint64_t)orig_idx * KEY_SIZE + byte_offset;
-    uint64_t v = 0;
+    unsigned __int128 v = 0;
     for (int b = 0; b < chunk_bytes; b++) v = (v << 8) | k[b];
-    // Left-align: shift so MSB of chunk is in MSB of uint64
-    v <<= (8 - chunk_bytes) * 8;
+    // Left-align
+    v <<= (16 - chunk_bytes) * 8;
     sort_keys[i] = v;
 }
 
@@ -817,14 +816,14 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
         cudaMemcpyHostToDevice, streams[0]));
     r.pcie_h2d_gb = total_keys_bytes / 1e9;
 
-    // Allocate arena for CUB sort: uint64 keys + uint32 perm + CUB temp
+    // Allocate arena for CUB sort: uint128 keys + uint32 perm + CUB temp
     size_t cub_temp_bytes = 0;
     {
-        cub::DoubleBuffer<uint64_t> dk(nullptr,nullptr);
+        cub::DoubleBuffer<unsigned __int128> dk(nullptr,nullptr);
         cub::DoubleBuffer<uint32_t> dp(nullptr,nullptr);
-        cub::DeviceRadixSort::SortPairs(nullptr, cub_temp_bytes, dk, dp, (int)num_records, 0, 64);
+        cub::DeviceRadixSort::SortPairs(nullptr, cub_temp_bytes, dk, dp, (int)num_records, 0, 128);
     }
-    size_t arena_sz = num_records * (2*sizeof(uint64_t) + 2*sizeof(uint32_t)) + cub_temp_bytes;
+    size_t arena_sz = num_records * (2*sizeof(unsigned __int128) + 2*sizeof(uint32_t)) + cub_temp_bytes;
     uint8_t* d_arena;
     CUDA_CHECK(cudaMalloc(&d_arena, arena_sz));
 
@@ -852,44 +851,36 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
 
     init_identity_kernel<<<nblks, nthreads, 0, streams[0]>>>(d_perm_in, num_records);
 
-    int num_chunks = (KEY_SIZE + 7) / 8;  // ceil(KEY_SIZE / 8)
-    printf("  LSD sort: %d passes for %d-byte key\n", num_chunks, KEY_SIZE);
+    // Use 16-byte (uint128) chunks for LSD sort — halves the number of passes
+    constexpr int CHUNK_SIZE = 16;
+    int num_chunks = (KEY_SIZE + CHUNK_SIZE - 1) / CHUNK_SIZE;
+    printf("  LSD sort: %d passes for %d-byte key (%d-byte chunks)\n", num_chunks, KEY_SIZE, CHUNK_SIZE);
+
+    // Arena needs uint128 double-buffer: N×16×2 + N×4×2 + temp
+    // Redefine sort key type as __int128
+    unsigned __int128* d_sort_keys_128 = reinterpret_cast<unsigned __int128*>(d_sort_keys);
+    unsigned __int128* d_sort_keys_128_alt = reinterpret_cast<unsigned __int128*>(d_sort_keys_alt);
 
     GpuTimer pass_timer;
     for (int chunk = num_chunks - 1; chunk >= 0; chunk--) {
-        int byte_offset = chunk * 8;
-        int chunk_bytes = std::min(8, KEY_SIZE - byte_offset);
+        int byte_offset = chunk * CHUNK_SIZE;
+        int chunk_bytes = std::min(CHUNK_SIZE, KEY_SIZE - byte_offset);
         pass_timer.begin();
 
-        // Extract uint64 from this chunk of the key (in permutation order)
-        // Use a kernel that reads key[perm[i]][byte_offset:byte_offset+8]
-        // For the FIRST pass (highest chunk idx), perm is identity → read directly
-        if (chunk == num_chunks - 1 && chunk_bytes <= 2) {
-            // Last chunk is ≤2 bytes — use uint16 sort (fewer radix passes)
-            uint16_t* d_tie = reinterpret_cast<uint16_t*>(d_sort_keys);
-            uint16_t* d_tie_alt = reinterpret_cast<uint16_t*>(d_sort_keys_alt);
-            extract_tiebreaker_kernel<<<nblks, nthreads, 0, streams[0]>>>(
-                d_keys_10byte, d_perm_in, d_tie, num_records);
-            cub::DoubleBuffer<uint16_t> tie_buf(d_tie, d_tie_alt);
-            cub::DoubleBuffer<uint32_t> perm_buf(d_perm_in, d_perm_out);
-            size_t t = cub_temp_bytes;
-            cub::DeviceRadixSort::SortPairs(d_temp, t,
-                tie_buf, perm_buf, (int)num_records, 0, 16, streams[0]);
-            d_perm_in = perm_buf.Current();
-            d_perm_out = perm_buf.Alternate();
-        } else {
-            // Extract uint64 for this chunk, in current permutation order
-            // Kernel: d_sort_keys[i] = big-endian uint64 from key[perm[i]][byte_offset:+8]
-            extract_uint64_chunk_kernel<<<nblks, nthreads, 0, streams[0]>>>(
-                d_keys_10byte, d_perm_in, d_sort_keys, num_records, byte_offset, chunk_bytes);
+        extract_uint128_chunk_kernel<<<nblks, nthreads, 0, streams[0]>>>(
+            d_keys_10byte, d_perm_in, d_sort_keys_128, num_records, byte_offset, chunk_bytes);
 
-            cub::DoubleBuffer<uint64_t> keys_buf(d_sort_keys, d_sort_keys_alt);
-            cub::DoubleBuffer<uint32_t> perm_buf(d_perm_in, d_perm_out);
-            cub::DeviceRadixSort::SortPairs(d_temp, cub_temp_bytes,
-                keys_buf, perm_buf, (int)num_records, 0, chunk_bytes * 8, streams[0]);
-            d_perm_in = perm_buf.Current();
-            d_perm_out = perm_buf.Alternate();
-        }
+        cub::DoubleBuffer<unsigned __int128> keys_buf(d_sort_keys_128, d_sort_keys_128_alt);
+        cub::DoubleBuffer<uint32_t> perm_buf(d_perm_in, d_perm_out);
+        size_t t = cub_temp_bytes;
+        cub::DeviceRadixSort::SortPairs(d_temp, t,
+            keys_buf, perm_buf, (int)num_records, 0, chunk_bytes * 8, streams[0]);
+        d_perm_in = perm_buf.Current();
+        d_perm_out = perm_buf.Alternate();
+        // Reset key buffer pointers (CUB may have swapped them)
+        d_sort_keys_128 = keys_buf.Current();
+        d_sort_keys_128_alt = keys_buf.Alternate();
+
         float pass_ms = pass_timer.end();
         printf("    Pass %d (bytes %d-%d): %.1f ms\n", num_chunks - chunk, byte_offset, byte_offset + chunk_bytes - 1, pass_ms);
     }
