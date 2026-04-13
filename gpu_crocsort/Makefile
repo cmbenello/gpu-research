@@ -117,6 +117,10 @@ external-sort: src/external_sort.cu src/run_generation.cu src/merge.cu src/host_
 external-sort-tpch: src/external_sort.cu src/run_generation.cu src/merge.cu src/host_sort.cu $(HDRS)
 	$(NVCC) $(NVCC_FLAGS) $(INCLUDES) -DEXTERNAL_SORT_MAIN -DKEY_SIZE=88 -DVALUE_SIZE=32 src/external_sort.cu src/run_generation.cu src/merge.cu src/host_sort.cu -o external_sort_tpch
 
+# External sort — TPC-H lineitem, compact varying-byte key (26 varying bytes → 32B key, 4 LSD passes)
+external-sort-tpch-compact: src/external_sort.cu src/run_generation.cu src/merge.cu src/host_sort.cu $(HDRS)
+	$(NVCC) $(NVCC_FLAGS) $(INCLUDES) -DEXTERNAL_SORT_MAIN -DKEY_SIZE=66 -DVALUE_SIZE=54 -DUSE_COMPACT_KEY src/external_sort.cu src/run_generation.cu src/merge.cu src/host_sort.cu -o external_sort_tpch_compact
+
 # External sort — TPC-H lineitem, compact key (66B significant key, same 120B record)
 # The 88B key has 22B zero padding (bytes 66-87). Using KEY_SIZE=66 skips
 # sorting those zeros: 9 LSD passes instead of 11 (18% fewer). Same sort order

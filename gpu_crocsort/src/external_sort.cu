@@ -185,6 +185,89 @@ __global__ void extract_uint64_chunk_kernel(
     sort_keys[i] = v;
 }
 
+// ── Compact key for TPC-H: strip constant bytes, keep only varying ones ───
+// The 66B TPC-H key has ~40 constant bytes and only 26 varying bytes.
+// Packing the varying bytes into a 32B compact key reduces LSD from 9 to 4 passes.
+//
+// Compile with -DUSE_COMPACT_KEY to enable. The byte mapping is:
+//   compact[0]  = record[0]   returnflag
+//   compact[1]  = record[1]   linestatus
+//   compact[2]  = record[4]   shipdate[2]
+//   compact[3]  = record[5]   shipdate[3]
+//   compact[4]  = record[8]   commitdate[2]
+//   compact[5]  = record[9]   commitdate[3]
+//   compact[6]  = record[12]  receiptdate[2]
+//   compact[7]  = record[13]  receiptdate[3]
+//   compact[8]  = record[19]  extprice[5]
+//   compact[9]  = record[20]  extprice[6]
+//   compact[10] = record[21]  extprice[7]
+//   compact[11] = record[29]  discount[7]
+//   compact[12] = record[37]  tax[7]
+//   compact[13] = record[44]  quantity[6]
+//   compact[14] = record[45]  quantity[7]
+//   compact[15] = record[51]  orderkey[5]
+//   compact[16] = record[52]  orderkey[6]
+//   compact[17] = record[53]  orderkey[7]
+//   compact[18-21] = record[54-57]  partkey
+//   compact[22] = record[59]  suppkey[1]
+//   compact[23] = record[60]  suppkey[2]
+//   compact[24] = record[61]  suppkey[3]
+//   compact[25] = record[65]  linenumber[3]
+//   compact[26-31] = 0 (padding to 32B)
+
+#ifdef USE_COMPACT_KEY
+static constexpr int COMPACT_KEY_SIZE = 32;
+// Source byte offsets within the RECORD for each compact key byte
+__constant__ int d_compact_map[26] = {
+    0, 1,           // returnflag, linestatus
+    4, 5,           // shipdate varying
+    8, 9,           // commitdate varying
+    12, 13,         // receiptdate varying
+    19, 20, 21,     // extprice varying (3 bytes)
+    29,             // discount varying
+    37,             // tax varying
+    44, 45,         // quantity varying
+    51, 52, 53,     // orderkey varying
+    54, 55, 56, 57, // partkey (all 4 bytes)
+    59, 60, 61,     // suppkey varying
+    65              // linenumber varying
+};
+
+__global__ void build_compact_keys_kernel(
+    const uint8_t* __restrict__ records,
+    uint8_t* __restrict__ compact_keys,
+    uint64_t num_records
+) {
+    uint64_t i = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= num_records) return;
+    const uint8_t* rec = records + i * RECORD_SIZE;
+    uint8_t* ck = compact_keys + i * COMPACT_KEY_SIZE;
+    #pragma unroll
+    for (int b = 0; b < 26; b++) ck[b] = rec[d_compact_map[b]];
+    // Pad remaining bytes with zero
+    ck[26] = 0; ck[27] = 0; ck[28] = 0; ck[29] = 0; ck[30] = 0; ck[31] = 0;
+}
+
+// Extract uint64 from compact key buffer at COMPACT_KEY_SIZE stride
+__global__ void extract_uint64_from_compact_kernel(
+    const uint8_t* __restrict__ compact_keys,
+    const uint32_t* __restrict__ perm,
+    uint64_t* __restrict__ sort_keys,
+    uint64_t num_records,
+    int byte_offset,
+    int chunk_bytes
+) {
+    uint64_t i = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= num_records) return;
+    uint32_t orig_idx = perm[i];
+    const uint8_t* k = compact_keys + (uint64_t)orig_idx * COMPACT_KEY_SIZE + byte_offset;
+    uint64_t v = 0;
+    for (int b = 0; b < chunk_bytes; b++) v = (v << 8) | k[b];
+    v <<= (8 - chunk_bytes) * 8;
+    sort_keys[i] = v;
+}
+#endif // USE_COMPACT_KEY
+
 // Extract uint64 from records at RECORD_SIZE stride (for in-chunk LSD sort)
 __global__ void extract_uint64_from_records_kernel(
     const uint8_t* __restrict__ records,
@@ -288,6 +371,7 @@ struct SortWorkspace {
     uint64_t* d_keys_alt = nullptr;
     uint32_t* d_indices = nullptr;
     uint32_t* d_indices_alt = nullptr;
+    uint8_t* d_compact = nullptr;   // Compact key buffer (USE_COMPACT_KEY)
     uint64_t capacity = 0;
 
     void allocate(uint64_t max_records) {
@@ -298,12 +382,16 @@ struct SortWorkspace {
         CUDA_CHECK(cudaMalloc(&d_keys_alt, max_records * sizeof(uint64_t)));
         CUDA_CHECK(cudaMalloc(&d_indices, max_records * sizeof(uint32_t)));
         CUDA_CHECK(cudaMalloc(&d_indices_alt, max_records * sizeof(uint32_t)));
+#ifdef USE_COMPACT_KEY
+        CUDA_CHECK(cudaMalloc(&d_compact, max_records * COMPACT_KEY_SIZE));
+#endif
     }
     void free() {
         if (d_keys) { cudaFree(d_keys); d_keys = nullptr; }
         if (d_keys_alt) { cudaFree(d_keys_alt); d_keys_alt = nullptr; }
         if (d_indices) { cudaFree(d_indices); d_indices = nullptr; }
         if (d_indices_alt) { cudaFree(d_indices_alt); d_indices_alt = nullptr; }
+        if (d_compact) { cudaFree(d_compact); d_compact = nullptr; }
         capacity = 0;
     }
 };
@@ -407,16 +495,36 @@ void ExternalGpuSort::sort_chunk_on_gpu(uint8_t* d_in, uint8_t* d_scratch,
     // Initialize identity permutation
     init_identity_kernel<<<nblks, nthreads, 0, s>>>(sort_ws.d_indices, n);
 
-    // LSD multi-pass: sort from least-significant 8-byte chunk to most-significant
-    int num_chunks = (KEY_SIZE + 7) / 8;
     uint32_t* perm_in = sort_ws.d_indices;
     uint32_t* perm_out = sort_ws.d_indices_alt;
 
+#ifdef USE_COMPACT_KEY
+    // Compact key path: build 32B keys from varying bytes, then 4 LSD passes
+    build_compact_keys_kernel<<<nblks, nthreads, 0, s>>>(d_in, sort_ws.d_compact, n);
+
+    int num_chunks = (COMPACT_KEY_SIZE + 7) / 8;  // 4 for 32B
+    for (int chunk = num_chunks - 1; chunk >= 0; chunk--) {
+        int byte_offset = chunk * 8;
+        int chunk_bytes = std::min(8, COMPACT_KEY_SIZE - byte_offset);
+
+        extract_uint64_from_compact_kernel<<<nblks, nthreads, 0, s>>>(
+            sort_ws.d_compact, perm_in, sort_ws.d_keys, n, byte_offset, chunk_bytes);
+
+        cub::DoubleBuffer<uint64_t> keys_buf(sort_ws.d_keys, sort_ws.d_keys_alt);
+        cub::DoubleBuffer<uint32_t> idx_buf(perm_in, perm_out);
+        size_t temp_bytes = buf_bytes;
+        cub::DeviceRadixSort::SortPairs(d_scratch, temp_bytes,
+            keys_buf, idx_buf, (int)n, 0, chunk_bytes * 8, s);
+        perm_in = idx_buf.Current();
+        perm_out = idx_buf.Alternate();
+    }
+#else
+    // Standard LSD path: ceil(KEY_SIZE/8) passes on full key
+    int num_chunks = (KEY_SIZE + 7) / 8;
     for (int chunk = num_chunks - 1; chunk >= 0; chunk--) {
         int byte_offset = chunk * 8;
         int chunk_bytes = std::min(8, KEY_SIZE - byte_offset);
 
-        // Extract 8 bytes from the key at byte_offset, using permutation order
         extract_uint64_from_records_kernel<<<nblks, nthreads, 0, s>>>(
             d_in, perm_in, sort_ws.d_keys, n, byte_offset, chunk_bytes);
 
@@ -428,6 +536,7 @@ void ExternalGpuSort::sort_chunk_on_gpu(uint8_t* d_in, uint8_t* d_scratch,
         perm_in = idx_buf.Current();
         perm_out = idx_buf.Alternate();
     }
+#endif
 
     // Reorder full records using the final sorted permutation (d_in → d_scratch)
     reorder_records_kernel<<<nblks, nthreads, 0, s>>>(
