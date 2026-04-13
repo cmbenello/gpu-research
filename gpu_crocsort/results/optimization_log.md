@@ -116,3 +116,19 @@ True concurrent H2D + sort + D2H on 3 separate streams.
 
 All sizes verified correct (PASS). Zero cudaMalloc in merge phase.
 System config: THP enabled (`echo always > /sys/kernel/mm/transparent_hugepage/enabled`)
+
+## Cycle 32: Single-Pass Key-Only Sort (THE BREAKTHROUGH)
+
+Eliminated the entire run generation phase. Instead of uploading/downloading
+60GB of full records over PCIe, upload only 6GB of keys, sort on GPU,
+download 2.4GB permutation, CPU gathers.
+
+| Data | Time  | Throughput | Speedup vs Original |
+|------|-------|-----------|---------------------|
+| 10GB |  1.8s | 5.66 GB/s | — |
+| 20GB |  3.4s | 5.94 GB/s | **15.1×** (was 51.5s) |
+| 40GB |  6.6s | 6.06 GB/s | — |
+| 60GB |  9.6s | 6.23 GB/s | **23.7×** (was 228.0s) |
+
+PCIe traffic for 60GB: 8.4GB (was 122.4GB) — **14.6× reduction**
+PCIe amplification: 0.14× (SUBLINEAR — less than 1× of data size!)
