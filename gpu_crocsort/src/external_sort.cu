@@ -873,6 +873,22 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
         r.pcie_h2d_gb = rg_h2d / 1e9;
         printf("  %d runs in %.0f ms (%.2f GB/s)\n\n", r.num_runs, rg_ms, total_bytes/(rg_ms*1e6));
 
+        // Verify each run is sorted
+        printf("  Checking runs...\n");
+        for (int ri = 0; ri < (int)runs.size(); ri++) {
+            const uint8_t* run_data = h_data + runs[ri].host_offset;
+            uint64_t rn = runs[ri].num_records;
+            int viol = 0;
+            for (uint64_t j = 1; j < rn && viol < 3; j++) {
+                if (key_compare(run_data + (j-1)*RECORD_SIZE, run_data + j*RECORD_SIZE, KEY_SIZE) > 0) {
+                    if (viol == 0) printf("  Run %d: VIOLATION at local idx %lu\n", ri, j);
+                    viol++;
+                }
+            }
+            if (viol == 0) printf("  Run %d: OK (%lu records)\n", ri, rn);
+            else printf("  Run %d: %d violations\n", ri, viol);
+        }
+
         // Merge phase: CPU K-way merge of sorted runs (keys too large for GPU merge)
         sort_ws.free();
         for (int i = 0; i < NBUFS; i++) { if (d_buf[i]) { cudaFree(d_buf[i]); d_buf[i] = nullptr; } }
