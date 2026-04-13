@@ -736,24 +736,22 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
     uint8_t* d_keys_10byte;
     CUDA_CHECK(cudaMalloc(&d_keys_10byte, total_keys_bytes));
 
-    // cudaMemcpy2D: copy KEY_SIZE bytes per row, RECORD_SIZE stride in source, KEY_SIZE stride in dest
-    CUDA_CHECK(cudaMemcpy2D(
-        d_keys_10byte, KEY_SIZE,         // dst, dst pitch
-        h_data, RECORD_SIZE,             // src, src pitch
-        KEY_SIZE, num_records,            // width (bytes to copy per row), height (num rows)
-        cudaMemcpyHostToDevice));
-    r.pcie_h2d_gb = total_keys_bytes / 1e9;  // only keys transferred
-    uint8_t* h_keys = nullptr;  // not needed — keys went directly to GPU
+    // Start ASYNC strided DMA upload FIRST — runs on DMA engine while CPU does alloc
+    CUDA_CHECK(cudaMemcpy2DAsync(
+        d_keys_10byte, KEY_SIZE,
+        h_data, RECORD_SIZE,
+        KEY_SIZE, num_records,
+        cudaMemcpyHostToDevice, streams[0]));
+    r.pcie_h2d_gb = total_keys_bytes / 1e9;
+    uint8_t* h_keys = nullptr;
 
-    // Query CUB temp
+    // Query CUB temp and allocate arena WHILE DMA runs (CPU+DMA concurrent)
     size_t cub_temp_bytes = 0;
     {
         cub::DoubleBuffer<uint64_t> dk(nullptr,nullptr);
         cub::DoubleBuffer<uint32_t> dp(nullptr,nullptr);
         cub::DeviceRadixSort::SortPairs(nullptr, cub_temp_bytes, dk, dp, (int)num_records, 0, 64);
     }
-
-    // Allocate sort workspace as single arena
     size_t arena_sz = num_records * (2*sizeof(uint64_t) + 2*sizeof(uint32_t)) + cub_temp_bytes;
     uint8_t* d_arena;
     CUDA_CHECK(cudaMalloc(&d_arena, arena_sz));
@@ -777,14 +775,14 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
         d_keys_10byte, d_sort_keys, num_records);
     init_identity_kernel<<<nblks, nthreads, 0, streams[0]>>>(d_perm_in, num_records);
 
-    // Free 10-byte keys (no longer needed after uint64 extraction)
-    cudaFree(d_keys_10byte);
-
     cub::DoubleBuffer<uint64_t> d_keys_buf(d_sort_keys, d_sort_keys_alt);
     cub::DoubleBuffer<uint32_t> d_perm_buf(d_perm_in, d_perm_out);
     cub::DeviceRadixSort::SortPairs(d_temp, cub_temp_bytes,
         d_keys_buf, d_perm_buf, (int)num_records, 0, 64, streams[0]);
     CUDA_CHECK(cudaStreamSynchronize(streams[0]));
+
+    // Free 10-byte keys after sort completes
+    cudaFree(d_keys_10byte);
 
     double sort_ms = phase_timer.end_ms();
     printf("  Sorted %lu keys in %.0f ms\n", num_records, sort_ms);
