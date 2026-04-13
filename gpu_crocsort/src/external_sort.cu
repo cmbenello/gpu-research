@@ -720,29 +720,8 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
     // Pre-allocate host perm buffer (pinned for fast D2H)
     uint32_t* h_perm = nullptr;
     cudaMallocHost(&h_perm, total_perm_bytes);
-
-    WallTimer phase_timer;
-
-    printf("== Step 1+2: GPU-Direct Key Upload (strided) ==\n");
-    phase_timer.begin();
-
-    // Free sort buffers to make room
-    for (int i = 0; i < NBUFS; i++) { if (d_buf[i]) { cudaFree(d_buf[i]); d_buf[i] = nullptr; } }
-
-    uint8_t* d_keys_10byte;
-    CUDA_CHECK(cudaMalloc(&d_keys_10byte, total_keys_bytes));
-
-    // Start ASYNC strided DMA — runs on DMA engine independently
-    CUDA_CHECK(cudaMemcpy2DAsync(
-        d_keys_10byte, KEY_SIZE,
-        h_data, RECORD_SIZE,
-        KEY_SIZE, num_records,
-        cudaMemcpyHostToDevice, streams[0]));
-    r.pcie_h2d_gb = total_keys_bytes / 1e9;
-    uint8_t* h_keys = nullptr;
-
-    // WHILE DMA runs: allocate h_output with MAP_POPULATE (CPU work, ~500ms for 60GB)
-    // This overlaps with the 3.4s DMA transfer — effectively FREE
+    // Pre-allocate gather output buffer
+    // Use mmap + MAP_POPULATE for pre-faulted pages (avoids page faults during gather)
     uint8_t* h_output = (uint8_t*)mmap(nullptr, total_bytes, PROT_READ|PROT_WRITE,
                                         MAP_PRIVATE|MAP_ANONYMOUS|MAP_POPULATE, -1, 0);
     if (h_output == MAP_FAILED) h_output = nullptr;
@@ -752,6 +731,29 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
         h_output = (uint8_t*)malloc(total_bytes);
         if (h_output) madvise(h_output, total_bytes, MADV_HUGEPAGE);
     }
+
+    WallTimer phase_timer;
+
+    // ── Step 1+2: GPU-direct key extraction via cudaMemcpy2D ──
+    // Transfer only KEY_SIZE bytes from each RECORD_SIZE-stride record
+    // directly from pinned h_data to GPU — no CPU extraction needed!
+    printf("== Step 1+2: GPU-Direct Key Upload (strided) ==\n");
+    phase_timer.begin();
+
+    // Free sort buffers to make room
+    for (int i = 0; i < NBUFS; i++) { if (d_buf[i]) { cudaFree(d_buf[i]); d_buf[i] = nullptr; } }
+
+    uint8_t* d_keys_10byte;
+    CUDA_CHECK(cudaMalloc(&d_keys_10byte, total_keys_bytes));
+
+    // Start ASYNC strided DMA upload FIRST — runs on DMA engine while CPU does alloc
+    CUDA_CHECK(cudaMemcpy2DAsync(
+        d_keys_10byte, KEY_SIZE,
+        h_data, RECORD_SIZE,
+        KEY_SIZE, num_records,
+        cudaMemcpyHostToDevice, streams[0]));
+    r.pcie_h2d_gb = total_keys_bytes / 1e9;
+    uint8_t* h_keys = nullptr;
 
     // Query CUB temp and allocate arena WHILE DMA runs (CPU+DMA concurrent)
     size_t cub_temp_bytes = 0;
