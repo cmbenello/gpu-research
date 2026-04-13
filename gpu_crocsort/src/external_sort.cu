@@ -1353,18 +1353,28 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
         printf("  Using OVC ARCHITECTURE: run-gen + GPU OVC merge + CPU gather\n");
         printf("  OVC buffers: %.1f GB (4B OVC + 8B prefix + 4B perm per record)\n", ovc_total/1e9);
 
-        // Allocate OVC merge buffers (persistent across run gen)
+        // Allocate OVC merge buffers first (persistent across run gen)
         CUDA_CHECK(cudaMalloc(&d_ovc_buffer, num_records * sizeof(uint32_t)));
         CUDA_CHECK(cudaMalloc(&d_prefix_buffer, num_records * sizeof(uint64_t)));
         CUDA_CHECK(cudaMalloc(&d_global_perm, num_records * sizeof(uint32_t)));
         ovc_buffer_records = num_records;
         ovc_run_offset = 0;
 
-        // Re-allocate sort buffers (were freed above)
-        // Need 2 buffers for triple-buffer pipeline (buf[0], buf[1] = data, buf[2] = scratch)
+        // Re-allocate sort buffers with REDUCED size (OVC buffers take space)
+        size_t ovc_used, ovc_dummy;
+        CUDA_CHECK(cudaMemGetInfo(&ovc_used, &ovc_dummy));
+        size_t ovc_budget = (size_t)(ovc_used * 0.90);
+        uint64_t ovc_buf_records = (ovc_budget / NBUFS) / RECORD_SIZE;
+        size_t ovc_buf_bytes = ovc_buf_records * RECORD_SIZE;
+        printf("  Reduced triple-buffer: %d × %.2f GB (%.0f M records each)\n",
+               NBUFS, ovc_buf_bytes/1e9, ovc_buf_records/1e6);
+
         for (int i = 0; i < NBUFS; i++) {
-            CUDA_CHECK(cudaMalloc(&d_buf[i], buf_bytes));
+            CUDA_CHECK(cudaMalloc(&d_buf[i], ovc_buf_bytes));
         }
+        // Update buf_records/buf_bytes for this sort run
+        buf_records = ovc_buf_records;
+        buf_bytes = ovc_buf_bytes;
         sort_ws.allocate(buf_records);
 
         // Run generation with per-chunk CUB sort
