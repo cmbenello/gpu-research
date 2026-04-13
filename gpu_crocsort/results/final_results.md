@@ -81,6 +81,7 @@ Full 10-byte key correctness via LSD two-pass radix sort.
 |---------|------|---------|---------|-------|---------|--------------|---------|
 | SF10 | 7.2 GB | 60M | 1.5s | 0.4s | **1.9s** | **3.7 GB/s** | PASS |
 | SF50 | 36.0 GB | 300M | 5.7s | 3.2s | **8.9s** | **4.1 GB/s** | PASS |
+| SF100 | 72.0 GB | 600M | 10.8s | 3.5s | **14.3s** | **5.0 GB/s** | PASS |
 
 Sort key: All 9 lineitem columns normalized to fixed 88B binary string
 (`l_returnflag`, `l_linestatus`, dates, monetary amounts, integers).
@@ -110,6 +111,7 @@ Total              8.9s  100%
 | System | Dataset | Record Size | Hardware | Time | **GB/s** |
 |--------|---------|------------|----------|------|---------|
 | **GPU CrocSort (ours)** | **60GB GenSort** | **100B** | **RTX 6000 (PCIe3)** | **7.2s** | **8.4** |
+| **GPU CrocSort (ours)** | **72GB TPC-H SF100** | **120B (88B key)** | **RTX 6000 (PCIe3)** | **14.3s** | **5.0** |
 | **GPU CrocSort (ours)** | **36GB TPC-H SF50** | **120B (88B key)** | **RTX 6000 (PCIe3)** | **8.9s** | **4.1** |
 | **GPU CrocSort (ours)** | **30GB TPC-H SF50** | **100B (10B key)** | **RTX 6000 (PCIe3)** | **3.7s** | **8.0** |
 | MendSort (JouleSort'23) | 1TB GenSort | 100B | Ryzen 7900, 8×NVMe | 304s | 3.3 |
