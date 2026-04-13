@@ -132,3 +132,19 @@ download 2.4GB permutation, CPU gathers.
 
 PCIe traffic for 60GB: 8.4GB (was 122.4GB) — **14.6× reduction**
 PCIe amplification: 0.14× (SUBLINEAR — less than 1× of data size!)
+
+## Cycle 33: cudaMemcpy2D Strided Key Upload
+
+Eliminated CPU key extraction. DMA reads full records at stride 100B,
+transfers only 10B keys to GPU. Zero CPU involvement in key extraction.
+
+| Data | Time  | Throughput | vs Original |
+|------|-------|-----------|-------------|
+| 10GB |  1.6s | 6.07 GB/s | — |
+| 20GB |  2.9s | 6.85 GB/s | **17.6×** |
+| 40GB |  5.5s | 7.32 GB/s | — |
+| 60GB |  7.9s | 7.58 GB/s | **28.8×** |
+
+Total PCIe: 8.4GB for 60GB (0.14× amplification).
+GPU work: ~0.5s (CUB sort + kernel init). CPU gather: ~4.0s.
+System is now 100% CPU-gather-dominated.
