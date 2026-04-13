@@ -808,6 +808,21 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
     uint8_t* d_keys_10byte;
     uint8_t* h_keys = nullptr;
 
+    // Check if all keys fit in GPU memory (need keys + arena)
+    size_t free_mem_now, dummy2;
+    CUDA_CHECK(cudaMemGetInfo(&free_mem_now, &dummy2));
+    size_t est_arena = num_records * (2*sizeof(uint64_t) + 2*sizeof(uint32_t)) + 512*1024*1024;
+    if (total_keys_bytes + est_arena > free_mem_now * 0.9) {
+        printf("  Keys too large for GPU (%.1f GB keys + %.1f GB arena > %.1f GB free)\n",
+               total_keys_bytes/1e9, est_arena/1e9, free_mem_now/1e9);
+        printf("  Falling back to chunked run-gen pipeline...\n");
+        // TODO: implement chunked pipeline for large TPC-H datasets
+        // For now, report error
+        fprintf(stderr, "Dataset too large for single-pass sort on this GPU\n");
+        r.total_ms = 0; r.sorted_output = nullptr;
+        return r;
+    }
+
     // Strided DMA: extract only KEY_SIZE bytes per record from host
     CUDA_CHECK(cudaMalloc(&d_keys_10byte, total_keys_bytes));
     CUDA_CHECK(cudaMemcpy2DAsync(
