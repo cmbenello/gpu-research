@@ -63,7 +63,9 @@ Traditional external sort requires ≥2.0× amplification (full records uploaded
 Our key-only architecture achieves **0.14×** — 14× less PCIe than the theoretical minimum
 for full-record approaches.
 
-## TPC-H Lineitem Results (fixed 100B format, verified correct)
+## TPC-H Lineitem Results
+
+### 10B Key (orderkey + linenumber, 100B record format)
 
 | Dataset | Size | Records | Time | Throughput | Verified |
 |---------|------|---------|------|-----------|---------|
@@ -73,9 +75,24 @@ for full-record approaches.
 Sort key: `l_orderkey` (big-endian 8B) + `l_linenumber` (big-endian 2B) = 10B.
 Full 10-byte key correctness via LSD two-pass radix sort.
 
-Note: These use a fixed 100B record format (10B key + 90B payload).
-The CrocSort paper uses native TPC-H format with 49B avg key and 
-variable-length records — that comparison is planned as future work.
+### 88B Normalized Key (full multi-column sort, 120B record format)
+
+| Dataset | Size | Records | Run Gen | Merge | **Total** | **Throughput** | Verified |
+|---------|------|---------|---------|-------|---------|--------------|---------|
+| SF10 | 7.2 GB | 60M | 1.5s | 0.4s | **1.9s** | **3.7 GB/s** | PASS |
+| SF50 | 36.0 GB | 300M | 5.7s | 4.2s | **9.9s** | **3.6 GB/s** | PASS |
+
+Sort key: All 9 lineitem columns normalized to fixed 88B binary string
+(`l_returnflag`, `l_linestatus`, dates, monetary amounts, integers).
+`memcmp` on the normalized key gives correct multi-column ordering.
+
+Architecture for 88B keys (exceeds GPU memory at SF50):
+- **Phase 1**: Triple-buffered pipelined run generation with per-chunk
+  LSD radix sort (11 CUB passes for 88B, reading at RECORD_SIZE stride).
+  Event-based D2H completion tracking prevents pipeline race conditions.
+- **Phase 2**: Multi-threaded cascade merge with merge-path partitioning.
+  All 48 CPU threads participate in every pass, split via binary search.
+  3 passes for 7 runs (7→4→2→1).
 
 ## Competitive Comparison
 
