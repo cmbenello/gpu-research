@@ -816,22 +816,14 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
             uint64_t end = std::min(start + chunk, num_records);
             if (start < end) {
                 threads.emplace_back([=, &h_data, &h_output, &h_perm]() {
-                    // Two-level prefetch: prefetch both cache lines of 100B record
-                    // (100B spans 2 cache lines at 64B boundaries)
                     constexpr int BLOCK = 256;
                     const uint8_t* src_ptrs[BLOCK];
                     for (uint64_t base = start; base < end; base += BLOCK) {
                         int count = std::min((uint64_t)BLOCK, end - base);
-                        // Resolve pointers and prefetch both cache lines
                         for (int j = 0; j < count; j++) {
                             uint32_t idx = h_perm[base + j];
                             src_ptrs[j] = h_data + (uint64_t)idx * RECORD_SIZE;
-                            __builtin_prefetch(src_ptrs[j], 0, 0);       // first 64B
-                            __builtin_prefetch(src_ptrs[j] + 64, 0, 0);  // second 64B
-                        }
-                        // Copy with prefetch of NEXT block's permutation entries
-                        if (base + BLOCK < end) {
-                            __builtin_prefetch(&h_perm[base + BLOCK], 0, 1);
+                            __builtin_prefetch(src_ptrs[j], 0, 0);
                         }
                         for (int j = 0; j < count; j++) {
                             memcpy(h_output + (base + j) * RECORD_SIZE, src_ptrs[j], RECORD_SIZE);
