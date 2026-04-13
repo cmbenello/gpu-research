@@ -703,53 +703,167 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
         return r;
     }
 
-    // Allocate persistent key buffer sized to actual data
-    // Keys = 10% of record data, so they always fit if we have enough GPU memory
+    // ════════════════════════════════════════════════════════════════
+    // SINGLE-PASS KEY-ONLY SORT
+    //
+    // Instead of: upload full records → GPU sort → download sorted records → merge
+    // Do:         extract keys on CPU → upload 10% keys → GPU sort → download perm → CPU gather
+    //
+    // PCIe traffic: 8.4GB instead of 122.4GB for 60GB dataset (14.6× reduction!)
+    // ════════════════════════════════════════════════════════════════
+
     uint64_t total_keys_bytes = num_records * KEY_SIZE;
-    size_t free_after_bufs, dummy;
-    CUDA_CHECK(cudaMemGetInfo(&free_after_bufs, &dummy));
-    // Need: key_buffer + later merge workspace (keys_out + perm_in + perm_out = keys + 2*perm)
-    // But merge workspace is allocated AFTER freeing sort buffers, so we have plenty
-    if (total_keys_bytes < free_after_bufs * 0.8) {
-        CUDA_CHECK(cudaMalloc(&d_key_buffer, total_keys_bytes));
-        key_buffer_capacity = total_keys_bytes;
-        printf("  Key retention: %.2f GB GPU key buffer allocated\n", total_keys_bytes/1e9);
-    } else {
-        printf("  Key retention: keys too large (%.2f GB), will extract on CPU\n",
-               total_keys_bytes/1e9);
+    uint64_t total_perm_bytes = num_records * sizeof(uint32_t);
+
+    // Pre-allocate host perm buffer (pinned for fast D2H)
+    uint32_t* h_perm = nullptr;
+    cudaMallocHost(&h_perm, total_perm_bytes);
+    // Pre-allocate gather output buffer
+    uint8_t* h_output = (uint8_t*)malloc(total_bytes);
+    if (h_output) madvise(h_output, total_bytes, MADV_HUGEPAGE);
+
+    WallTimer phase_timer;
+
+    // ── Step 1: CPU key extraction (parallel, sequential read at ~40 GB/s) ──
+    printf("== Step 1: CPU Key Extraction ==\n");
+    phase_timer.begin();
+    uint8_t* h_keys;
+    CUDA_CHECK(cudaMallocHost(&h_keys, total_keys_bytes));
+
+    {
+        int num_threads = std::min(48, (int)std::thread::hardware_concurrency());
+        std::vector<std::thread> threads;
+        uint64_t chunk = (num_records + num_threads - 1) / num_threads;
+        for (int t = 0; t < num_threads; t++) {
+            uint64_t start = (uint64_t)t * chunk;
+            uint64_t end = std::min(start + chunk, num_records);
+            if (start < end) {
+                threads.emplace_back([=]() {
+                    for (uint64_t i = start; i < end; i++)
+                        memcpy(h_keys + i * KEY_SIZE, h_data + i * RECORD_SIZE, KEY_SIZE);
+                });
+            }
+        }
+        for (auto& t : threads) t.join();
     }
-    run_key_offsets.clear();
+    double extract_ms = phase_timer.end_ms();
+    printf("  Extracted %lu keys (%.2f GB) in %.0f ms (%.2f GB/s)\n",
+           num_records, total_keys_bytes/1e9, extract_ms, total_bytes/(extract_ms*1e6));
 
-    // Pre-allocate sort workspace and host buffers for merge phase
-    sort_ws.allocate(buf_records);
-    // Pre-allocate pinned host perm buffer NOW to avoid 1s cudaMallocHost during merge
-    uint32_t* h_perm_prealloc = nullptr;
-    uint64_t total_perm_bytes_prealloc = num_records * sizeof(uint32_t);
-    cudaMallocHost(&h_perm_prealloc, total_perm_bytes_prealloc);
-    // Pre-allocate gather output buffer NOW (hidden behind run gen time)
-    uint8_t* h_output_prealloc = (uint8_t*)malloc(total_bytes);
-    if (h_output_prealloc) madvise(h_output_prealloc, total_bytes, MADV_HUGEPAGE);
+    // ── Step 2: Upload keys to GPU ──
+    printf("== Step 2: Upload Keys to GPU ==\n");
+    phase_timer.begin();
 
-    printf("\n== Phase 1: Run Generation (pipelined) ==\n");
-    double rg_h2d = 0, rg_d2h = 0;
-    auto runs = generate_runs_pipelined(h_data, num_records,
-                                         r.run_gen_ms, rg_h2d, rg_d2h);
-    r.num_runs = runs.size();
-    printf("  %d runs in %.0f ms (%.2f GB/s effective)\n\n",
-           r.num_runs, r.run_gen_ms, total_bytes/(r.run_gen_ms*1e6));
+    // Free sort buffers to make room for key sort workspace
+    for (int i = 0; i < NBUFS; i++) { if (d_buf[i]) { cudaFree(d_buf[i]); d_buf[i] = nullptr; } }
 
-    // Free sort workspace but KEEP sort buffers — reuse as merge arena
-    sort_ws.free();
-    // d_buf[0..NBUFS-1] stay allocated — total ~16GB available for merge
+    // Allocate: d_keys_10byte (N×10), d_sort_keys (N×8), d_sort_keys_alt (N×8),
+    //           d_perm_in (N×4), d_perm_out (N×4), CUB temp
+    uint8_t* d_keys_10byte;
+    CUDA_CHECK(cudaMalloc(&d_keys_10byte, total_keys_bytes));
+    CUDA_CHECK(cudaMemcpy(d_keys_10byte, h_keys, total_keys_bytes, cudaMemcpyHostToDevice));
+    r.pcie_h2d_gb = total_keys_bytes / 1e9;
 
-    printf("== Phase 2: GPU Streaming Merge ==\n");
-    double mg_h2d = 0, mg_d2h = 0;
-    r.sorted_output = streaming_merge(h_data, num_records, runs,
-                                       r.merge_ms, r.merge_passes, mg_h2d, mg_d2h,
-                                       h_perm_prealloc, h_output_prealloc);
+    // Query CUB temp
+    size_t cub_temp_bytes = 0;
+    {
+        cub::DoubleBuffer<uint64_t> dk(nullptr,nullptr);
+        cub::DoubleBuffer<uint32_t> dp(nullptr,nullptr);
+        cub::DeviceRadixSort::SortPairs(nullptr, cub_temp_bytes, dk, dp, (int)num_records, 0, 64);
+    }
 
-    r.pcie_h2d_gb = (rg_h2d + mg_h2d) / 1e9;
-    r.pcie_d2h_gb = (rg_d2h + mg_d2h) / 1e9;
+    // Allocate sort workspace as single arena
+    size_t arena_sz = num_records * (2*sizeof(uint64_t) + 2*sizeof(uint32_t)) + cub_temp_bytes;
+    uint8_t* d_arena;
+    CUDA_CHECK(cudaMalloc(&d_arena, arena_sz));
+
+    uint64_t* d_sort_keys = (uint64_t*)d_arena;
+    uint64_t* d_sort_keys_alt = d_sort_keys + num_records;
+    uint32_t* d_perm_in = (uint32_t*)(d_sort_keys_alt + num_records);
+    uint32_t* d_perm_out = d_perm_in + num_records;
+    void* d_temp = (void*)(d_perm_out + num_records);
+
+    double upload_ms = phase_timer.end_ms();
+    printf("  Uploaded %.2f GB keys + alloc in %.0f ms\n", total_keys_bytes/1e9, upload_ms);
+
+    // ── Step 3: GPU sort (extract uint64, init perm, CUB radix sort) ──
+    printf("== Step 3: GPU CUB Radix Sort ==\n");
+    phase_timer.begin();
+
+    int nthreads = 256, nblks = (num_records + nthreads - 1) / nthreads;
+    extract_uint64_from_keys_kernel<<<nblks, nthreads, 0, streams[0]>>>(
+        d_keys_10byte, d_sort_keys, num_records);
+    init_identity_kernel<<<nblks, nthreads, 0, streams[0]>>>(d_perm_in, num_records);
+
+    // Free 10-byte keys (no longer needed after uint64 extraction)
+    cudaFree(d_keys_10byte);
+
+    cub::DoubleBuffer<uint64_t> d_keys_buf(d_sort_keys, d_sort_keys_alt);
+    cub::DoubleBuffer<uint32_t> d_perm_buf(d_perm_in, d_perm_out);
+    cub::DeviceRadixSort::SortPairs(d_temp, cub_temp_bytes,
+        d_keys_buf, d_perm_buf, (int)num_records, 0, 64, streams[0]);
+    CUDA_CHECK(cudaStreamSynchronize(streams[0]));
+
+    double sort_ms = phase_timer.end_ms();
+    printf("  Sorted %lu keys in %.0f ms\n", num_records, sort_ms);
+
+    // ── Step 4: Download permutation ──
+    printf("== Step 4: Download Permutation ==\n");
+    phase_timer.begin();
+
+    d_perm_in = d_perm_buf.Current();
+    CUDA_CHECK(cudaMemcpy(h_perm, d_perm_in, total_perm_bytes, cudaMemcpyDeviceToHost));
+    r.pcie_d2h_gb = total_perm_bytes / 1e9;
+
+    cudaFree(d_arena);
+    cudaFreeHost(h_keys);
+
+    double download_ms = phase_timer.end_ms();
+    printf("  Downloaded %.2f GB perm in %.0f ms\n", total_perm_bytes/1e9, download_ms);
+
+    // ── Step 5: CPU multi-threaded gather ──
+    printf("== Step 5: CPU Gather ==\n");
+    phase_timer.begin();
+
+    {
+        int num_threads = std::min(48, (int)std::thread::hardware_concurrency());
+        std::vector<std::thread> threads;
+        uint64_t chunk = (num_records + num_threads - 1) / num_threads;
+        for (int t = 0; t < num_threads; t++) {
+            uint64_t start = (uint64_t)t * chunk;
+            uint64_t end = std::min(start + chunk, num_records);
+            if (start < end) {
+                threads.emplace_back([=, &h_data, &h_output, &h_perm]() {
+                    constexpr int BLOCK = 256;
+                    const uint8_t* src_ptrs[BLOCK];
+                    for (uint64_t base = start; base < end; base += BLOCK) {
+                        int count = std::min((uint64_t)BLOCK, end - base);
+                        for (int j = 0; j < count; j++) {
+                            uint32_t idx = h_perm[base + j];
+                            src_ptrs[j] = h_data + (uint64_t)idx * RECORD_SIZE;
+                            __builtin_prefetch(src_ptrs[j], 0, 0);
+                        }
+                        for (int j = 0; j < count; j++) {
+                            memcpy(h_output + (base + j) * RECORD_SIZE, src_ptrs[j], RECORD_SIZE);
+                        }
+                    }
+                });
+            }
+        }
+        for (auto& t : threads) t.join();
+    }
+
+    double gather_ms = phase_timer.end_ms();
+    printf("  Gathered %.2f GB in %.0f ms (%.2f GB/s)\n",
+           total_bytes/1e9, gather_ms, total_bytes/(gather_ms*1e6));
+
+    cudaFreeHost(h_perm);
+
+    r.run_gen_ms = extract_ms + upload_ms + sort_ms + download_ms;
+    r.merge_ms = gather_ms;
+    r.merge_passes = 1;
+    r.num_runs = 1;
+    r.sorted_output = h_output;
     r.total_ms = r.run_gen_ms + r.merge_ms;
 
     printf("\n[ExternalSort] ═══════════════════════════════════════\n");
