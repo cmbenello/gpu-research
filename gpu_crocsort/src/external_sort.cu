@@ -962,8 +962,46 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
         r.merge_passes = 1;
         r.num_runs = 1;
 
-        // ── CPU gather ──
-        goto do_gather;
+        // ── CPU gather (inline, same as below) ──
+        {
+            printf("== Step 5: CPU Gather ==\n");
+            WallTimer gather_timer; gather_timer.begin();
+            int num_threads = std::min(48, (int)std::thread::hardware_concurrency());
+            std::vector<std::thread> threads;
+            uint64_t chunk = (num_records + num_threads - 1) / num_threads;
+            for (int t = 0; t < num_threads; t++) {
+                uint64_t start = (uint64_t)t * chunk;
+                uint64_t end = std::min(start + chunk, num_records);
+                if (start < end) {
+                    threads.emplace_back([=, &h_data, &h_output, &h_perm]() {
+                        constexpr int BLOCK = 256;
+                        const uint8_t* src_ptrs[BLOCK];
+                        for (uint64_t base = start; base < end; base += BLOCK) {
+                            int count = std::min((uint64_t)BLOCK, end - base);
+                            for (int j = 0; j < count; j++) {
+                                uint32_t idx = h_perm[base + j];
+                                src_ptrs[j] = h_data + (uint64_t)idx * RECORD_SIZE;
+                                __builtin_prefetch(src_ptrs[j], 0, 0);
+                            }
+                            for (int j = 0; j < count; j++) {
+                                memcpy(h_output + (base + j) * RECORD_SIZE, src_ptrs[j], RECORD_SIZE);
+                            }
+                        }
+                    });
+                }
+            }
+            for (auto& t : threads) t.join();
+            double gather_ms = gather_timer.end_ms();
+            printf("  Gathered %.2f GB in %.0f ms (%.2f GB/s)\n",
+                   total_bytes/1e9, gather_ms, total_bytes/(gather_ms*1e6));
+            r.merge_ms = gather_ms;
+        }
+        cudaFreeHost(h_perm);
+        r.sorted_output = h_output;
+        r.sorted_output_size = total_bytes;
+        r.sorted_output_is_mmap = h_output_is_mmap;
+        r.total_ms = r.run_gen_ms + r.merge_ms;
+        return r;
     }
 
     // Strided DMA: extract only KEY_SIZE bytes per record from host
@@ -1072,7 +1110,6 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
     printf("  Downloaded %.2f GB perm in %.0f ms\n", total_perm_bytes/1e9, download_ms);
 
     // ── Step 5: CPU multi-threaded gather ──
-do_gather:
     printf("== Step 5: CPU Gather ==\n");
     phase_timer.begin();
 
