@@ -726,17 +726,9 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
     uint32_t* h_perm_prealloc = nullptr;
     uint64_t total_perm_bytes_prealloc = num_records * sizeof(uint32_t);
     cudaMallocHost(&h_perm_prealloc, total_perm_bytes_prealloc);
-    // Pre-allocate gather output buffer and touch pages in background thread
-    // (page faults during gather add ~200ms for 60GB; pre-touching eliminates this)
+    // Pre-allocate gather output buffer NOW (hidden behind run gen time)
     uint8_t* h_output_prealloc = (uint8_t*)malloc(total_bytes);
     if (h_output_prealloc) madvise(h_output_prealloc, total_bytes, MADV_HUGEPAGE);
-    std::thread page_touch_thread;
-    if (h_output_prealloc) {
-        page_touch_thread = std::thread([=]() {
-            for (uint64_t off = 0; off < total_bytes; off += 4096)
-                h_output_prealloc[off] = 0;
-        });
-    }
 
     printf("\n== Phase 1: Run Generation (pipelined) ==\n");
     double rg_h2d = 0, rg_d2h = 0;
@@ -745,9 +737,6 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
     r.num_runs = runs.size();
     printf("  %d runs in %.0f ms (%.2f GB/s effective)\n\n",
            r.num_runs, r.run_gen_ms, total_bytes/(r.run_gen_ms*1e6));
-
-    // Wait for page-touch thread to finish before merge uses h_output
-    if (page_touch_thread.joinable()) page_touch_thread.join();
 
     // Free sort workspace but KEEP sort buffers — reuse as merge arena
     sort_ws.free();
