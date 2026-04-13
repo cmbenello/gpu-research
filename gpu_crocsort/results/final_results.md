@@ -95,15 +95,24 @@ Architecture for 88B keys (exceeds GPU memory at SF50):
   partitioning. 48 threads each run independent K-way heap merge on their
   block. 1 pass vs cascade's 3 passes → 3x less memory traffic.
 
-### Bottleneck Analysis (TPC-H SF50 88B)
+### Bottleneck Analysis
 
 ```
-Component         Time    %    Bottleneck
+TPC-H SF50 (36 GB, 88B keys):
+Component          Time    %    Bottleneck
 ─────────────────────────────────────────
-Run gen (7 chunks) 5.7s   64%  GPU sort (11 LSD passes × 7 chunks)
-K-way merge        3.2s   36%  DDR4 bandwidth (72 GB traffic, 48 threads)
+Run gen (7 chunks)  5.7s   64%  GPU sort (11 LSD passes × 7 chunks)
+K-way merge         3.2s   36%  DDR4 bandwidth (72 GB traffic, 48 threads)
 ─────────────────────────────────────────
-Total              8.9s  100%
+Total               8.9s  100%
+
+TPC-H SF100 (72 GB, 88B keys):
+Component           Time    %    Bottleneck
+──────────────────────────────────────────
+Run gen (14 chunks) 10.8s   75%  GPU sort (11 LSD passes × 14 chunks)
+K-way merge          3.5s   25%  DDR4 bandwidth (144 GB traffic, 48 threads)
+──────────────────────────────────────────
+Total               14.3s  100%
 ```
 
 ## Competitive Comparison
