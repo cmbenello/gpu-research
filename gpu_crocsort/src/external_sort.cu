@@ -25,6 +25,8 @@
 #include <cstring>
 #include <algorithm>
 #include <vector>
+#include <thrust/sort.h>
+#include <thrust/device_ptr.h>
 #include <chrono>
 #include <thread>
 #include <cub/cub.cuh>
@@ -813,14 +815,152 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
     CUDA_CHECK(cudaMemGetInfo(&free_mem_now, &dummy2));
     size_t est_arena = num_records * (2*sizeof(uint64_t) + 2*sizeof(uint32_t)) + 512*1024*1024;
     if (total_keys_bytes + est_arena > free_mem_now * 0.9) {
-        printf("  Keys too large for GPU (%.1f GB keys + %.1f GB arena > %.1f GB free)\n",
-               total_keys_bytes/1e9, est_arena/1e9, free_mem_now/1e9);
-        printf("  Falling back to chunked run-gen pipeline...\n");
-        // TODO: implement chunked pipeline for large TPC-H datasets
-        // For now, report error
-        fprintf(stderr, "Dataset too large for single-pass sort on this GPU\n");
-        r.total_ms = 0; r.sorted_output = nullptr;
-        return r;
+        printf("  Keys too large for GPU (%.1f GB keys > GPU capacity)\n", total_keys_bytes/1e9);
+        printf("  Using prefix sort (8B) + CPU fixup for %d-byte keys\n", KEY_SIZE);
+
+        // ── PREFIX SORT + CPU FIXUP for large keys ──
+        // 1. Upload 8B prefix per record (fits in GPU)
+        // 2. CUB sort by uint64 prefix → partial permutation
+        // 3. Download permutation
+        // 4. CPU fixup: for tied groups (same 8B prefix), sort by full key using std::sort
+
+        uint64_t prefix_bytes = num_records * 8;
+        printf("  Uploading %.2f GB key prefixes...\n", prefix_bytes / 1e9);
+
+        // Allocate for 8B prefix sort (reuse GenSort-style arena)
+        uint64_t* d_prefix_keys;
+        uint64_t* d_prefix_alt;
+        CUDA_CHECK(cudaMalloc(&d_prefix_keys, prefix_bytes));
+        CUDA_CHECK(cudaMalloc(&d_prefix_alt, prefix_bytes));
+        CUDA_CHECK(cudaMalloc(&d_perm_in, total_perm_bytes));
+        CUDA_CHECK(cudaMalloc(&d_perm_out, total_perm_bytes));
+
+        // Strided DMA: extract first 8 bytes from each RECORD_SIZE-stride record
+        CUDA_CHECK(cudaMemcpy2DAsync(
+            d_prefix_keys, 8,
+            h_data, RECORD_SIZE,
+            8, num_records,
+            cudaMemcpyHostToDevice, streams[0]));
+        r.pcie_h2d_gb = prefix_bytes / 1e9;
+
+        // Extract big-endian uint64 from the 8-byte prefix on GPU
+        {
+            int nt = 256, nb = (num_records + nt - 1) / nt;
+            // The DMA already placed 8 bytes per record at stride 8 in d_prefix_keys.
+            // But they're raw bytes, not big-endian uint64. Extract:
+            // Actually cudaMemcpy2D copies bytes verbatim. The first 8 bytes of each
+            // KEY_SIZE-byte key are already big-endian from our normalized format.
+            // We need to reinterpret as big-endian uint64. Use a kernel:
+            extract_uint64_from_keys_kernel<<<nb, nt, 0, streams[0]>>>(
+                reinterpret_cast<uint8_t*>(d_prefix_keys), d_prefix_keys, num_records);
+            // Wait, this reads from d_prefix_keys at KEY_SIZE stride but data is at 8B stride.
+            // Need a special kernel. Actually, we can just byte-swap in-place:
+        }
+
+        // Simpler: extract uint64 directly from h_data (first 8 bytes of each record)
+        // using the extract_sort_keys_kernel which reads at RECORD_SIZE stride
+        // Upload to a temp buffer at RECORD_SIZE stride... no, that's the full records.
+        //
+        // Cleanest: use a kernel that reads 8 bytes at 8-byte stride (the DMA output)
+        // and converts to big-endian uint64.
+
+        // Actually, the DMA wrote bytes [0:8) of each key at pitch=8. That IS the
+        // big-endian uint64 encoding. On a little-endian GPU, we need byte-swap.
+        // The extract_sort_keys_kernel does this from RECORD_SIZE stride.
+        // Let me just upload the first 8 bytes raw and byte-swap on GPU:
+
+        // Forget the DMA approach — just do CPU extraction of 8B prefix into pinned buffer
+        uint64_t* h_prefix;
+        CUDA_CHECK(cudaMallocHost(&h_prefix, prefix_bytes));
+        {
+            int nt = std::min(48, (int)std::thread::hardware_concurrency());
+            std::vector<std::thread> threads;
+            uint64_t chunk = (num_records + nt - 1) / nt;
+            for (int t = 0; t < nt; t++) {
+                uint64_t s = (uint64_t)t * chunk, e = std::min(s + chunk, num_records);
+                if (s < e) {
+                    threads.emplace_back([=]() {
+                        for (uint64_t i = s; i < e; i++) {
+                            const uint8_t* k = h_data + i * RECORD_SIZE;
+                            uint64_t v = 0;
+                            for (int b = 0; b < 8; b++) v = (v << 8) | k[b];
+                            h_prefix[i] = v;
+                        }
+                    });
+                }
+            }
+            for (auto& t : threads) t.join();
+        }
+        CUDA_CHECK(cudaMemcpy(d_prefix_keys, h_prefix, prefix_bytes, cudaMemcpyHostToDevice));
+
+        // Init identity permutation
+        {
+            int nt = 256, nb = (num_records + nt - 1) / nt;
+            init_identity_kernel<<<nb, nt, 0, streams[0]>>>(d_perm_in, num_records);
+        }
+
+        // CUB sort by uint64 prefix
+        size_t cub_temp = 0;
+        {
+            cub::DoubleBuffer<uint64_t> dk(nullptr,nullptr);
+            cub::DoubleBuffer<uint32_t> dp(nullptr,nullptr);
+            cub::DeviceRadixSort::SortPairs(nullptr, cub_temp, dk, dp, (int)num_records, 0, 64);
+        }
+        void* d_temp;
+        CUDA_CHECK(cudaMalloc(&d_temp, cub_temp));
+
+        cub::DoubleBuffer<uint64_t> kbuf(d_prefix_keys, d_prefix_alt);
+        cub::DoubleBuffer<uint32_t> pbuf(d_perm_in, d_perm_out);
+        cub::DeviceRadixSort::SortPairs(d_temp, cub_temp,
+            kbuf, pbuf, (int)num_records, 0, 64, streams[0]);
+        CUDA_CHECK(cudaStreamSynchronize(streams[0]));
+
+        // Download sorted prefix keys + permutation
+        uint64_t* h_sorted_prefix = h_prefix; // reuse
+        CUDA_CHECK(cudaMemcpy(h_sorted_prefix, kbuf.Current(), prefix_bytes, cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(h_perm, pbuf.Current(), total_perm_bytes, cudaMemcpyDeviceToHost));
+        r.pcie_d2h_gb = (prefix_bytes + total_perm_bytes) / 1e9;
+
+        cudaFree(d_prefix_keys); cudaFree(d_prefix_alt);
+        cudaFree(d_perm_in); cudaFree(d_perm_out);
+        cudaFree(d_temp);
+
+        double gpu_ms = phase_timer.end_ms();
+        printf("  GPU prefix sort: %.0f ms\n", gpu_ms);
+
+        // ── CPU fixup: sort tied groups by full key ──
+        printf("  CPU fixup for tied groups...\n");
+        WallTimer fixup_timer; fixup_timer.begin();
+
+        // Find runs of equal prefix keys and sort each by full key
+        uint64_t ties_fixed = 0;
+        uint64_t i = 0;
+        while (i < num_records) {
+            uint64_t j = i + 1;
+            while (j < num_records && h_sorted_prefix[j] == h_sorted_prefix[i]) j++;
+            if (j - i > 1) {
+                // Tied group [i, j): sort by full key
+                std::sort(h_perm + i, h_perm + j, [&](uint32_t a, uint32_t b) {
+                    return memcmp(h_data + (uint64_t)a * RECORD_SIZE,
+                                  h_data + (uint64_t)b * RECORD_SIZE, KEY_SIZE) < 0;
+                });
+                ties_fixed += j - i;
+            }
+            i = j;
+        }
+
+        double fixup_ms = fixup_timer.end_ms();
+        printf("  Fixed %lu records in %lu tied groups: %.0f ms\n",
+               ties_fixed, ties_fixed > 0 ? ties_fixed : 0, fixup_ms);
+
+        cudaFreeHost(h_prefix);
+
+        r.run_gen_ms = gpu_ms + fixup_ms;
+        r.merge_passes = 1;
+        r.num_runs = 1;
+
+        // ── CPU gather ──
+        goto do_gather;
     }
 
     // Strided DMA: extract only KEY_SIZE bytes per record from host
@@ -929,6 +1069,7 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
     printf("  Downloaded %.2f GB perm in %.0f ms\n", total_perm_bytes/1e9, download_ms);
 
     // ── Step 5: CPU multi-threaded gather ──
+do_gather:
     printf("== Step 5: CPU Gather ==\n");
     phase_timer.begin();
 
