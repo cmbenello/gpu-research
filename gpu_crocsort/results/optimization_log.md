@@ -187,3 +187,16 @@ System at hardware limits:
 - CPU gather: 3.3s (DRAM random reads at 18 GB/s with 48T + THP)
 
 No further software optimization possible. Gains require faster hardware.
+
+## TPC-H Lineitem Results
+
+| Dataset | Size | Records | Time | Throughput |
+|---------|------|---------|------|-----------|
+| TPC-H SF10 | 6 GB | 60M | 1.0s | 5.74 GB/s |
+| TPC-H SF50 | 30 GB | 300M | 3.7s | 8.18 GB/s |
+| Random | 30 GB | 300M | 4.2s | 7.15 GB/s |
+| Random | 60 GB | 600M | 7.2s | 8.39 GB/s |
+
+TPC-H is 14% faster than random GenSort for the same data size.
+Note: sorts by bytes 0-7 only (orderkey). Bytes 8-9 (linenumber)
+not sorted — records within the same order may be out of order.
