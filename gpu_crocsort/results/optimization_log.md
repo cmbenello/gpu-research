@@ -148,3 +148,17 @@ transfers only 10B keys to GPU. Zero CPU involvement in key extraction.
 Total PCIe: 8.4GB for 60GB (0.14× amplification).
 GPU work: ~0.5s (CUB sort + kernel init). CPU gather: ~4.0s.
 System is now 100% CPU-gather-dominated.
+
+## Final Verified Results (Cycle 35)
+
+| Data | Time  | Throughput | vs Original |
+|------|-------|-----------|-------------|
+| 10GB |  1.6s | 6.12 GB/s | — |
+| 20GB |  2.9s | 6.93 GB/s | **17.8×** |
+| 30GB |  4.2s | 7.19 GB/s | — |
+| 40GB |  5.5s | 7.34 GB/s | — |
+| 50GB |  6.7s | 7.43 GB/s | — |
+| 60GB |  7.9s | 7.63 GB/s | **28.9×** |
+
+All sizes verified correct (PASS). THP enabled.
+Architecture: single-pass key-only sort via cudaMemcpy2D strided DMA.
