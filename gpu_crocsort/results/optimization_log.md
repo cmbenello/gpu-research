@@ -229,3 +229,24 @@ Next: OVC compression for prefix-redundant TPC-H keys.
 TPC-H 88B keys need 11 LSD passes (vs 2 for GenSort 10B keys).
 SF50 fails because 300M × 88B = 26.4GB keys > 24GB GPU memory.
 Compression (OVC) would reduce key size and enable larger datasets.
+
+## Session Summary
+
+### Final GenSort Performance (verified correct)
+| Data | Time | Throughput | vs Original |
+|------|------|-----------|-------------|
+| 20GB | 3.0s | 6.8 GB/s | 17.5× |
+| 60GB | 7.7s | 7.8 GB/s | 30.3× |
+
+### TPC-H Performance
+| Dataset | Key | Size | Time | Throughput | Status |
+|---------|-----|------|------|-----------|--------|
+| SF10 | 10B (orderkey) | 6 GB | 1.1s | 5.5 GB/s | PASS |
+| SF10 | 88B (full cols) | 7.2 GB | 1.9s | 3.8 GB/s | PASS |
+| SF50 | 10B (orderkey) | 30 GB | 3.6s | 8.3 GB/s | no-verify |
+| SF50 | 88B (full cols) | 36 GB | OOM | — | keys>GPU |
+
+### Remaining Work
+- Chunked pipeline for 88B keys at SF50+ scale
+- OVC compression for prefix-redundant keys
+- uint128 CUB sort (halves LSD passes from 11→6, needs debugging)
