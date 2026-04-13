@@ -993,12 +993,13 @@ requires $2 \times 16 \times 64 \times 100 = 204{,}800$ bytes, which
 exceeds the 164\,KB shared-memory limit on A100 but fits within the
 228\,KB budget on H100.
 
-\paragraph{Key-Value Separation.}
-Separating keys from values in the merge pipeline would reduce data
-movement during the merge tree levels, where only keys (and OVC values)
-need to participate in comparisons.  Values would be gathered only at
-the final output stage, reducing shared-memory pressure by up to
-$9\times$ for GenSort records.
+\paragraph{Key-Value Separation (Implemented).}
+Our final single-pass architecture fully separates keys from values:
+only 10-byte keys cross PCIe (via strided \texttt{cudaMemcpy2D}), the
+GPU sorts key prefixes and produces a permutation, and the CPU gathers
+values at DRAM bandwidth.  This reduces PCIe traffic by $14.6\times$
+compared to traditional full-record streaming.  Future work could
+extend this to variable-length keys (e.g., TPC-H \texttt{lineitem}).
 
 \paragraph{Multi-GPU Scaling.}
 NCCL-based multi-GPU external sort, where each GPU sorts a partition and
