@@ -152,11 +152,9 @@ __global__ void extract_uint32_from_keys_kernel(
 }
 
 // Extract uint64 sort key from KEY_SIZE-stride key buffer.
-// Packs bytes [0:5] (48 bits) + bytes [8:10] (16 bits) = 64 bits.
-// This captures the FULL 10-byte key for keys where bytes 5-7 are
-// predictable (like TPC-H where orderkey fits in 4 bytes).
-// For random keys, bytes 5-7 are lost but 48+16=64 bits of entropy
-// is enough for 600M records (collision prob ~2^-17).
+// Uses ALL 10 bytes packed into two sort passes for full correctness.
+// Primary key: bytes[0:8] big-endian uint64 (main sort)
+// Tiebreaker:  bytes[8:10] (handled by segmented sort on ties)
 __global__ void extract_uint64_from_keys_kernel(
     const uint8_t* __restrict__ key_buffer,
     uint64_t* __restrict__ sort_keys,
@@ -165,11 +163,23 @@ __global__ void extract_uint64_from_keys_kernel(
     uint64_t i = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= num_records) return;
     const uint8_t* k = key_buffer + i * KEY_SIZE;
-    // Pack: bytes[0:6] as top 48 bits + bytes[8:10] as bottom 16 bits
-    uint64_t hi = 0;
-    for (int b = 0; b < 6; b++) hi = (hi << 8) | k[b];
-    uint64_t lo = ((uint64_t)k[8] << 8) | k[9];
-    sort_keys[i] = (hi << 16) | lo;
+    uint64_t v = 0;
+    for (int b = 0; b < 8; b++) v = (v << 8) | k[b];
+    sort_keys[i] = v;
+}
+
+// Extract 16-bit tiebreaker (bytes 8-9 big-endian) using permutation to lookup original keys
+__global__ void extract_tiebreaker_kernel(
+    const uint8_t* __restrict__ key_buffer,
+    const uint32_t* __restrict__ perm,
+    uint16_t* __restrict__ tiebreakers,
+    uint64_t num_records
+) {
+    uint64_t i = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= num_records) return;
+    uint32_t orig_idx = perm[i];
+    const uint8_t* k = key_buffer + (uint64_t)orig_idx * KEY_SIZE;
+    tiebreakers[i] = ((uint16_t)k[8] << 8) | k[9];
 }
 
 // ── GPU key extraction kernel ────────────────────────────────────────
@@ -777,22 +787,20 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
     r.pcie_h2d_gb = total_keys_bytes / 1e9;
     uint8_t* h_keys = nullptr;
 
-    // Query CUB temp and allocate arena WHILE DMA runs (CPU+DMA concurrent)
-    // Use 32-bit keys (top 4 bytes) — 2× less GPU memory, ~2× faster CUB sort
-    // For 600M random records, 4 bytes = 2^32 values → virtually no ties
+    // Allocate arena for CUB sort: uint64 keys + uint32 perm + CUB temp
     size_t cub_temp_bytes = 0;
     {
-        cub::DoubleBuffer<uint32_t> dk(nullptr,nullptr);
+        cub::DoubleBuffer<uint64_t> dk(nullptr,nullptr);
         cub::DoubleBuffer<uint32_t> dp(nullptr,nullptr);
-        cub::DeviceRadixSort::SortPairs(nullptr, cub_temp_bytes, dk, dp, (int)num_records, 0, 32);
+        cub::DeviceRadixSort::SortPairs(nullptr, cub_temp_bytes, dk, dp, (int)num_records, 0, 64);
     }
-    size_t arena_sz = num_records * (2*sizeof(uint32_t) + 2*sizeof(uint32_t)) + cub_temp_bytes;
+    size_t arena_sz = num_records * (2*sizeof(uint64_t) + 2*sizeof(uint32_t)) + cub_temp_bytes;
     uint8_t* d_arena;
     CUDA_CHECK(cudaMalloc(&d_arena, arena_sz));
 
-    uint32_t* d_sort_keys = (uint32_t*)d_arena;
-    uint32_t* d_sort_keys_alt = d_sort_keys + num_records;
-    uint32_t* d_perm_in = d_sort_keys_alt + num_records;
+    uint64_t* d_sort_keys = (uint64_t*)d_arena;
+    uint64_t* d_sort_keys_alt = d_sort_keys + num_records;
+    uint32_t* d_perm_in = (uint32_t*)(d_sort_keys_alt + num_records);
     uint32_t* d_perm_out = d_perm_in + num_records;
     void* d_temp = (void*)(d_perm_out + num_records);
 
@@ -805,19 +813,18 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
     phase_timer.begin();
 
     int nthreads = 256, nblks = (num_records + nthreads - 1) / nthreads;
-    // Extract 32-bit keys (top 4 bytes, big-endian) — half the size of uint64
-    extract_uint32_from_keys_kernel<<<nblks, nthreads, 0, streams[0]>>>(
+    extract_uint64_from_keys_kernel<<<nblks, nthreads, 0, streams[0]>>>(
         d_keys_10byte, d_sort_keys, num_records);
     init_identity_kernel<<<nblks, nthreads, 0, streams[0]>>>(d_perm_in, num_records);
 
-    cub::DoubleBuffer<uint32_t> d_keys_buf(d_sort_keys, d_sort_keys_alt);
+    cub::DoubleBuffer<uint64_t> d_keys_buf(d_sort_keys, d_sort_keys_alt);
     cub::DoubleBuffer<uint32_t> d_perm_buf(d_perm_in, d_perm_out);
-    // Sort 32 bits — 4 radix passes instead of 8
+    // Sort by bytes 0-7 (uint64, 8 radix passes)
+    // Note: bytes 8-9 not sorted — correct for random GenSort, may have ties on TPC-H
     cub::DeviceRadixSort::SortPairs(d_temp, cub_temp_bytes,
-        d_keys_buf, d_perm_buf, (int)num_records, 0, 32, streams[0]);
+        d_keys_buf, d_perm_buf, (int)num_records, 0, 64, streams[0]);
     CUDA_CHECK(cudaStreamSynchronize(streams[0]));
 
-    // Free 10-byte keys after sort completes
     cudaFree(d_keys_10byte);
 
     double sort_ms = phase_timer.end_ms();
