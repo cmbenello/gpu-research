@@ -883,23 +883,7 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
         r.pcie_h2d_gb = rg_h2d / 1e9;
         printf("  %d runs in %.0f ms (%.2f GB/s)\n\n", r.num_runs, rg_ms, total_bytes/(rg_ms*1e6));
 
-        // Verify each run is sorted
-        printf("  Checking runs...\n");
-        for (int ri = 0; ri < (int)runs.size(); ri++) {
-            const uint8_t* run_data = h_data + runs[ri].host_offset;
-            uint64_t rn = runs[ri].num_records;
-            int viol = 0;
-            for (uint64_t j = 1; j < rn && viol < 3; j++) {
-                if (key_compare(run_data + (j-1)*RECORD_SIZE, run_data + j*RECORD_SIZE, KEY_SIZE) > 0) {
-                    if (viol == 0) printf("  Run %d: VIOLATION at local idx %lu\n", ri, j);
-                    viol++;
-                }
-            }
-            if (viol == 0) printf("  Run %d: OK (%lu records)\n", ri, rn);
-            else printf("  Run %d: %d violations\n", ri, viol);
-        }
-
-        // Merge phase: CPU K-way merge of sorted runs (keys too large for GPU merge)
+        // Merge phase: CPU merge of sorted runs (keys too large for GPU merge)
         sort_ws.free();
         for (int i = 0; i < NBUFS; i++) { if (d_buf[i]) { cudaFree(d_buf[i]); d_buf[i] = nullptr; } }
         if (d_key_buffer) { cudaFree(d_key_buffer); d_key_buffer = nullptr; }
@@ -963,39 +947,45 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
                     new_runs[npairs] = {out_off, rl.num_records};
                 }
 
-                // For each pair: split into T blocks via merge-path, each thread merges a block
+                // Launch ALL threads across ALL pairs concurrently.
+                // Distribute T threads proportionally to pair size.
                 int T = hw_threads;
-                // Distribute threads across pairs: more threads for larger pairs
-                // For simplicity: all threads work on each pair sequentially,
-                // but within each pair, all T threads participate.
                 std::vector<std::thread> threads;
+                uint64_t total_all = 0;
+                for (int p = 0; p < npairs; p++)
+                    total_all += cur_runs[2*p].num_records + cur_runs[2*p+1].num_records;
+
+                // Compute threads per pair (proportional to size, min 1)
+                std::vector<int> thr_per_pair(npairs);
+                int assigned = 0;
+                for (int p = 0; p < npairs; p++) {
+                    uint64_t pair_n = cur_runs[2*p].num_records + cur_runs[2*p+1].num_records;
+                    thr_per_pair[p] = std::max(1, (int)((uint64_t)T * pair_n / total_all));
+                    assigned += thr_per_pair[p];
+                }
+                // Distribute remainder to largest pairs
+                while (assigned < T) { thr_per_pair[0]++; assigned++; }
+                while (assigned > T && thr_per_pair[0] > 1) { thr_per_pair[0]--; assigned--; }
 
                 for (int p = 0; p < npairs; p++) {
-                    auto& ra = cur_runs[2*p];
-                    auto& rb = cur_runs[2*p+1];
-                    const uint8_t* pa = h_src + ra.host_offset;
-                    const uint8_t* pb = h_src + rb.host_offset;
+                    uint64_t na = cur_runs[2*p].num_records;
+                    uint64_t nb = cur_runs[2*p+1].num_records;
+                    const uint8_t* pa = h_src + cur_runs[2*p].host_offset;
+                    const uint8_t* pb = h_src + cur_runs[2*p+1].host_offset;
                     uint8_t* po = h_dst + new_runs[p].host_offset;
-                    uint64_t total_n = ra.num_records + rb.num_records;
+                    int thr_p = thr_per_pair[p];
 
-                    // Use T threads for this pair
-                    int thr_for_pair = std::min((int)T, (int)((total_n + 999) / 1000));
-                    threads.clear();
-
-                    for (int t = 0; t < thr_for_pair; t++) {
-                        threads.emplace_back([&, pa, pb, po, t, thr_for_pair]() {
-                            uint64_t na = ra.num_records, nb = rb.num_records;
+                    for (int t = 0; t < thr_p; t++) {
+                        threads.emplace_back([=, &merge_path]() {
                             uint64_t total = na + nb;
-                            uint64_t blk_start = (uint64_t)t * total / thr_for_pair;
-                            uint64_t blk_end = (uint64_t)(t+1) * total / thr_for_pair;
+                            uint64_t blk_start = (uint64_t)t * total / thr_p;
+                            uint64_t blk_end = (uint64_t)(t+1) * total / thr_p;
 
-                            // Find merge-path split for blk_start and blk_end
                             uint64_t a_start = merge_path(pa, na, pb, nb, blk_start);
                             uint64_t b_start = blk_start - a_start;
                             uint64_t a_end = merge_path(pa, na, pb, nb, blk_end);
                             uint64_t b_end = blk_end - a_end;
 
-                            // Merge A[a_start..a_end) with B[b_start..b_end) into output
                             uint64_t ai = a_start, bi = b_start;
                             uint8_t* out = po + blk_start * RECORD_SIZE;
                             while (ai < a_end && bi < b_end) {
@@ -1010,7 +1000,8 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
                             while (bi < b_end) { memcpy(out, pb+bi*RECORD_SIZE, RECORD_SIZE); bi++; out+=RECORD_SIZE; }
                         });
                     }
-                    for (auto& t : threads) t.join();
+                }
+                for (auto& t : threads) t.join();
                 }
 
                 // Copy leftover run
