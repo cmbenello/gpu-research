@@ -1101,56 +1101,17 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
         cudaFree(d_sort_keys); cudaFree(d_sort_keys_alt); cudaFree(d_cub_temp);
         d_perm_in = d_perm_out = nullptr;
 
-        // Step 4: CPU fixup — sort within groups of equal 8-byte prefixes
-        phase_timer.begin();
-        printf("  CPU fixup: sorting within groups of equal 8B prefixes...\n");
-
-        // Find group boundaries (sorted uint64 prefixes)
-        uint64_t* sorted_u64 = (uint64_t*)h_sorted_prefixes;
-        std::vector<std::pair<uint64_t, uint64_t>> groups; // (start, count)
-        uint64_t grp_start = 0;
-        for (uint64_t i = 1; i <= num_records; i++) {
-            if (i == num_records || sorted_u64[i] != sorted_u64[grp_start]) {
-                groups.push_back({grp_start, i - grp_start});
-                grp_start = i;
-            }
-        }
-        printf("    %lu groups (avg %.0f records/group)\n",
-               groups.size(), (double)num_records / groups.size());
-
-        // Multi-threaded: sort within each group using full key comparison
+        // Step 4: CPU GATHER first (prefix-sorted order), THEN fixup on contiguous data
+        // Gathering first puts each group's records contiguously in h_output,
+        // so the fixup sort within each group has excellent L3 cache locality
+        // (18.8MB per group fits in ~25MB L3).
         int hw_threads = std::max(1, (int)std::thread::hardware_concurrency());
-        // Distribute groups across threads (batch adjacent groups per thread)
-        uint64_t groups_per_thread = (groups.size() + hw_threads - 1) / hw_threads;
-        std::vector<std::thread> threads;
-        for (int t = 0; t < hw_threads; t++) {
-            threads.emplace_back([&, t]() {
-                uint64_t gs = t * groups_per_thread;
-                uint64_t ge = std::min(gs + groups_per_thread, (uint64_t)groups.size());
-                for (uint64_t g = gs; g < ge; g++) {
-                    auto [start, count] = groups[g];
-                    if (count <= 1) continue;
-                    // Sort h_perm[start..start+count) by full key
-                    std::sort(h_perm + start, h_perm + start + count,
-                        [&](uint32_t a, uint32_t b) {
-                            return key_compare(h_data + (uint64_t)a * RECORD_SIZE,
-                                               h_data + (uint64_t)b * RECORD_SIZE,
-                                               KEY_SIZE) < 0;
-                        });
-                }
-            });
-        }
-        for (auto& t : threads) t.join();
-        double fixup_ms = phase_timer.end_ms();
-        printf("    Fixup: %.0f ms (%d threads)\n", fixup_ms, hw_threads);
-        free(h_sorted_prefixes);
 
-        // Step 5: CPU gather using fixed permutation
         phase_timer.begin();
-        printf("  CPU gather...\n");
+        printf("  CPU gather (prefix-sorted order)...\n");
         int PREFETCH_AHEAD = 256;
         uint64_t chunk_size = (num_records + hw_threads - 1) / hw_threads;
-        threads.clear();
+        std::vector<std::thread> threads;
         for (int t = 0; t < hw_threads; t++) {
             threads.emplace_back([&, t]() {
                 uint64_t lo = t * chunk_size;
@@ -1167,6 +1128,73 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
         double gather_ms = phase_timer.end_ms();
         printf("  Gathered %.2f GB in %.0f ms (%.2f GB/s)\n",
                total_bytes/1e9, gather_ms, total_bytes/(gather_ms*1e6));
+
+        // Step 5: CPU fixup — sort within contiguous groups in h_output
+        phase_timer.begin();
+        printf("  CPU fixup: sorting within groups of equal 8B prefixes...\n");
+
+        // Find group boundaries using sorted uint64 prefixes
+        uint64_t* sorted_u64 = (uint64_t*)h_sorted_prefixes;
+        std::vector<std::pair<uint64_t, uint64_t>> groups;
+        uint64_t grp_start = 0;
+        for (uint64_t i = 1; i <= num_records; i++) {
+            if (i == num_records || sorted_u64[i] != sorted_u64[grp_start]) {
+                groups.push_back({grp_start, i - grp_start});
+                grp_start = i;
+            }
+        }
+        printf("    %lu groups (avg %.0f records/group)\n",
+               groups.size(), (double)num_records / groups.size());
+
+        // Sort each group IN PLACE in h_output using full-key comparison
+        // Groups are contiguous (~18.8MB each) → excellent L3 cache behavior
+        uint64_t groups_per_thread = (groups.size() + hw_threads - 1) / hw_threads;
+        threads.clear();
+        for (int t = 0; t < hw_threads; t++) {
+            threads.emplace_back([&, t]() {
+                uint64_t gs = t * groups_per_thread;
+                uint64_t ge = std::min(gs + groups_per_thread, (uint64_t)groups.size());
+                // Temp buffer for std::sort swap operations
+                std::vector<uint8_t> tmp(RECORD_SIZE);
+                for (uint64_t g = gs; g < ge; g++) {
+                    auto [start, count] = groups[g];
+                    if (count <= 1) continue;
+                    // Sort records in h_output[start..start+count) by full key
+                    // Use pointer-based sort for contiguous records
+                    uint8_t* base = h_output + start * RECORD_SIZE;
+                    // Build index array for this group
+                    std::vector<uint32_t> idx(count);
+                    for (uint64_t j = 0; j < count; j++) idx[j] = j;
+                    std::sort(idx.begin(), idx.end(),
+                        [base](uint32_t a, uint32_t b) {
+                            return key_compare(base + (uint64_t)a * RECORD_SIZE,
+                                               base + (uint64_t)b * RECORD_SIZE,
+                                               KEY_SIZE) < 0;
+                        });
+                    // Apply permutation in-place using cycle decomposition
+                    std::vector<bool> done(count, false);
+                    for (uint64_t j = 0; j < count; j++) {
+                        if (done[j] || idx[j] == j) { done[j] = true; continue; }
+                        memcpy(tmp.data(), base + j * RECORD_SIZE, RECORD_SIZE);
+                        uint64_t k = j;
+                        while (!done[k]) {
+                            done[k] = true;
+                            uint64_t next = idx[k];
+                            if (next == j) {
+                                memcpy(base + k * RECORD_SIZE, tmp.data(), RECORD_SIZE);
+                            } else {
+                                memcpy(base + k * RECORD_SIZE, base + next * RECORD_SIZE, RECORD_SIZE);
+                            }
+                            k = next;
+                        }
+                    }
+                }
+            });
+        }
+        for (auto& t : threads) t.join();
+        double fixup_ms = phase_timer.end_ms();
+        printf("    Fixup: %.0f ms (%d threads)\n", fixup_ms, hw_threads);
+        free(h_sorted_prefixes);
 
         r.run_gen_ms = upload_ms + sort_ms + dl_ms;
         r.merge_ms = fixup_ms + gather_ms;
