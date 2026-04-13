@@ -1003,6 +1003,11 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
     size_t free_mem_now, dummy2;
     CUDA_CHECK(cudaMemGetInfo(&free_mem_now, &dummy2));
     size_t est_arena = num_records * (2*sizeof(uint64_t) + 2*sizeof(uint32_t)) + 512*1024*1024;
+    // PREFIX SORT experiment: disabled — fixup step (6-12s) makes it slower
+    // than run-gen approach. The CPU fixup has to touch all data again,
+    // negating the PCIe savings. Run-gen + K-way merge remains faster.
+    // Keeping code for reference.
+#if 0
     // For large keys: try PREFIX SORT (16B GPU sort + CPU fixup for ties).
     // Upload first 16 bytes via strided DMA, GPU sorts by 16B prefix (2 LSD passes),
     // CPU gathers into prefix-sorted order, then sorts within small contiguous groups.
@@ -1209,6 +1214,7 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
         r.sorted_output_is_mmap = h_output_is_mmap;
         return r;
     }
+#endif // PREFIX SORT disabled
 
     if (total_keys_bytes + est_arena > free_mem_now * 0.9) {
         printf("  Keys too large for GPU (%.1f GB keys > %.1f GB available)\n",
