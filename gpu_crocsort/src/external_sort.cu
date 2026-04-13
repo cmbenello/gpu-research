@@ -723,9 +723,11 @@ ExternalGpuSort::generate_runs_pipelined(
         CUDA_CHECK(cudaStreamWaitEvent(streams[1], events[0], 0));
 
         // Sort (GPU-side wait for H2D via event — no CPU blocking)
+        // In OVC mode, sort_chunk_on_gpu will also extract OVCs + prefixes + global perm
+        ovc_chunk_start = offset;  // record offset for global perm computation
         sort_chunk_on_gpu(d_buf[cur], d_buf[scratch], cur_n, streams[1]);
 
-        // Extract keys to persistent GPU key buffer
+        // Extract keys to persistent GPU key buffer (for small-key single-pass path)
         uint64_t key_off = run_key_offsets.empty() ? 0 :
             run_key_offsets.back() + (runs.empty() ? 0 : runs.back().num_records * KEY_SIZE);
         if (d_key_buffer && (key_off + cur_n * KEY_SIZE) <= key_buffer_capacity) {
@@ -736,17 +738,22 @@ ExternalGpuSort::generate_runs_pipelined(
             run_key_offsets.push_back(key_off);
         }
 
-        // Make D2H stream wait for sort+key extraction on stream[1] to finish
+        // Make D2H stream wait for sort+OVC extraction on stream[1] to finish
         CUDA_CHECK(cudaEventRecord(events[1], streams[1]));
         CUDA_CHECK(cudaStreamWaitEvent(streams[2], events[1], 0));
 
-        // Download directly to h_data (async, overlaps with next chunk's H2D+sort)
-        CUDA_CHECK(cudaMemcpyAsync(h_data + offset * RECORD_SIZE, d_buf[cur], cur_bytes,
-                                    cudaMemcpyDeviceToHost, streams[2]));
-        d2h += cur_bytes;
-
-        // Record D2H completion for this buffer
-        CUDA_CHECK(cudaEventRecord(d2h_done[cur], streams[2]));
+        if (d_ovc_buffer) {
+            // OVC mode: skip D2H of sorted records — OVCs are already on GPU.
+            // Just record the event so the next H2D can proceed.
+            CUDA_CHECK(cudaEventRecord(d2h_done[cur], streams[1]));
+            // No d2h traffic for sorted records
+        } else {
+            // Standard mode: download sorted records to h_data
+            CUDA_CHECK(cudaMemcpyAsync(h_data + offset * RECORD_SIZE, d_buf[cur], cur_bytes,
+                                        cudaMemcpyDeviceToHost, streams[2]));
+            d2h += cur_bytes;
+            CUDA_CHECK(cudaEventRecord(d2h_done[cur], streams[2]));
+        }
 
         runs.push_back({offset * RECORD_SIZE, cur_n});
         printf("\r  Run %d/%d: %.1f MB sorted    ", c+1, total_chunks,
@@ -1330,13 +1337,26 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
     }
 #endif // PREFIX SORT disabled
 
-    if (total_keys_bytes + est_arena > free_mem_now * 0.9) {
-        printf("  Keys too large for GPU (%.1f GB keys > %.1f GB available)\n",
-               total_keys_bytes/1e9, free_mem_now/1e9);
-        printf("  Using run-gen pipeline with per-chunk LSD sort for %d-byte keys\n", KEY_SIZE);
+    // Check: OVC buffers fit in GPU? Need: 4B OVC + 8B prefix + 4B perm = 16B per record
+    size_t ovc_total = num_records * (sizeof(uint32_t) + sizeof(uint64_t) + sizeof(uint32_t));
+    bool use_ovc = (total_keys_bytes + est_arena > free_mem_now * 0.9) &&
+                   (ovc_total + 2*buf_bytes + 512*1024*1024 < free_mem_now * 0.95);
 
-        // Fall back to run-gen + merge pipeline
+    if (use_ovc) {
+        printf("  Keys too large for single-pass (%.1f GB > %.1f GB)\n",
+               total_keys_bytes/1e9, free_mem_now*0.9/1e9);
+        printf("  Using OVC ARCHITECTURE: run-gen + GPU OVC merge + CPU gather\n");
+        printf("  OVC buffers: %.1f GB (4B OVC + 8B prefix + 4B perm per record)\n", ovc_total/1e9);
+
+        // Allocate OVC merge buffers (persistent across run gen)
+        CUDA_CHECK(cudaMalloc(&d_ovc_buffer, num_records * sizeof(uint32_t)));
+        CUDA_CHECK(cudaMalloc(&d_prefix_buffer, num_records * sizeof(uint64_t)));
+        CUDA_CHECK(cudaMalloc(&d_global_perm, num_records * sizeof(uint32_t)));
+        ovc_buffer_records = num_records;
+        ovc_run_offset = 0;
+
         // Re-allocate sort buffers (were freed above)
+        // Need 2 buffers for triple-buffer pipeline (buf[0], buf[1] = data, buf[2] = scratch)
         for (int i = 0; i < NBUFS; i++) {
             CUDA_CHECK(cudaMalloc(&d_buf[i], buf_bytes));
         }
@@ -1352,153 +1372,171 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
         r.pcie_h2d_gb = rg_h2d / 1e9;
         printf("  %d runs in %.0f ms (%.2f GB/s)\n\n", r.num_runs, rg_ms, total_bytes/(rg_ms*1e6));
 
-        // Merge phase: CPU merge of sorted runs (keys too large for GPU merge)
+        // Phase 2: GPU OVC Merge — iterative 2-way merge on OVCs
+        // OVCs (4B) + prefixes (8B) + perm (4B) = 16B per record, all on GPU.
         sort_ws.free();
         for (int i = 0; i < NBUFS; i++) { if (d_buf[i]) { cudaFree(d_buf[i]); d_buf[i] = nullptr; } }
         if (d_key_buffer) { cudaFree(d_key_buffer); d_key_buffer = nullptr; }
 
-        printf("== Phase 2: CPU Multi-Threaded K-Way Merge ==\n");
+        printf("== Phase 2: GPU OVC Merge ==\n");
         WallTimer merge_timer; merge_timer.begin();
 
-        // Single-pass K-way merge with sample-based partitioning.
-        // 1. Pick T-1 splitter keys that divide output into T equal blocks
-        // 2. Binary search each run for each splitter → thread boundaries
-        // 3. Each thread runs independent K-way heap merge on its block
-        // Result: 1 pass = 72GB traffic vs cascade's 3 passes = 216GB
-        int K = (int)runs.size();
-        if (K <= 1) {
-            if (K == 1 && h_data != h_output) {
-                memcpy(h_output, h_data, total_bytes);
-            }
-            r.merge_ms = 0;
-        } else {
-            int T = std::max(1, (int)std::thread::hardware_concurrency());
+        // Allocate double buffers for iterative merge
+        uint32_t* d_ovc_out;
+        uint64_t* d_pfx_out;
+        uint32_t* d_perm_out2;
+        CUDA_CHECK(cudaMalloc(&d_ovc_out, num_records * sizeof(uint32_t)));
+        CUDA_CHECK(cudaMalloc(&d_pfx_out, num_records * sizeof(uint64_t)));
+        CUDA_CHECK(cudaMalloc(&d_perm_out2, num_records * sizeof(uint32_t)));
 
-            // Step 1: Sample splitter keys
-            // Take (T-1) evenly-spaced samples from all runs
-            int nsamples_per_run = std::max(1, (T * 10) / K);
-            std::vector<std::vector<uint8_t>> all_samples;
-            for (int ri = 0; ri < K; ri++) {
-                const uint8_t* run_data = h_data + runs[ri].host_offset;
-                uint64_t rn = runs[ri].num_records;
-                for (int s = 0; s < nsamples_per_run && rn > 0; s++) {
-                    uint64_t idx = (uint64_t)s * rn / nsamples_per_run;
-                    std::vector<uint8_t> key(run_data + idx * RECORD_SIZE,
-                                              run_data + idx * RECORD_SIZE + KEY_SIZE);
-                    all_samples.push_back(key);
-                }
-            }
-            // Sort samples
-            std::sort(all_samples.begin(), all_samples.end(),
-                [](const std::vector<uint8_t>& a, const std::vector<uint8_t>& b) {
-                    return key_compare(a.data(), b.data(), KEY_SIZE) < 0;
-                });
-
-            // Pick T-1 evenly-spaced splitters from sorted samples
-            std::vector<std::vector<uint8_t>> splitters(T - 1);
-            for (int t = 0; t < T - 1; t++) {
-                int idx = (t + 1) * (int)all_samples.size() / T;
-                idx = std::min(idx, (int)all_samples.size() - 1);
-                splitters[t] = all_samples[idx];
-            }
-
-            // Step 2: For each splitter, binary search in each run
-            // partitions[t][ri] = number of records from run ri that go to blocks 0..t-1
-            std::vector<std::vector<uint64_t>> partitions(T, std::vector<uint64_t>(K));
-            for (int ri = 0; ri < K; ri++) {
-                const uint8_t* run_data = h_data + runs[ri].host_offset;
-                uint64_t rn = runs[ri].num_records;
-                partitions[0][ri] = 0;  // First block starts at 0
-                for (int t = 0; t < T - 1; t++) {
-                    // upper_bound: find first record > splitter
-                    uint64_t lo = (t == 0) ? 0 : partitions[t][ri];
-                    uint64_t hi = rn;
-                    while (lo < hi) {
-                        uint64_t mid = lo + (hi - lo) / 2;
-                        if (key_compare(run_data + mid * RECORD_SIZE,
-                                        splitters[t].data(), KEY_SIZE) <= 0)
-                            lo = mid + 1;
-                        else
-                            hi = mid;
-                    }
-                    partitions[t + 1][ri] = lo;
-                }
-            }
-
-            // Compute output offsets for each thread block
-            std::vector<uint64_t> block_out_off(T + 1);
-            block_out_off[0] = 0;
-            for (int t = 0; t < T; t++) {
-                uint64_t block_n = 0;
-                for (int ri = 0; ri < K; ri++) {
-                    uint64_t start = partitions[t][ri];
-                    uint64_t end = (t == T - 1) ? runs[ri].num_records : partitions[t + 1][ri];
-                    block_n += (end - start);
-                }
-                block_out_off[t + 1] = block_out_off[t] + block_n;
-            }
-
-            printf("  Partitioned %d runs into %d blocks (%.1f ms)\n",
-                   K, T, merge_timer.end_ms());
-
-            // Step 3: Each thread runs K-way merge on its block
-            std::vector<std::thread> threads;
-            for (int t = 0; t < T; t++) {
-                threads.emplace_back([&, t]() {
-                    struct HeapEntry {
-                        const uint8_t* rec;
-                        uint64_t remaining;
-                    };
-                    // Build heap for this block
-                    std::vector<HeapEntry> heap;
-                    for (int ri = 0; ri < K; ri++) {
-                        uint64_t start = partitions[t][ri];
-                        uint64_t end = (t == T - 1) ? runs[ri].num_records : partitions[t + 1][ri];
-                        if (end > start) {
-                            heap.push_back({h_data + runs[ri].host_offset + start * RECORD_SIZE,
-                                           end - start});
-                        }
-                    }
-                    int hs = (int)heap.size();
-                    if (hs == 0) return;
-
-                    auto sift_down = [](HeapEntry* h, int n, int i) {
-                        while (true) {
-                            int sm = i, l = 2*i+1, r = 2*i+2;
-                            if (l < n && key_compare(h[l].rec, h[sm].rec, KEY_SIZE) < 0) sm = l;
-                            if (r < n && key_compare(h[r].rec, h[sm].rec, KEY_SIZE) < 0) sm = r;
-                            if (sm == i) break;
-                            std::swap(h[i], h[sm]); i = sm;
-                        }
-                    };
-
-                    // Build min-heap
-                    for (int i = hs/2-1; i >= 0; i--) sift_down(heap.data(), hs, i);
-
-                    uint8_t* out = h_output + block_out_off[t] * RECORD_SIZE;
-                    while (hs > 0) {
-                        memcpy(out, heap[0].rec, RECORD_SIZE);
-                        out += RECORD_SIZE;
-                        heap[0].rec += RECORD_SIZE;
-                        heap[0].remaining--;
-                        if (heap[0].remaining == 0) {
-                            hs--;
-                            if (hs > 0) heap[0] = heap[hs];
-                        }
-                        sift_down(heap.data(), hs, 0);
-                    }
-                });
-            }
-            for (auto& t : threads) t.join();
-            r.merge_ms = merge_timer.end_ms();
-            r.merge_passes = 1;
+        // Build run descriptors from OVC offsets
+        int num_runs = (int)runs.size();
+        std::vector<uint64_t> run_offsets(num_runs);
+        uint64_t off = 0;
+        for (int i = 0; i < num_runs; i++) {
+            run_offsets[i] = off;
+            off += runs[i].num_records;
         }
 
-        printf("  Merged in %.0f ms\n", r.merge_ms);
+        // Iterative 2-way merge
+        uint32_t* ovc_in = d_ovc_buffer;
+        uint32_t* ovc_out = d_ovc_out;
+        uint64_t* pfx_in = d_prefix_buffer;
+        uint64_t* pfx_out = d_pfx_out;
+        uint32_t* pm_in = d_global_perm;
+        uint32_t* pm_out = d_perm_out2;
+
+        struct OvcMergePair {
+            uint64_t a_ovc_offset, a_prefix_offset, a_perm_offset;
+            int a_count;
+            uint64_t b_ovc_offset, b_prefix_offset, b_perm_offset;
+            int b_count;
+            uint64_t out_ovc_offset, out_prefix_offset, out_perm_offset;
+            int first_block;
+        };
+
+        int pass = 0;
+        std::vector<std::pair<uint64_t, uint64_t>> cur_runs; // (offset, count)
+        for (int i = 0; i < num_runs; i++)
+            cur_runs.push_back({run_offsets[i], runs[i].num_records});
+
+        while (cur_runs.size() > 1) {
+            pass++;
+            int npairs = cur_runs.size() / 2;
+            bool leftover = (cur_runs.size() % 2 == 1);
+
+            std::vector<OvcMergePair> pairs(npairs);
+            std::vector<std::pair<uint64_t, uint64_t>> new_runs;
+            uint64_t out_off2 = 0;
+            int total_blocks = 0;
+            int items_per_block = MERGE_ITEMS_PER_THREAD_CFG * MERGE_BLOCK_THREADS_CFG;
+
+            for (int p = 0; p < npairs; p++) {
+                auto [a_off, a_n] = cur_runs[2*p];
+                auto [b_off, b_n] = cur_runs[2*p+1];
+                int pair_blocks = ((int)(a_n + b_n) + items_per_block - 1) / items_per_block;
+
+                pairs[p].a_ovc_offset = a_off;
+                pairs[p].a_prefix_offset = a_off;
+                pairs[p].a_perm_offset = a_off;
+                pairs[p].a_count = (int)a_n;
+                pairs[p].b_ovc_offset = b_off;
+                pairs[p].b_prefix_offset = b_off;
+                pairs[p].b_perm_offset = b_off;
+                pairs[p].b_count = (int)b_n;
+                pairs[p].out_ovc_offset = out_off2;
+                pairs[p].out_prefix_offset = out_off2;
+                pairs[p].out_perm_offset = out_off2;
+                pairs[p].first_block = total_blocks;
+                total_blocks += pair_blocks;
+
+                new_runs.push_back({out_off2, a_n + b_n});
+                out_off2 += a_n + b_n;
+            }
+            if (leftover) {
+                auto [lo, ln] = cur_runs.back();
+                // Copy leftover run to output
+                CUDA_CHECK(cudaMemcpy(ovc_out + out_off2, ovc_in + lo,
+                    ln * sizeof(uint32_t), cudaMemcpyDeviceToDevice));
+                CUDA_CHECK(cudaMemcpy(pfx_out + out_off2, pfx_in + lo,
+                    ln * sizeof(uint64_t), cudaMemcpyDeviceToDevice));
+                CUDA_CHECK(cudaMemcpy(pm_out + out_off2, pm_in + lo,
+                    ln * sizeof(uint32_t), cudaMemcpyDeviceToDevice));
+                new_runs.push_back({out_off2, ln});
+            }
+
+            // Upload pair descriptors and launch merge kernel
+            OvcMergePair* d_pairs;
+            CUDA_CHECK(cudaMalloc(&d_pairs, npairs * sizeof(OvcMergePair)));
+            CUDA_CHECK(cudaMemcpy(d_pairs, pairs.data(), npairs * sizeof(OvcMergePair),
+                                   cudaMemcpyHostToDevice));
+
+            // Launch OVC merge kernel
+            extern "C" void launch_merge_ovc(
+                const uint32_t*, uint32_t*, const uint64_t*, uint64_t*,
+                const uint32_t*, uint32_t*,
+                const void*, int, int, cudaStream_t);
+            launch_merge_ovc(ovc_in, ovc_out, pfx_in, pfx_out, pm_in, pm_out,
+                            d_pairs, npairs, total_blocks, 0);
+            CUDA_CHECK(cudaDeviceSynchronize());
+            cudaFree(d_pairs);
+
+            printf("  Merge pass %d: %d -> %d runs (%d blocks)\n",
+                   pass, (int)cur_runs.size(), (int)new_runs.size(), total_blocks);
+
+            std::swap(ovc_in, ovc_out);
+            std::swap(pfx_in, pfx_out);
+            std::swap(pm_in, pm_out);
+            cur_runs = new_runs;
+        }
+
+        double merge_ms = merge_timer.end_ms();
+        printf("  GPU OVC merge: %.0f ms (%d passes)\n", merge_ms, pass);
+
+        // Download final permutation
+        phase_timer.begin();
+        CUDA_CHECK(cudaMemcpy(h_perm, pm_in, total_perm_bytes, cudaMemcpyDeviceToHost));
+        double dl_ms = phase_timer.end_ms();
+        r.pcie_d2h_gb = total_perm_bytes / 1e9;
+        printf("  Downloaded perm in %.0f ms\n", dl_ms);
+
+        // Free GPU OVC buffers
+        cudaFree(d_ovc_buffer); d_ovc_buffer = nullptr;
+        cudaFree(d_prefix_buffer); d_prefix_buffer = nullptr;
+        cudaFree(d_global_perm); d_global_perm = nullptr;
+        cudaFree(d_ovc_out); cudaFree(d_pfx_out); cudaFree(d_perm_out2);
+
+        // CPU gather: apply permutation to original h_data
+        phase_timer.begin();
+        printf("== Phase 3: CPU Gather ==\n");
+        int hw_threads = std::max(1, (int)std::thread::hardware_concurrency());
+        int PREFETCH_AHEAD = 256;
+        uint64_t chunk_per_t = (num_records + hw_threads - 1) / hw_threads;
+        std::vector<std::thread> threads;
+        for (int t = 0; t < hw_threads; t++) {
+            threads.emplace_back([&, t]() {
+                uint64_t lo = t * chunk_per_t;
+                uint64_t hi = std::min(lo + chunk_per_t, num_records);
+                for (uint64_t i = lo; i < hi; i++) {
+                    if (i + PREFETCH_AHEAD < hi)
+                        __builtin_prefetch(h_data + (uint64_t)h_perm[i+PREFETCH_AHEAD] * RECORD_SIZE, 0);
+                    memcpy(h_output + i * RECORD_SIZE,
+                           h_data + (uint64_t)h_perm[i] * RECORD_SIZE, RECORD_SIZE);
+                }
+            });
+        }
+        for (auto& t : threads) t.join();
+        double gather_ms = phase_timer.end_ms();
+        printf("  Gathered %.2f GB in %.0f ms (%.2f GB/s)\n",
+               total_bytes/1e9, gather_ms, total_bytes/(gather_ms*1e6));
+
+        r.merge_ms = merge_ms + dl_ms + gather_ms;
+        r.merge_passes = pass;
         r.sorted_output = h_output;
         r.sorted_output_size = total_bytes;
         r.sorted_output_is_mmap = h_output_is_mmap;
         r.total_ms = r.run_gen_ms + r.merge_ms;
+        printf("  Merged in %.0f ms\n", r.merge_ms);
         return r;
     }
 
