@@ -441,6 +441,12 @@ ExternalGpuSort::generate_runs_pipelined(
     //   CPU staging of chunk N+1, then H2D of chunk N+1 on stream[0]
     //   overlaps with final D2H→host memcpy of chunk N
 
+    // Per-buffer D2H completion events: ensure H2D of buffer X doesn't start
+    // before the previous D2H of buffer X completes (they're on different streams).
+    cudaEvent_t d2h_done[2];
+    CUDA_CHECK(cudaEventCreate(&d2h_done[0]));
+    CUDA_CHECK(cudaEventCreate(&d2h_done[1]));
+
     for (int c = 0; c < total_chunks; c++) {
         uint64_t offset = (uint64_t)c * buf_records;
         uint64_t cur_n = std::min(buf_records, num_records - offset);
@@ -448,8 +454,12 @@ ExternalGpuSort::generate_runs_pipelined(
         int cur = c % 2;
         int scratch = 2;
 
-        // Start H2D upload on stream[0] — runs concurrently with previous D2H on stream[2]
-        // (bidirectional PCIe: H2D and D2H use separate DMA engines)
+        // Wait for previous D2H of this buffer to complete before overwriting
+        if (c >= 2) {
+            CUDA_CHECK(cudaStreamWaitEvent(streams[0], d2h_done[cur], 0));
+        }
+
+        // Start H2D upload on stream[0]
         CUDA_CHECK(cudaMemcpyAsync(d_buf[cur], h_data + offset * RECORD_SIZE, cur_bytes,
                                     cudaMemcpyHostToDevice, streams[0]));
         h2d += cur_bytes;
@@ -459,9 +469,6 @@ ExternalGpuSort::generate_runs_pipelined(
         CUDA_CHECK(cudaStreamWaitEvent(streams[1], events[0], 0));
 
         // Sort (GPU-side wait for H2D via event — no CPU blocking)
-        // Note: d_buf[scratch]=d_buf[2] is safe because the previous sort already
-        // completed (synced on stream[1] in key extraction). The D2H on stream[2]
-        // reads d_buf[prev_cur], not d_buf[2].
         sort_chunk_on_gpu(d_buf[cur], d_buf[scratch], cur_n, streams[1]);
 
         // Extract keys to persistent GPU key buffer
@@ -472,8 +479,6 @@ ExternalGpuSort::generate_runs_pipelined(
             int nblocks_k = (cur_n + nthreads - 1) / nthreads;
             extract_keys_kernel<<<nblocks_k, nthreads, 0, streams[1]>>>(
                 d_buf[cur], d_key_buffer + key_off, cur_n);
-            // No sync needed — next sort uses d_buf[nxt], not d_buf[cur]
-            // Key extraction on stream[1] auto-orders before next sort on stream[1]
             run_key_offsets.push_back(key_off);
         }
 
@@ -486,6 +491,9 @@ ExternalGpuSort::generate_runs_pipelined(
                                     cudaMemcpyDeviceToHost, streams[2]));
         d2h += cur_bytes;
 
+        // Record D2H completion for this buffer
+        CUDA_CHECK(cudaEventRecord(d2h_done[cur], streams[2]));
+
         runs.push_back({offset * RECORD_SIZE, cur_n});
         printf("\r  Run %d/%d: %.1f MB sorted    ", c+1, total_chunks,
                cur_bytes/(1024.0*1024.0));
@@ -494,6 +502,8 @@ ExternalGpuSort::generate_runs_pipelined(
 
     // Finalize: wait for last D2H to complete
     CUDA_CHECK(cudaStreamSynchronize(streams[2]));
+    CUDA_CHECK(cudaEventDestroy(d2h_done[0]));
+    CUDA_CHECK(cudaEventDestroy(d2h_done[1]));
     printf("\n");
     ms = timer.end_ms();
     return runs;
