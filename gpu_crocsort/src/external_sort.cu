@@ -1520,13 +1520,65 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
         printf("  Gathered %.2f GB in %.0f ms (%.2f GB/s)\n",
                total_bytes/1e9, gather_ms, total_bytes/(gather_ms*1e6));
 
-        r.merge_ms = merge_ms + dl_ms + gather_ms;
-        r.merge_passes = 2; // 2 CUB LSD passes (index + prefix)
+        // CPU fixup: records with equal 8B prefixes may be mis-ordered.
+        // The GPU sort orders them by global_index, but the correct order
+        // requires comparing bytes 8+ of the key. Fixup: scan h_output,
+        // find groups of equal 8B prefixes, sort within each group.
+        phase_timer.begin();
+        printf("== Phase 4: CPU Prefix Fixup ==\n");
+        {
+            int hw = std::max(1, (int)std::thread::hardware_concurrency());
+            // Find groups of equal 8B prefixes in the gathered output
+            std::vector<std::pair<uint64_t, uint64_t>> groups;
+            uint64_t gs = 0;
+            for (uint64_t i = 1; i <= num_records; i++) {
+                if (i == num_records ||
+                    memcmp(h_output + i * RECORD_SIZE, h_output + gs * RECORD_SIZE, 8) != 0) {
+                    if (i - gs > 1) groups.push_back({gs, i - gs});
+                    gs = i;
+                }
+            }
+            printf("  %lu groups with ties (avg %.0f records)\n",
+                   groups.size(),
+                   groups.empty() ? 0.0 : (double)num_records / groups.size());
+
+            // Multi-threaded sort within each group using full key
+            uint64_t gpt = (groups.size() + hw - 1) / hw;
+            std::vector<std::thread> fix_threads;
+            for (int t = 0; t < hw; t++) {
+                fix_threads.emplace_back([&, t]() {
+                    uint64_t g0 = t * gpt, g1 = std::min(g0 + gpt, (uint64_t)groups.size());
+                    uint8_t tmp[RECORD_SIZE];
+                    for (uint64_t g = g0; g < g1; g++) {
+                        auto [start, count] = groups[g];
+                        // Insertion sort — groups are small (avg ~few hundred)
+                        uint8_t* base = h_output + start * RECORD_SIZE;
+                        for (uint64_t j = 1; j < count; j++) {
+                            uint8_t* cur = base + j * RECORD_SIZE;
+                            if (key_compare(cur - RECORD_SIZE, cur, KEY_SIZE) <= 0) continue;
+                            memcpy(tmp, cur, RECORD_SIZE);
+                            uint64_t k = j;
+                            while (k > 0 && key_compare(base+(k-1)*RECORD_SIZE, tmp, KEY_SIZE) > 0) {
+                                memcpy(base+k*RECORD_SIZE, base+(k-1)*RECORD_SIZE, RECORD_SIZE);
+                                k--;
+                            }
+                            memcpy(base+k*RECORD_SIZE, tmp, RECORD_SIZE);
+                        }
+                    }
+                });
+            }
+            for (auto& t : fix_threads) t.join();
+        }
+        double fixup_ms = phase_timer.end_ms();
+        printf("  Fixup: %.0f ms\n", fixup_ms);
+
+        r.merge_ms = merge_ms + dl_ms + gather_ms + fixup_ms;
+        r.merge_passes = 2;
         r.sorted_output = h_output;
         r.sorted_output_size = total_bytes;
         r.sorted_output_is_mmap = h_output_is_mmap;
         r.total_ms = r.run_gen_ms + r.merge_ms;
-        printf("  Merged in %.0f ms\n", r.merge_ms);
+        printf("  Total merge+gather+fixup: %.0f ms\n", r.merge_ms);
         return r;
     }
 
