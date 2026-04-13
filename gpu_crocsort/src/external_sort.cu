@@ -906,14 +906,28 @@ static void gen_data(uint8_t* d, uint64_t n) {
 int main(int argc, char** argv) {
     double total_gb = 0.5;
     bool verify = true;
+    const char* input_file = nullptr;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i],"--total-gb") && i+1<argc) total_gb = atof(argv[++i]);
+        else if (!strcmp(argv[i],"--input") && i+1<argc) input_file = argv[++i];
         else if (!strcmp(argv[i],"--no-verify")) verify = false;
-        else { printf("Usage: %s [--total-gb N] [--no-verify]\n",argv[0]); return 0; }
+        else { printf("Usage: %s [--total-gb N] [--input FILE] [--no-verify]\n",argv[0]); return 0; }
     }
 
-    uint64_t num_records = (uint64_t)(total_gb * 1e9) / RECORD_SIZE;
-    uint64_t total_bytes = num_records * RECORD_SIZE;
+    // Determine data size from file or --total-gb
+    uint64_t num_records, total_bytes;
+    if (input_file) {
+        FILE* f = fopen(input_file, "rb");
+        if (!f) { fprintf(stderr, "Cannot open %s\n", input_file); return 1; }
+        fseek(f, 0, SEEK_END);
+        total_bytes = ftell(f);
+        fclose(f);
+        num_records = total_bytes / RECORD_SIZE;
+        total_bytes = num_records * RECORD_SIZE; // round down
+    } else {
+        num_records = (uint64_t)(total_gb * 1e9) / RECORD_SIZE;
+        total_bytes = num_records * RECORD_SIZE;
+    }
 
     printf("════════════════════════════════════════════════════\n");
     printf("  GPU External Merge Sort — Streaming Benchmark\n");
@@ -924,8 +938,9 @@ int main(int argc, char** argv) {
     printf("GPU: %s (%.1f GB HBM, %d SMs, %.0f GB/s BW)\n", props.name,
            props.totalGlobalMem/1e9, props.multiProcessorCount,
            2.0 * props.memoryClockRate * (props.memoryBusWidth/8) / 1e6);
-    printf("Data: %.2f GB (%lu records × %d bytes)\n\n",
-           total_bytes/1e9, num_records, RECORD_SIZE);
+    printf("Data: %.2f GB (%lu records × %d bytes)%s\n\n",
+           total_bytes/1e9, num_records, RECORD_SIZE,
+           input_file ? " (from file)" : " (random)");
 
     printf("Allocating %.2f GB pinned host memory...\n", total_bytes/1e9);
     uint8_t* h_data;
@@ -935,13 +950,22 @@ int main(int argc, char** argv) {
         h_data = (uint8_t*)malloc(total_bytes);
     }
     if (!h_data) { fprintf(stderr,"allocation failed\n"); return 1; }
-    // Request transparent huge pages for less TLB pressure during random gather
     madvise(h_data, total_bytes, MADV_HUGEPAGE);
 
-    printf("Generating random data...\n");
-    WallTimer gt; gt.begin();
-    gen_data(h_data, num_records);
-    printf("  Generated in %.0f ms\n\n", gt.end_ms());
+    if (input_file) {
+        printf("Loading from %s...\n", input_file);
+        WallTimer gt; gt.begin();
+        FILE* f = fopen(input_file, "rb");
+        size_t read = fread(h_data, 1, total_bytes, f);
+        fclose(f);
+        printf("  Loaded %.2f GB in %.0f ms (%.2f GB/s)\n\n",
+               read/1e9, gt.end_ms(), read/(gt.end_ms()*1e6));
+    } else {
+        printf("Generating random data...\n");
+        WallTimer gt; gt.begin();
+        gen_data(h_data, num_records);
+        printf("  Generated in %.0f ms\n\n", gt.end_ms());
+    }
 
     ExternalGpuSort sorter;
     auto result = sorter.sort(h_data, num_records);
