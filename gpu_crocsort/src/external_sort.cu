@@ -162,6 +162,27 @@ __global__ void gather_uint64_kernel(
     if (i < n) out[i] = src[perm[i]];
 }
 
+// Extract uint64 from a specific 8-byte chunk of the key, in permutation order.
+// Reads key[perm[i]][byte_offset : byte_offset + chunk_bytes] as big-endian uint64.
+__global__ void extract_uint64_chunk_kernel(
+    const uint8_t* __restrict__ key_buffer,
+    const uint32_t* __restrict__ perm,
+    uint64_t* __restrict__ sort_keys,
+    uint64_t num_records,
+    int byte_offset,
+    int chunk_bytes  // 1-8
+) {
+    uint64_t i = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= num_records) return;
+    uint32_t orig_idx = perm[i];
+    const uint8_t* k = key_buffer + (uint64_t)orig_idx * KEY_SIZE + byte_offset;
+    uint64_t v = 0;
+    for (int b = 0; b < chunk_bytes; b++) v = (v << 8) | k[b];
+    // Left-align: shift so MSB of chunk is in MSB of uint64
+    v <<= (8 - chunk_bytes) * 8;
+    sort_keys[i] = v;
+}
+
 // Extract uint64 sort key (bytes 0-7 big-endian) from KEY_SIZE-stride key buffer.
 __global__ void extract_uint64_from_keys_kernel(
     const uint8_t* __restrict__ key_buffer,
@@ -822,50 +843,52 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
 
     int nthreads = 256, nblks = (num_records + nthreads - 1) / nthreads;
 
-    // ── LSD Radix Sort: two passes for full 10-byte key correctness ──
-    // Pass 1: Sort by tiebreaker (bytes 8-9, uint16, 2 radix passes)
-    // Pass 2: Stable sort by primary (bytes 0-7, uint64, 8 radix passes)
-    // Result: correctly sorted by full 10-byte key (lexicographic)
+    // ── LSD Multi-Pass Radix Sort for full KEY_SIZE correctness ──
+    // Sort from least significant 8-byte chunk to most significant.
+    // For KEY_SIZE=10: 2 passes (bytes 8-9, then bytes 0-7)
+    // For KEY_SIZE=88: 11 passes (bytes 80-87, 72-79, ..., 0-7)
+    // CUB radix sort is stable, so LSD ordering is correct.
 
-    // Extract primary (uint64, bytes 0-7) and tiebreaker (uint16, bytes 8-9)
-    extract_uint64_from_keys_kernel<<<nblks, nthreads, 0, streams[0]>>>(
-        d_keys_10byte, d_sort_keys, num_records);
     init_identity_kernel<<<nblks, nthreads, 0, streams[0]>>>(d_perm_in, num_records);
 
-    // Reuse d_sort_keys_alt temporarily for uint16 tiebreakers
-    // (uint16 array fits in uint64 array: N*2 < N*8)
-    uint16_t* d_tie = reinterpret_cast<uint16_t*>(d_sort_keys_alt);
-    uint16_t* d_tie_alt = d_tie + num_records;  // second half of d_sort_keys_alt
+    int num_chunks = (KEY_SIZE + 7) / 8;  // ceil(KEY_SIZE / 8)
+    printf("  LSD sort: %d passes for %d-byte key\n", num_chunks, KEY_SIZE);
 
-    extract_tiebreaker_kernel<<<nblks, nthreads, 0, streams[0]>>>(
-        d_keys_10byte, d_perm_in, d_tie, num_records);
+    for (int chunk = num_chunks - 1; chunk >= 0; chunk--) {
+        int byte_offset = chunk * 8;
+        int chunk_bytes = std::min(8, KEY_SIZE - byte_offset);
 
-    // Pass 1: Sort by tiebreaker (stable, 2 radix passes)
-    {
-        cub::DoubleBuffer<uint16_t> tie_buf(d_tie, d_tie_alt);
-        cub::DoubleBuffer<uint32_t> perm_buf(d_perm_in, d_perm_out);
-        size_t tie_temp = cub_temp_bytes;
-        cub::DeviceRadixSort::SortPairs(d_temp, tie_temp,
-            tie_buf, perm_buf, (int)num_records, 0, 16, streams[0]);
-        // After this: perm_buf.Current() has tiebreaker-sorted permutation
-        d_perm_in = perm_buf.Current();
-        d_perm_out = perm_buf.Alternate();
+        // Extract uint64 from this chunk of the key (in permutation order)
+        // Use a kernel that reads key[perm[i]][byte_offset:byte_offset+8]
+        // For the FIRST pass (highest chunk idx), perm is identity → read directly
+        if (chunk == num_chunks - 1 && chunk_bytes <= 2) {
+            // Last chunk is ≤2 bytes — use uint16 sort (fewer radix passes)
+            uint16_t* d_tie = reinterpret_cast<uint16_t*>(d_sort_keys);
+            uint16_t* d_tie_alt = reinterpret_cast<uint16_t*>(d_sort_keys_alt);
+            extract_tiebreaker_kernel<<<nblks, nthreads, 0, streams[0]>>>(
+                d_keys_10byte, d_perm_in, d_tie, num_records);
+            cub::DoubleBuffer<uint16_t> tie_buf(d_tie, d_tie_alt);
+            cub::DoubleBuffer<uint32_t> perm_buf(d_perm_in, d_perm_out);
+            size_t t = cub_temp_bytes;
+            cub::DeviceRadixSort::SortPairs(d_temp, t,
+                tie_buf, perm_buf, (int)num_records, 0, 16, streams[0]);
+            d_perm_in = perm_buf.Current();
+            d_perm_out = perm_buf.Alternate();
+        } else {
+            // Extract uint64 for this chunk, in current permutation order
+            // Kernel: d_sort_keys[i] = big-endian uint64 from key[perm[i]][byte_offset:+8]
+            extract_uint64_chunk_kernel<<<nblks, nthreads, 0, streams[0]>>>(
+                d_keys_10byte, d_perm_in, d_sort_keys, num_records, byte_offset, chunk_bytes);
+
+            cub::DoubleBuffer<uint64_t> keys_buf(d_sort_keys, d_sort_keys_alt);
+            cub::DoubleBuffer<uint32_t> perm_buf(d_perm_in, d_perm_out);
+            cub::DeviceRadixSort::SortPairs(d_temp, cub_temp_bytes,
+                keys_buf, perm_buf, (int)num_records, 0, chunk_bytes * 8, streams[0]);
+            d_perm_in = perm_buf.Current();
+            d_perm_out = perm_buf.Alternate();
+        }
     }
-
-    // Gather primary keys in tiebreaker-sorted order for the second pass
-    // d_sort_keys has primary keys in ORIGINAL order. We need them in perm order.
-    gather_uint64_kernel<<<nblks, nthreads, 0, streams[0]>>>(
-        d_sort_keys, d_perm_in, d_sort_keys_alt, num_records);
-
-    // Pass 2: Sort by primary key (stable, 8 radix passes)
-    {
-        cub::DoubleBuffer<uint64_t> keys_buf(d_sort_keys_alt, d_sort_keys);
-        cub::DoubleBuffer<uint32_t> perm_buf(d_perm_in, d_perm_out);
-        cub::DeviceRadixSort::SortPairs(d_temp, cub_temp_bytes,
-            keys_buf, perm_buf, (int)num_records, 0, 64, streams[0]);
-        CUDA_CHECK(cudaStreamSynchronize(streams[0]));
-        d_perm_in = perm_buf.Current();
-    }
+    CUDA_CHECK(cudaStreamSynchronize(streams[0]));
 
     cudaFree(d_keys_10byte);
 
