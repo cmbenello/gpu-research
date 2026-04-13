@@ -1035,9 +1035,10 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
         int nthreads = 256;
         int nblks = (num_records + nthreads - 1) / nthreads;
 
-        // Extract big-endian uint64 from prefix keys
+        // Initialize identity permutation + extract big-endian uint64 from prefix keys
+        init_identity_kernel<<<nblks, nthreads>>>(d_perm_in, num_records);
         extract_uint64_from_keys_kernel<<<nblks, nthreads>>>(
-            d_prefix_keys, d_sort_keys, d_perm_in, num_records);
+            d_prefix_keys, d_sort_keys, num_records);
 
         cub::DoubleBuffer<uint64_t> keys_buf(d_sort_keys, d_sort_keys_alt);
         cub::DoubleBuffer<uint32_t> idx_buf(d_perm_in, d_perm_out);
