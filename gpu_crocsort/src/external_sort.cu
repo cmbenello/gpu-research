@@ -810,6 +810,9 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
     uint8_t* d_keys_10byte;
     uint8_t* h_keys = nullptr;
 
+    // Variables used by both paths (prefix sort + LSD sort)
+    uint32_t *d_perm_in = nullptr, *d_perm_out = nullptr;
+
     // Check if all keys fit in GPU memory (need keys + arena)
     size_t free_mem_now, dummy2;
     CUDA_CHECK(cudaMemGetInfo(&free_mem_now, &dummy2));
@@ -985,8 +988,8 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
 
     uint64_t* d_sort_keys = (uint64_t*)d_arena;
     uint64_t* d_sort_keys_alt = d_sort_keys + num_records;
-    uint32_t* d_perm_in = (uint32_t*)(d_sort_keys_alt + num_records);
-    uint32_t* d_perm_out = d_perm_in + num_records;
+    d_perm_in = (uint32_t*)(d_sort_keys_alt + num_records);
+    d_perm_out = d_perm_in + num_records;
     void* d_temp = (void*)(d_perm_out + num_records);
 
     double upload_ms = phase_timer.end_ms();
