@@ -317,6 +317,33 @@ __global__ void build_global_perm_kernel(
     global_perm[run_offset + i] = (uint32_t)(chunk_start + local_perm[i]);
 }
 
+// Combined OVC + prefix extraction via permutation (for OVC merge architecture)
+// For sorted position i: reads record[perm[i]], computes OVC vs record[perm[i-1]]
+__global__ void extract_ovc_and_prefix_kernel(
+    const uint8_t* __restrict__ records,
+    const uint32_t* __restrict__ perm,
+    uint32_t* __restrict__ ovcs,
+    uint64_t* __restrict__ prefixes,
+    uint64_t num_records
+) {
+    uint64_t i = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= num_records) return;
+    uint32_t idx = perm[i];
+    const uint8_t* k = records + (uint64_t)idx * RECORD_SIZE;
+    // Extract 8B big-endian prefix
+    uint64_t v = 0;
+    for (int b = 0; b < 8; b++) v = (v << 8) | k[b];
+    prefixes[i] = v;
+    // Compute OVC
+    if (i == 0) {
+        ovcs[i] = OVC_INITIAL;
+    } else {
+        uint32_t prev_idx = perm[i - 1];
+        const uint8_t* prev_k = records + (uint64_t)prev_idx * RECORD_SIZE;
+        ovcs[i] = ovc_compute_delta(prev_k, k, KEY_SIZE);
+    }
+}
+
 // Extract uint64 from records at RECORD_SIZE stride (for in-chunk LSD sort)
 __global__ void extract_uint64_from_records_kernel(
     const uint8_t* __restrict__ records,
@@ -612,32 +639,10 @@ void ExternalGpuSort::sort_chunk_on_gpu(uint8_t* d_in, uint8_t* d_scratch,
         // We need a kernel that reads records via permutation, not from sorted output
         // (because we're NOT reordering records in OVC mode)
 
-        // Extract 8B prefix for each record in sorted order
-        // prefix[i] = first 8 bytes of record[perm[i]]
-        {
-            uint32_t* pi = perm_in;
-            uint64_t* prefixes = d_prefix_buffer + ovc_run_offset;
-            uint32_t* ovcs = d_ovc_buffer + ovc_run_offset;
-            uint8_t* recs = d_in;
-            auto extract_and_ovc = [=] __device__ (uint64_t i) {
-                uint32_t idx = pi[i];
-                const uint8_t* k = recs + (uint64_t)idx * RECORD_SIZE;
-                // Extract 8B prefix
-                uint64_t v = 0;
-                for (int b = 0; b < 8; b++) v = (v << 8) | k[b];
-                prefixes[i] = v;
-                // Compute OVC
-                if (i == 0) {
-                    ovcs[i] = OVC_INITIAL;
-                } else {
-                    uint32_t prev_idx = pi[i - 1];
-                    const uint8_t* prev_k = recs + (uint64_t)prev_idx * RECORD_SIZE;
-                    ovcs[i] = ovc_compute_delta(prev_k, k, KEY_SIZE);
-                }
-            };
-            thrust::counting_iterator<uint64_t> count_idx(0);
-            thrust::for_each(thrust::device, count_idx, count_idx + n, extract_and_ovc);
-        }
+        // Extract OVCs and 8B prefixes from records via permutation
+        extract_ovc_and_prefix_kernel<<<nblks, nthreads, 0, s>>>(
+            d_in, perm_in, d_ovc_buffer + ovc_run_offset,
+            d_prefix_buffer + ovc_run_offset, n);
 
         // Build global perm: global_perm[run_offset + i] = chunk_start + perm[i]
         build_global_perm_kernel<<<nblks, nthreads, 0, s>>>(
