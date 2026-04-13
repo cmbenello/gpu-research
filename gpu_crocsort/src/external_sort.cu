@@ -221,7 +221,9 @@ public:
         double run_gen_ms, merge_ms, total_ms;
         int num_runs, merge_passes;
         double pcie_h2d_gb, pcie_d2h_gb;
-        uint8_t* sorted_output;  // pointer to sorted data (caller must free())
+        uint8_t* sorted_output;  // pointer to sorted data
+        uint64_t sorted_output_size;  // size in bytes (for munmap)
+        bool sorted_output_is_mmap;   // true = munmap, false = free
     };
 
     ExternalGpuSort();
@@ -719,8 +721,16 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
     uint32_t* h_perm = nullptr;
     cudaMallocHost(&h_perm, total_perm_bytes);
     // Pre-allocate gather output buffer
-    uint8_t* h_output = (uint8_t*)malloc(total_bytes);
+    // Use mmap + MAP_POPULATE for pre-faulted pages (avoids page faults during gather)
+    uint8_t* h_output = (uint8_t*)mmap(nullptr, total_bytes, PROT_READ|PROT_WRITE,
+                                        MAP_PRIVATE|MAP_ANONYMOUS|MAP_POPULATE, -1, 0);
+    if (h_output == MAP_FAILED) h_output = nullptr;
     if (h_output) madvise(h_output, total_bytes, MADV_HUGEPAGE);
+    bool h_output_is_mmap = (h_output != nullptr);
+    if (!h_output) {
+        h_output = (uint8_t*)malloc(total_bytes);
+        if (h_output) madvise(h_output, total_bytes, MADV_HUGEPAGE);
+    }
 
     WallTimer phase_timer;
 
@@ -844,6 +854,8 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
     r.merge_passes = 1;
     r.num_runs = 1;
     r.sorted_output = h_output;
+    r.sorted_output_size = total_bytes;
+    r.sorted_output_is_mmap = h_output_is_mmap;
     r.total_ms = r.run_gen_ms + r.merge_ms;
 
     printf("\n[ExternalSort] ═══════════════════════════════════════\n");
@@ -928,7 +940,10 @@ int main(int argc, char** argv) {
         printf(bad==0 ? "  PASS: %lu records sorted\n" : "  FAIL: %lu violations\n",
                bad==0 ? num_records : bad);
     }
-    if (result.sorted_output) free(result.sorted_output);
+    if (result.sorted_output) {
+        if (result.sorted_output_is_mmap) munmap(result.sorted_output, result.sorted_output_size);
+        else free(result.sorted_output);
+    }
 
     printf("\nCSV,%s,%.2f,%lu,%d,%d,%.2f,%.2f,%.2f,%.4f,%.2f,%.2f,%.2f,%.1f\n",
            props.name, total_bytes/1e9, num_records,
