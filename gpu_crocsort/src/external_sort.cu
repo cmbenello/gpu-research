@@ -396,75 +396,47 @@ ExternalGpuSort::~ExternalGpuSort() {
     sort_ws.free();
 }
 
-// Comparator for thrust::sort that compares indices by their record keys.
-// Used for large keys where thrust merge-sort (1 pass) beats LSD radix (11 passes).
-struct RecordKeyComparator {
-    const uint8_t* records;
-    __host__ __device__ bool operator()(uint32_t a, uint32_t b) const {
-        const uint8_t* ka = records + (uint64_t)a * RECORD_SIZE;
-        const uint8_t* kb = records + (uint64_t)b * RECORD_SIZE;
-        for (int i = 0; i < KEY_SIZE; i++) {
-            if (ka[i] != kb[i]) return ka[i] < kb[i];
-        }
-        return false; // equal
-    }
-};
-
-// Sort a chunk on GPU.
-// Strategy selection:
-//   KEY_SIZE ≤ 16:  LSD radix sort (1-2 CUB passes, fast)
-//   KEY_SIZE > 16:  Thrust merge sort with direct key comparison
-//     - LSD needs ceil(KEY_SIZE/8) CUB passes = 11 for 88B
-//     - Thrust does 1 merge sort pass with O(N log N) comparisons
-//     - Each comparison reads KEY_SIZE bytes but short-circuits on first diff
-//     - For TPC-H with high prefix redundancy, average comparison < 20 bytes
+// Sort a chunk on GPU using LSD radix sort on full KEY_SIZE-byte key + record reorder.
+// For KEY_SIZE ≤ 8: single CUB pass on uint64.
+// For KEY_SIZE > 8: ceil(KEY_SIZE/8) LSD passes, each sorting 8 bytes of key.
 void ExternalGpuSort::sort_chunk_on_gpu(uint8_t* d_in, uint8_t* d_scratch,
                                          uint64_t n, cudaStream_t s) {
     int nthreads = 256;
     int nblks = (n + nthreads - 1) / nthreads;
 
-    if (KEY_SIZE <= 16) {
-        // Small keys: LSD radix sort (optimal for ≤2 CUB passes)
-        init_identity_kernel<<<nblks, nthreads, 0, s>>>(sort_ws.d_indices, n);
-        int num_chunks = (KEY_SIZE + 7) / 8;
-        uint32_t* perm_in = sort_ws.d_indices;
-        uint32_t* perm_out = sort_ws.d_indices_alt;
+    // Initialize identity permutation
+    init_identity_kernel<<<nblks, nthreads, 0, s>>>(sort_ws.d_indices, n);
 
-        for (int chunk = num_chunks - 1; chunk >= 0; chunk--) {
-            int byte_offset = chunk * 8;
-            int chunk_bytes = std::min(8, KEY_SIZE - byte_offset);
-            extract_uint64_from_records_kernel<<<nblks, nthreads, 0, s>>>(
-                d_in, perm_in, sort_ws.d_keys, n, byte_offset, chunk_bytes);
-            cub::DoubleBuffer<uint64_t> keys_buf(sort_ws.d_keys, sort_ws.d_keys_alt);
-            cub::DoubleBuffer<uint32_t> idx_buf(perm_in, perm_out);
-            size_t temp_bytes = buf_bytes;
-            cub::DeviceRadixSort::SortPairs(d_scratch, temp_bytes,
-                keys_buf, idx_buf, (int)n, 0, chunk_bytes * 8, s);
-            perm_in = idx_buf.Current();
-            perm_out = idx_buf.Alternate();
-        }
+    // LSD multi-pass: sort from least-significant 8-byte chunk to most-significant
+    int num_chunks = (KEY_SIZE + 7) / 8;
+    uint32_t* perm_in = sort_ws.d_indices;
+    uint32_t* perm_out = sort_ws.d_indices_alt;
 
-        reorder_records_kernel<<<nblks, nthreads, 0, s>>>(
-            d_in, d_scratch, perm_in, n);
-    } else {
-        // Large keys: thrust merge sort with direct key comparison.
-        // Avoids 11 extraction+CUB passes. Thrust's merge sort does O(N log N)
-        // comparisons, each short-circuiting on the first differing byte.
-        // For TPC-H with high prefix redundancy, most comparisons resolve in <20 bytes.
-        init_identity_kernel<<<nblks, nthreads, 0, s>>>(sort_ws.d_indices, n);
-        CUDA_CHECK(cudaStreamSynchronize(s)); // thrust needs default stream sync
+    for (int chunk = num_chunks - 1; chunk >= 0; chunk--) {
+        int byte_offset = chunk * 8;
+        int chunk_bytes = std::min(8, KEY_SIZE - byte_offset);
 
-        thrust::device_ptr<uint32_t> d_ptr(sort_ws.d_indices);
-        RecordKeyComparator cmp{d_in};
-        thrust::sort(d_ptr, d_ptr + n, cmp);
+        // Extract 8 bytes from the key at byte_offset, using permutation order
+        extract_uint64_from_records_kernel<<<nblks, nthreads, 0, s>>>(
+            d_in, perm_in, sort_ws.d_keys, n, byte_offset, chunk_bytes);
 
-        reorder_records_kernel<<<nblks, nthreads, 0, s>>>(
-            d_in, d_scratch, sort_ws.d_indices, n);
+        cub::DoubleBuffer<uint64_t> keys_buf(sort_ws.d_keys, sort_ws.d_keys_alt);
+        cub::DoubleBuffer<uint32_t> idx_buf(perm_in, perm_out);
+        size_t temp_bytes = buf_bytes;
+        cub::DeviceRadixSort::SortPairs(d_scratch, temp_bytes,
+            keys_buf, idx_buf, (int)n, 0, chunk_bytes * 8, s);
+        perm_in = idx_buf.Current();
+        perm_out = idx_buf.Alternate();
     }
 
-    // Copy sorted result back to d_in
+    // Reorder full records using the final sorted permutation (d_in → d_scratch)
+    reorder_records_kernel<<<nblks, nthreads, 0, s>>>(
+        d_in, d_scratch, perm_in, n);
+
+    // Copy sorted result back to d_in (async — no CPU sync needed)
     CUDA_CHECK(cudaMemcpyAsync(d_in, d_scratch, n * RECORD_SIZE,
                                 cudaMemcpyDeviceToDevice, s));
+    // Don't sync here — let the caller manage dependencies via events
 }
 
 // gpu_merge_inplace removed — CUB radix sort replaced bitonic+K-way merge
