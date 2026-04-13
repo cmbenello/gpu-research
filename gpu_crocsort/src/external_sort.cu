@@ -1400,142 +1400,101 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
         r.pcie_h2d_gb = rg_h2d / 1e9;
         printf("  %d runs in %.0f ms (%.2f GB/s)\n\n", r.num_runs, rg_ms, total_bytes/(rg_ms*1e6));
 
-        // Phase 2: GPU OVC Merge — iterative 2-way merge on OVCs
-        // OVCs (4B) + prefixes (8B) + perm (4B) = 16B per record, all on GPU.
+        // Phase 2: GPU Prefix Merge — CUB radix sort on (8B prefix, global_index)
+        // The 8B prefix is an ABSOLUTE value (not relative like OVC), so CUB
+        // radix sort gives correct ordering. LSD: sort by global_index first
+        // (preserves run-internal order for ties), then by prefix.
+        // This replaces the broken OVC merge-path approach.
         sort_ws.free();
         for (int i = 0; i < NBUFS; i++) { if (d_buf[i]) { cudaFree(d_buf[i]); d_buf[i] = nullptr; } }
         if (d_key_buffer) { cudaFree(d_key_buffer); d_key_buffer = nullptr; }
 
-        printf("== Phase 2: GPU OVC Merge ==\n");
+        printf("== Phase 2: GPU Prefix Merge (CUB LSD on 8B prefix + index) ==\n");
         WallTimer merge_timer; merge_timer.begin();
 
-        // Allocate double buffers for iterative merge
-        uint32_t* d_ovc_out;
-        uint64_t* d_pfx_out;
-        uint32_t* d_perm_out2;
-        CUDA_CHECK(cudaMalloc(&d_ovc_out, num_records * sizeof(uint32_t)));
-        CUDA_CHECK(cudaMalloc(&d_pfx_out, num_records * sizeof(uint64_t)));
-        CUDA_CHECK(cudaMalloc(&d_perm_out2, num_records * sizeof(uint32_t)));
+        // We have d_prefix_buffer (uint64, 8B per record) and d_global_perm (uint32).
+        // LSD approach: 2 CUB passes
+        //   Pass 1: sort by d_global_perm (ensures stable ordering within runs)
+        //   Pass 2: sort by d_prefix_buffer (primary key)
+        // After pass 2: records with equal prefixes preserve run-internal order.
 
-        // Build run descriptors from OVC offsets
-        int num_runs = (int)runs.size();
-        std::vector<uint64_t> run_offsets(num_runs);
-        uint64_t off = 0;
-        for (int i = 0; i < num_runs; i++) {
-            run_offsets[i] = off;
-            off += runs[i].num_records;
+        // Allocate alt buffers for CUB double-buffering
+        uint64_t* d_pfx_alt;
+        uint32_t* d_perm_alt;
+        CUDA_CHECK(cudaMalloc(&d_pfx_alt, num_records * sizeof(uint64_t)));
+        CUDA_CHECK(cudaMalloc(&d_perm_alt, num_records * sizeof(uint32_t)));
+
+        // Free OVC buffer (not needed for prefix merge)
+        cudaFree(d_ovc_buffer); d_ovc_buffer = nullptr;
+
+        // CUB temp storage
+        size_t cub_temp_bytes = 0;
+        {
+            cub::DoubleBuffer<uint64_t> pfx_buf(d_prefix_buffer, d_pfx_alt);
+            cub::DoubleBuffer<uint32_t> pm_buf(d_global_perm, d_perm_alt);
+            cub::DeviceRadixSort::SortPairs(nullptr, cub_temp_bytes,
+                pm_buf, pfx_buf, (int)num_records, 0, 32);
         }
-
-        // Iterative 2-way merge
-        uint32_t* ovc_in = d_ovc_buffer;
-        uint32_t* ovc_out = d_ovc_out;
-        uint64_t* pfx_in = d_prefix_buffer;
-        uint64_t* pfx_out = d_pfx_out;
-        uint32_t* pm_in = d_global_perm;
-        uint32_t* pm_out = d_perm_out2;
-
-        // Must match OvcMergePair in merge.cu exactly
-        struct OvcMergePair {
-            uint64_t a_ovc_offset;
-            int      a_count;
-            uint64_t b_ovc_offset;
-            int      b_count;
-            uint64_t out_ovc_offset;
-            uint64_t out_perm_offset;
-            uint64_t a_perm_offset;
-            uint64_t b_perm_offset;
-            uint64_t a_prefix_offset;
-            uint64_t b_prefix_offset;
-            uint64_t out_prefix_offset;
-            int      first_block;
-        };
-
-        int pass = 0;
-        std::vector<std::pair<uint64_t, uint64_t>> cur_runs; // (offset, count)
-        for (int i = 0; i < num_runs; i++)
-            cur_runs.push_back({run_offsets[i], runs[i].num_records});
-
-        while (cur_runs.size() > 1) {
-            pass++;
-            int npairs = cur_runs.size() / 2;
-            bool leftover = (cur_runs.size() % 2 == 1);
-
-            std::vector<OvcMergePair> pairs(npairs);
-            std::vector<std::pair<uint64_t, uint64_t>> new_runs;
-            uint64_t out_off2 = 0;
-            int total_blocks = 0;
-            int items_per_block = MERGE_ITEMS_PER_THREAD_CFG * MERGE_BLOCK_THREADS_CFG;
-
-            for (int p = 0; p < npairs; p++) {
-                auto [a_off, a_n] = cur_runs[2*p];
-                auto [b_off, b_n] = cur_runs[2*p+1];
-                int pair_blocks = ((int)(a_n + b_n) + items_per_block - 1) / items_per_block;
-
-                pairs[p].a_ovc_offset = a_off;
-                pairs[p].a_prefix_offset = a_off;
-                pairs[p].a_perm_offset = a_off;
-                pairs[p].a_count = (int)a_n;
-                pairs[p].b_ovc_offset = b_off;
-                pairs[p].b_prefix_offset = b_off;
-                pairs[p].b_perm_offset = b_off;
-                pairs[p].b_count = (int)b_n;
-                pairs[p].out_ovc_offset = out_off2;
-                pairs[p].out_prefix_offset = out_off2;
-                pairs[p].out_perm_offset = out_off2;
-                pairs[p].first_block = total_blocks;
-                total_blocks += pair_blocks;
-
-                new_runs.push_back({out_off2, a_n + b_n});
-                out_off2 += a_n + b_n;
-            }
-            if (leftover) {
-                auto [lo, ln] = cur_runs.back();
-                // Copy leftover run to output
-                CUDA_CHECK(cudaMemcpy(ovc_out + out_off2, ovc_in + lo,
-                    ln * sizeof(uint32_t), cudaMemcpyDeviceToDevice));
-                CUDA_CHECK(cudaMemcpy(pfx_out + out_off2, pfx_in + lo,
-                    ln * sizeof(uint64_t), cudaMemcpyDeviceToDevice));
-                CUDA_CHECK(cudaMemcpy(pm_out + out_off2, pm_in + lo,
-                    ln * sizeof(uint32_t), cudaMemcpyDeviceToDevice));
-                new_runs.push_back({out_off2, ln});
-            }
-
-            // Upload pair descriptors and launch merge kernel
-            OvcMergePair* d_pairs;
-            CUDA_CHECK(cudaMalloc(&d_pairs, npairs * sizeof(OvcMergePair)));
-            CUDA_CHECK(cudaMemcpy(d_pairs, pairs.data(), npairs * sizeof(OvcMergePair),
-                                   cudaMemcpyHostToDevice));
-
-            // Launch OVC merge kernel
-            launch_merge_ovc(ovc_in, ovc_out, pfx_in, pfx_out, pm_in, pm_out,
-                            (const void*)d_pairs, npairs, total_blocks, 0);
-            CUDA_CHECK(cudaDeviceSynchronize());
-            cudaFree(d_pairs);
-
-            printf("  Merge pass %d: %d -> %d runs (%d blocks)\n",
-                   pass, (int)cur_runs.size(), (int)new_runs.size(), total_blocks);
-
-            std::swap(ovc_in, ovc_out);
-            std::swap(pfx_in, pfx_out);
-            std::swap(pm_in, pm_out);
-            cur_runs = new_runs;
+        // Also check prefix sort temp
+        size_t cub_temp_bytes2 = 0;
+        {
+            cub::DoubleBuffer<uint64_t> pfx_buf(d_prefix_buffer, d_pfx_alt);
+            cub::DoubleBuffer<uint32_t> pm_buf(d_global_perm, d_perm_alt);
+            cub::DeviceRadixSort::SortPairs(nullptr, cub_temp_bytes2,
+                pfx_buf, pm_buf, (int)num_records, 0, 64);
         }
+        size_t max_temp = std::max(cub_temp_bytes, cub_temp_bytes2);
+        void* d_cub_temp;
+        CUDA_CHECK(cudaMalloc(&d_cub_temp, max_temp));
 
-        double merge_ms = merge_timer.end_ms();
-        printf("  GPU OVC merge: %.0f ms (%d passes)\n", merge_ms, pass);
+        // Pass 1: Sort by global_perm (key=uint32 perm, value=uint64 prefix)
+        // This establishes correct ordering within runs for equal prefixes.
+        {
+            cub::DoubleBuffer<uint32_t> key_buf(d_global_perm, d_perm_alt);
+            cub::DoubleBuffer<uint64_t> val_buf(d_prefix_buffer, d_pfx_alt);
+            size_t temp = max_temp;
+            cub::DeviceRadixSort::SortPairs(d_cub_temp, temp,
+                key_buf, val_buf, (int)num_records, 0, 32);
+            // After: key_buf.Current() has sorted perm, val_buf.Current() has reordered prefixes
+            d_global_perm = key_buf.Current();
+            d_perm_alt = key_buf.Alternate();
+            d_prefix_buffer = val_buf.Current();
+            d_pfx_alt = val_buf.Alternate();
+        }
+        CUDA_CHECK(cudaDeviceSynchronize());
+        double pass1_ms = merge_timer.end_ms();
+        printf("  Pass 1 (sort by index): %.0f ms\n", pass1_ms);
+
+        merge_timer.begin();
+        // Pass 2: Sort by prefix (key=uint64 prefix, value=uint32 perm)
+        // CUB stable radix sort: equal prefixes maintain pass-1 order (by index).
+        {
+            cub::DoubleBuffer<uint64_t> key_buf(d_prefix_buffer, d_pfx_alt);
+            cub::DoubleBuffer<uint32_t> val_buf(d_global_perm, d_perm_alt);
+            size_t temp = max_temp;
+            cub::DeviceRadixSort::SortPairs(d_cub_temp, temp,
+                key_buf, val_buf, (int)num_records, 0, 64);
+            d_prefix_buffer = key_buf.Current();
+            d_global_perm = val_buf.Current();
+        }
+        CUDA_CHECK(cudaDeviceSynchronize());
+        double pass2_ms = merge_timer.end_ms();
+        printf("  Pass 2 (sort by prefix): %.0f ms\n", pass2_ms);
+
+        double merge_ms = pass1_ms + pass2_ms;
+        printf("  GPU prefix merge: %.0f ms (2 LSD passes)\n", merge_ms);
 
         // Download final permutation
         phase_timer.begin();
-        CUDA_CHECK(cudaMemcpy(h_perm, pm_in, total_perm_bytes, cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(h_perm, d_global_perm, total_perm_bytes, cudaMemcpyDeviceToHost));
         double dl_ms = phase_timer.end_ms();
         r.pcie_d2h_gb = total_perm_bytes / 1e9;
         printf("  Downloaded perm in %.0f ms\n", dl_ms);
 
-        // Free GPU OVC buffers
-        cudaFree(d_ovc_buffer); d_ovc_buffer = nullptr;
+        // Free GPU buffers
         cudaFree(d_prefix_buffer); d_prefix_buffer = nullptr;
         cudaFree(d_global_perm); d_global_perm = nullptr;
-        cudaFree(d_ovc_out); cudaFree(d_pfx_out); cudaFree(d_perm_out2);
+        cudaFree(d_pfx_alt); cudaFree(d_perm_alt); cudaFree(d_cub_temp);
 
         // CPU gather: apply permutation to original h_data
         phase_timer.begin();
