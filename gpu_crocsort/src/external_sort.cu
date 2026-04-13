@@ -888,14 +888,14 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
         for (int i = 0; i < NBUFS; i++) { if (d_buf[i]) { cudaFree(d_buf[i]); d_buf[i] = nullptr; } }
         if (d_key_buffer) { cudaFree(d_key_buffer); d_key_buffer = nullptr; }
 
-        printf("== Phase 2: CPU Parallel Cascade Merge ==\n");
+        printf("== Phase 2: CPU Multi-Threaded K-Way Merge ==\n");
         WallTimer merge_timer; merge_timer.begin();
 
-        // Multi-threaded cascade merge using merge-path partitioning.
-        // Each pair in a pass uses ALL threads via merge-path:
-        //   - Binary search finds the split point for each thread's block
-        //   - Each thread merges its portion independently
-        // This gives full parallelism even for the final 1-pair pass.
+        // Single-pass K-way merge with sample-based partitioning.
+        // 1. Pick T-1 splitter keys that divide output into T equal blocks
+        // 2. Binary search each run for each splitter → thread boundaries
+        // 3. Each thread runs independent K-way heap merge on its block
+        // Result: 1 pass = 72GB traffic vs cascade's 3 passes = 216GB
         int K = (int)runs.size();
         if (K <= 1) {
             if (K == 1 && h_data != h_output) {
@@ -903,124 +903,126 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
             }
             r.merge_ms = 0;
         } else {
-            // Merge-path: find (a, b) such that a+b=diag and A[a-1] <= B[b]
-            // Returns 'a' (number of records from A before this diagonal)
-            auto merge_path = [](const uint8_t* A, uint64_t na,
-                                 const uint8_t* B, uint64_t nb,
-                                 uint64_t diag) -> uint64_t {
-                uint64_t lo = (diag > nb) ? diag - nb : 0;
-                uint64_t hi = std::min(diag, na);
-                while (lo < hi) {
-                    uint64_t mid = lo + (hi - lo) / 2;
-                    uint64_t b_idx = diag - mid - 1;
-                    // Compare A[mid] with B[b_idx]
-                    if (key_compare(A + mid * RECORD_SIZE, B + b_idx * RECORD_SIZE, KEY_SIZE) > 0) {
-                        hi = mid;
-                    } else {
-                        lo = mid + 1;
-                    }
+            int T = std::max(1, (int)std::thread::hardware_concurrency());
+
+            // Step 1: Sample splitter keys
+            // Take (T-1) evenly-spaced samples from all runs
+            int nsamples_per_run = std::max(1, (T * 10) / K);
+            std::vector<std::vector<uint8_t>> all_samples;
+            for (int ri = 0; ri < K; ri++) {
+                const uint8_t* run_data = h_data + runs[ri].host_offset;
+                uint64_t rn = runs[ri].num_records;
+                for (int s = 0; s < nsamples_per_run && rn > 0; s++) {
+                    uint64_t idx = (uint64_t)s * rn / nsamples_per_run;
+                    std::vector<uint8_t> key(run_data + idx * RECORD_SIZE,
+                                              run_data + idx * RECORD_SIZE + KEY_SIZE);
+                    all_samples.push_back(key);
                 }
-                return lo;
-            };
-
-            uint8_t* h_src = h_data;
-            uint8_t* h_dst = h_output;
-            int pass = 0;
-            std::vector<RunInfo> cur_runs = runs;
-            int hw_threads = std::max(1, (int)std::thread::hardware_concurrency());
-
-            while (cur_runs.size() > 1) {
-                pass++;
-                int npairs = cur_runs.size() / 2;
-                bool leftover = (cur_runs.size() % 2 == 1);
-
-                // Pre-compute output offsets
-                std::vector<RunInfo> new_runs(npairs + (leftover ? 1 : 0));
-                uint64_t out_off = 0;
-                for (int p = 0; p < npairs; p++) {
-                    uint64_t pair_n = cur_runs[2*p].num_records + cur_runs[2*p+1].num_records;
-                    new_runs[p] = {out_off, pair_n};
-                    out_off += pair_n * RECORD_SIZE;
-                }
-                if (leftover) {
-                    auto& rl = cur_runs[cur_runs.size()-1];
-                    new_runs[npairs] = {out_off, rl.num_records};
-                }
-
-                // Launch ALL threads across ALL pairs concurrently.
-                // Distribute T threads proportionally to pair size.
-                int T = hw_threads;
-                std::vector<std::thread> threads;
-                uint64_t total_all = 0;
-                for (int p = 0; p < npairs; p++)
-                    total_all += cur_runs[2*p].num_records + cur_runs[2*p+1].num_records;
-
-                // Compute threads per pair (proportional to size, min 1)
-                std::vector<int> thr_per_pair(npairs);
-                int assigned = 0;
-                for (int p = 0; p < npairs; p++) {
-                    uint64_t pair_n = cur_runs[2*p].num_records + cur_runs[2*p+1].num_records;
-                    thr_per_pair[p] = std::max(1, (int)((uint64_t)T * pair_n / total_all));
-                    assigned += thr_per_pair[p];
-                }
-                // Distribute remainder to largest pairs
-                while (assigned < T) { thr_per_pair[0]++; assigned++; }
-                while (assigned > T && thr_per_pair[0] > 1) { thr_per_pair[0]--; assigned--; }
-
-                for (int p = 0; p < npairs; p++) {
-                    uint64_t na = cur_runs[2*p].num_records;
-                    uint64_t nb = cur_runs[2*p+1].num_records;
-                    const uint8_t* pa = h_src + cur_runs[2*p].host_offset;
-                    const uint8_t* pb = h_src + cur_runs[2*p+1].host_offset;
-                    uint8_t* po = h_dst + new_runs[p].host_offset;
-                    int thr_p = thr_per_pair[p];
-
-                    for (int t = 0; t < thr_p; t++) {
-                        threads.emplace_back([=, &merge_path]() {
-                            uint64_t total = na + nb;
-                            uint64_t blk_start = (uint64_t)t * total / thr_p;
-                            uint64_t blk_end = (uint64_t)(t+1) * total / thr_p;
-
-                            uint64_t a_start = merge_path(pa, na, pb, nb, blk_start);
-                            uint64_t b_start = blk_start - a_start;
-                            uint64_t a_end = merge_path(pa, na, pb, nb, blk_end);
-                            uint64_t b_end = blk_end - a_end;
-
-                            uint64_t ai = a_start, bi = b_start;
-                            uint8_t* out = po + blk_start * RECORD_SIZE;
-                            while (ai < a_end && bi < b_end) {
-                                if (key_compare(pa + ai*RECORD_SIZE, pb + bi*RECORD_SIZE, KEY_SIZE) <= 0) {
-                                    memcpy(out, pa + ai*RECORD_SIZE, RECORD_SIZE); ai++;
-                                } else {
-                                    memcpy(out, pb + bi*RECORD_SIZE, RECORD_SIZE); bi++;
-                                }
-                                out += RECORD_SIZE;
-                            }
-                            while (ai < a_end) { memcpy(out, pa+ai*RECORD_SIZE, RECORD_SIZE); ai++; out+=RECORD_SIZE; }
-                            while (bi < b_end) { memcpy(out, pb+bi*RECORD_SIZE, RECORD_SIZE); bi++; out+=RECORD_SIZE; }
-                        });
-                    }
-                }
-                for (auto& t : threads) t.join();
-
-                // Copy leftover run
-                if (leftover) {
-                    auto& rl = cur_runs[cur_runs.size()-1];
-                    memcpy(h_dst + new_runs[npairs].host_offset, h_src + rl.host_offset,
-                           rl.num_records * RECORD_SIZE);
-                }
-
-                printf("  Merge pass %d: %d -> %d runs (%d threads/pair)\n",
-                       pass, (int)cur_runs.size(), (int)new_runs.size(), T);
-                cur_runs = new_runs;
-                std::swap(h_src, h_dst);
             }
+            // Sort samples
+            std::sort(all_samples.begin(), all_samples.end(),
+                [](const std::vector<uint8_t>& a, const std::vector<uint8_t>& b) {
+                    return key_compare(a.data(), b.data(), KEY_SIZE) < 0;
+                });
+
+            // Pick T-1 evenly-spaced splitters from sorted samples
+            std::vector<std::vector<uint8_t>> splitters(T - 1);
+            for (int t = 0; t < T - 1; t++) {
+                int idx = (t + 1) * (int)all_samples.size() / T;
+                idx = std::min(idx, (int)all_samples.size() - 1);
+                splitters[t] = all_samples[idx];
+            }
+
+            // Step 2: For each splitter, binary search in each run
+            // partitions[t][ri] = number of records from run ri that go to blocks 0..t-1
+            std::vector<std::vector<uint64_t>> partitions(T, std::vector<uint64_t>(K));
+            for (int ri = 0; ri < K; ri++) {
+                const uint8_t* run_data = h_data + runs[ri].host_offset;
+                uint64_t rn = runs[ri].num_records;
+                partitions[0][ri] = 0;  // First block starts at 0
+                for (int t = 0; t < T - 1; t++) {
+                    // upper_bound: find first record > splitter
+                    uint64_t lo = (t == 0) ? 0 : partitions[t][ri];
+                    uint64_t hi = rn;
+                    while (lo < hi) {
+                        uint64_t mid = lo + (hi - lo) / 2;
+                        if (key_compare(run_data + mid * RECORD_SIZE,
+                                        splitters[t].data(), KEY_SIZE) <= 0)
+                            lo = mid + 1;
+                        else
+                            hi = mid;
+                    }
+                    partitions[t + 1][ri] = lo;
+                }
+            }
+
+            // Compute output offsets for each thread block
+            std::vector<uint64_t> block_out_off(T + 1);
+            block_out_off[0] = 0;
+            for (int t = 0; t < T; t++) {
+                uint64_t block_n = 0;
+                for (int ri = 0; ri < K; ri++) {
+                    uint64_t start = partitions[t][ri];
+                    uint64_t end = (t == T - 1) ? runs[ri].num_records : partitions[t + 1][ri];
+                    block_n += (end - start);
+                }
+                block_out_off[t + 1] = block_out_off[t] + block_n;
+            }
+
+            printf("  Partitioned %d runs into %d blocks (%.1f ms)\n",
+                   K, T, merge_timer.end_ms());
+
+            // Step 3: Each thread runs K-way merge on its block
+            std::vector<std::thread> threads;
+            for (int t = 0; t < T; t++) {
+                threads.emplace_back([&, t]() {
+                    struct HeapEntry {
+                        const uint8_t* rec;
+                        uint64_t remaining;
+                    };
+                    // Build heap for this block
+                    std::vector<HeapEntry> heap;
+                    for (int ri = 0; ri < K; ri++) {
+                        uint64_t start = partitions[t][ri];
+                        uint64_t end = (t == T - 1) ? runs[ri].num_records : partitions[t + 1][ri];
+                        if (end > start) {
+                            heap.push_back({h_data + runs[ri].host_offset + start * RECORD_SIZE,
+                                           end - start});
+                        }
+                    }
+                    int hs = (int)heap.size();
+                    if (hs == 0) return;
+
+                    auto sift_down = [](HeapEntry* h, int n, int i) {
+                        while (true) {
+                            int sm = i, l = 2*i+1, r = 2*i+2;
+                            if (l < n && key_compare(h[l].rec, h[sm].rec, KEY_SIZE) < 0) sm = l;
+                            if (r < n && key_compare(h[r].rec, h[sm].rec, KEY_SIZE) < 0) sm = r;
+                            if (sm == i) break;
+                            std::swap(h[i], h[sm]); i = sm;
+                        }
+                    };
+
+                    // Build min-heap
+                    for (int i = hs/2-1; i >= 0; i--) sift_down(heap.data(), hs, i);
+
+                    uint8_t* out = h_output + block_out_off[t] * RECORD_SIZE;
+                    while (hs > 0) {
+                        memcpy(out, heap[0].rec, RECORD_SIZE);
+                        out += RECORD_SIZE;
+                        heap[0].rec += RECORD_SIZE;
+                        heap[0].remaining--;
+                        if (heap[0].remaining == 0) {
+                            hs--;
+                            if (hs > 0) heap[0] = heap[hs];
+                        }
+                        sift_down(heap.data(), hs, 0);
+                    }
+                });
+            }
+            for (auto& t : threads) t.join();
             r.merge_ms = merge_timer.end_ms();
-            r.merge_passes = pass;
-            // Result is in h_src after last swap
-            if (h_src == h_data) {
-                memcpy(h_output, h_data, total_bytes);
-            }
+            r.merge_passes = 1;
         }
 
         printf("  Merged in %.0f ms\n", r.merge_ms);
