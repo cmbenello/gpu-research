@@ -725,34 +725,33 @@ PCIe streaming.
 
 \begin{table}[t]
   \centering
-  \caption{External sort throughput scaling (RTX~6000, 24\,GB).  All sizes
-  exceed GPU memory and require run generation + key-only merge.}
+  \caption{Single-pass external sort scaling (RTX~6000, 24\,GB).
+  Key upload via strided DMA, CUB sort on GPU, CPU gather.}
   \label{tab:scaling}
   \begin{tabular}{@{}rrrrrr@{}}
     \toprule
-    Data & Runs & Run Gen & Merge & Total & Throughput \\
+    Data & Key Upload & GPU Sort & Gather & Total & Throughput \\
     \midrule
-    10\,GB &  2 & 1.68s & 0.64s &  2.3s & 4.30\,GB/s \\
-    20\,GB &  4 & 2.67s & 1.34s &  4.0s & 4.99\,GB/s \\
-    30\,GB &  6 & 3.58s & 1.99s &  5.6s & 5.38\,GB/s \\
-    40\,GB &  8 & 4.47s & 2.62s &  7.1s & 5.64\,GB/s \\
-    50\,GB & 10 & 5.37s & 3.26s &  8.6s & 5.79\,GB/s \\
-    60\,GB & 12 & 6.28s & 3.82s & 10.1s & 5.94\,GB/s \\
+    10\,GB & 0.6s & 0.1s & 0.7s &  1.6s & 6.07\,GB/s \\
+    20\,GB & 1.1s & 0.1s & 1.4s &  2.9s & 6.85\,GB/s \\
+    30\,GB & 1.7s & 0.2s & 2.1s &  4.2s & 7.15\,GB/s \\
+    40\,GB & 2.2s & 0.2s & 2.7s &  5.5s & 7.32\,GB/s \\
+    50\,GB & 2.7s & 0.3s & 3.4s &  6.7s & 7.42\,GB/s \\
+    60\,GB & 3.4s & 0.5s & 4.0s &  7.9s & 7.58\,GB/s \\
     \bottomrule
   \end{tabular}
 \end{table}
 
-Throughput increases from 4.3 to 5.9\,GB/s as dataset size grows,
-because larger datasets amortize fixed overhead (GPU buffer allocation,
-CUB initialization).  The system processes 120\,GB of PCIe traffic
-(60\,GB upload + 60\,GB download) at only 2.0$\times$ amplification---the
-theoretical minimum for external sort.
+Throughput increases from 6.1 to 7.6\,GB/s as dataset size grows,
+because larger datasets amortize fixed GPU overhead (CUB initialization,
+memory allocation).  PCIe traffic is only 8.4\,GB for 60\,GB of data
+($0.14\times$ amplification)---far below the $2.0\times$ required by
+traditional external sort.
 
-Run generation scales linearly at ${\sim}9.6$\,GB/s bidirectional PCIe
-throughput (61\% of Gen3~x16 theoretical maximum).  The remaining gap
-is occupied by CUB radix sort (${\sim}50$\,ms per 5.4\,GB chunk) and
-record reorder (${\sim}30$\,ms), both of which are fully overlapped
-with PCIe transfers via CUDA stream events.
+GPU sort time is negligible (${\leq}6\%$ of total).  The two dominant
+costs are strided DMA key upload (${\sim}17$\,GB/s effective) and
+CPU value gather (${\sim}15$\,GB/s random DRAM reads with 48 threads
+and transparent huge pages).
 
 \subsection{In-Chunk Sort Strategy Comparison}
 
@@ -840,32 +839,47 @@ sorted records).
 
 \begin{table}[t]
   \centering
-  \caption{Phase breakdown for 60\,GB external sort (RTX~6000).}
+  \caption{Phase breakdown for 60\,GB single-pass external sort (RTX~6000).}
   \label{tab:phase_breakdown}
   \begin{tabular}{@{}lrl@{}}
     \toprule
     Phase & Time & Bottleneck \\
     \midrule
-    \textbf{Run Generation} & 6.28s (62\%) & PCIe Gen3 bandwidth \\
-    \quad H2D + D2H transfers & 5.3s & 9.6\,GB/s bidirectional \\
-    \quad CUB radix sort ($\times$12) & 0.6s & HBM bandwidth \\
-    \quad Overlap overhead & 0.4s & Event sync, key extraction \\
+    \textbf{Key Upload} & 3.4s (43\%) & PCIe strided DMA \\
+    \quad \texttt{cudaMemcpy2D} (stride 100B$\to$10B) & 3.4s & 17.5\,GB/s effective \\
     \midrule
-    \textbf{Key-Only Merge} & 3.82s (38\%) & DRAM random access \\
-    \quad CUB key re-sort & 0.24s & 600M uint64 keys \\
-    \quad Permutation download & 0.20s & 2.4\,GB D2H \\
-    \quad CPU value gather & 3.06s & 19.6\,GB/s, 48 threads \\
-    \quad Overhead & 0.32s & Buffer management \\
+    \textbf{GPU Sort} & 0.5s (6\%) & GPU compute \\
+    \quad Extract uint64 + init perm & 0.03s & HBM bandwidth \\
+    \quad CUB \texttt{DeviceRadixSort} & 0.27s & 600M keys \\
+    \quad Perm download (2.4\,GB D2H) & 0.19s & PCIe bandwidth \\
     \midrule
-    \textbf{Total} & \textbf{10.1s} & \textbf{5.94\,GB/s} \\
+    \textbf{CPU Gather} & 4.0s (51\%) & DRAM random access \\
+    \quad 48-thread block-prefetch & 4.0s & 15.0\,GB/s \\
+    \midrule
+    \textbf{Total} & \textbf{7.9s} & \textbf{7.58\,GB/s} \\
     \bottomrule
   \end{tabular}
 \end{table}
 
+\paragraph{Single-Pass Key-Only Architecture.}
+Our final architecture eliminates the run-generation phase entirely.
+Instead of uploading 60\,GB of full records to the GPU, sorting in
+chunks, and downloading sorted runs, we use \texttt{cudaMemcpy2D} to
+transfer \emph{only the 10-byte keys} from host memory with stride
+\texttt{RECORD\_SIZE} (100\,B).  The DMA engine reads the full 60\,GB
+from host RAM but writes only 6\,GB to GPU memory.  On the GPU, CUB
+\texttt{DeviceRadixSort} sorts all 600M keys with an identity permutation
+in a single pass (${\sim}270$\,ms).  The resulting permutation (2.4\,GB)
+is downloaded, and a 48-thread CPU gather materializes the sorted output.
+
+Total PCIe traffic: 8.4\,GB for a 60\,GB dataset---\textbf{0.14$\times$
+amplification}, well below the 2.0$\times$ minimum required by
+traditional run-generation-based external sort.
+
 \paragraph{Optimization Impact.}
 Starting from a naive baseline (bitonic sort + iterative 2-way merge +
-CPU merge fallback), we applied 29~cycles of optimization, achieving
-a 22.6$\times$ end-to-end speedup:
+CPU merge fallback), we applied 34~cycles of iterative optimization,
+achieving a 28.8$\times$ end-to-end speedup:
 
 \begin{table}[t]
   \centering
@@ -877,34 +891,38 @@ a 22.6$\times$ end-to-end speedup:
     \midrule
     Baseline (bitonic + 2-way + CPU merge) & 228.0s & 1.0$\times$ \\
     + CUB radix sort (in-chunk) & 23.3s & 9.8$\times$ \\
-    + Key-only GPU merge & 18.8s & 12.1$\times$ \\
-    + Pinned host memory (direct DMA) & 14.6s & 15.6$\times$ \\
-    + Event-based GPU stream ordering & 10.6s & 21.5$\times$ \\
-    + Zero-alloc merge + THP & \textbf{10.1s} & \textbf{22.6$\times$} \\
+    + Pinned memory + PCIe overlap & 10.6s & 21.5$\times$ \\
+    + Key-only merge + zero-alloc & 10.1s & 22.6$\times$ \\
+    + Single-pass key-only sort & 9.6s & 23.7$\times$ \\
+    + Strided DMA (\texttt{cudaMemcpy2D}) & \textbf{7.9s} & \textbf{28.8$\times$} \\
     \bottomrule
   \end{tabular}
 \end{table}
 
 \noindent
-The two largest individual improvements were: (1)~replacing bitonic sort
-with CUB \texttt{DeviceRadixSort} (9.8$\times$ from removing 17~HBM merge
-passes per chunk), and (2)~using pinned host memory for direct GPU DMA
-(2$\times$ from eliminating intermediate staging copies).
+The three largest individual improvements were: (1)~CUB radix sort
+replacing bitonic sort + iterative merge ($9.8\times$), (2)~single-pass
+key-only architecture eliminating run generation ($1.3\times$), and
+(3)~strided DMA upload eliminating CPU key extraction ($1.2\times$).
 
-\paragraph{PCIe Amplification.}
-Our system achieves $2.0\times$ PCIe amplification---the theoretical
-minimum for external sort (each record crosses PCIe exactly once in each
-direction).  The key-only merge strategy sends only 10-byte keys to the
-GPU for merging (not full 100-byte records), producing a permutation
-array that the CPU uses to gather the final sorted output.  This reduces
-merge-phase PCIe from 120\,GB to 2.4\,GB (a 50$\times$ reduction).
+\paragraph{Sublinear PCIe Amplification.}
+Traditional external sort has a lower bound of $2\times$ PCIe
+amplification (each record uploaded and downloaded once).  Our key-only
+architecture breaks this barrier: only 10\% of each record (the key)
+crosses PCIe, plus a 4-byte permutation index.  For 100-byte GenSort
+records, this yields $0.14\times$ amplification.  The trade-off is
+a CPU-side gather that materializes records at DRAM random-access
+bandwidth (${\sim}15$\,GB/s with transparent huge pages).
 
 \paragraph{Hardware Projections.}
-On an A100 (80\,GB HBM, PCIe Gen4), 60\,GB would fit in GPU memory
-entirely, eliminating run generation streaming.  We project
-${\sim}4$\,s for 60\,GB (${\sim}15$\,GB/s) and ${\sim}19$\,s for 200\,GB
-(truly external).  On H100 with PCIe Gen5, 200\,GB external sort
-would complete in ${\sim}13$\,s (${\sim}15.4$\,GB/s).
+On an A100 (PCIe Gen4, 80\,GB HBM), the strided DMA upload runs at
+${\sim}35$\,GB/s, halving key upload time.  For $D \leq 80$\,GB, the
+entire dataset fits in HBM, eliminating the CPU gather (${\sim}2$\,s
+projected).  On H100 (PCIe Gen5), the DMA runs at ${\sim}64$\,GB/s;
+60\,GB sorts in ${\sim}1.5$\,s.  For multi-GPU systems with NVLink,
+each GPU sorts its local key partition, and an NVLink all-to-all
+exchange (${\sim}900$\,GB/s) produces the global permutation in
+${\sim}0.1$\,s.
 
 
 % ══════════════════════════════════════════════════════════════════════════════
