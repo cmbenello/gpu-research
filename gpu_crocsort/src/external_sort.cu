@@ -594,6 +594,7 @@ void ExternalGpuSort::sort_chunk_on_gpu(uint8_t* d_in, uint8_t* d_scratch,
     uint32_t* perm_out = sort_ws.d_indices_alt;
 
 #ifdef USE_COMPACT_KEY
+    if (sort_ws.d_compact) {
     // Compact key path: build 32B keys from varying bytes, then 4 LSD passes
     build_compact_keys_kernel<<<nblks, nthreads, 0, s>>>(d_in, sort_ws.d_compact, n);
 
@@ -613,7 +614,11 @@ void ExternalGpuSort::sort_chunk_on_gpu(uint8_t* d_in, uint8_t* d_scratch,
         perm_in = idx_buf.Current();
         perm_out = idx_buf.Alternate();
     }
+    } else {
+    // Compact buffer unavailable — fall through to standard LSD
 #else
+    {
+#endif
     // Standard LSD path: ceil(KEY_SIZE/8) passes on full key
     int num_chunks = (KEY_SIZE + 7) / 8;
     for (int chunk = num_chunks - 1; chunk >= 0; chunk--) {
@@ -631,7 +636,7 @@ void ExternalGpuSort::sort_chunk_on_gpu(uint8_t* d_in, uint8_t* d_scratch,
         perm_in = idx_buf.Current();
         perm_out = idx_buf.Alternate();
     }
-#endif
+    } // end standard LSD / compact fallback
 
     // OVC mode: extract OVCs + prefixes + global perm instead of reordering records.
     // This avoids the D2H of sorted records — only OVCs + perm are downloaded.
