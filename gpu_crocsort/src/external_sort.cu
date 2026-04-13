@@ -185,6 +185,25 @@ __global__ void extract_uint64_chunk_kernel(
     sort_keys[i] = v;
 }
 
+// Extract uint64 from records at RECORD_SIZE stride (for in-chunk LSD sort)
+__global__ void extract_uint64_from_records_kernel(
+    const uint8_t* __restrict__ records,
+    const uint32_t* __restrict__ perm,
+    uint64_t* __restrict__ sort_keys,
+    uint64_t num_records,
+    int byte_offset,
+    int chunk_bytes
+) {
+    uint64_t i = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= num_records) return;
+    uint32_t orig_idx = perm[i];
+    const uint8_t* k = records + (uint64_t)orig_idx * RECORD_SIZE + byte_offset;
+    uint64_t v = 0;
+    for (int b = 0; b < chunk_bytes; b++) v = (v << 8) | k[b];
+    v <<= (8 - chunk_bytes) * 8;
+    sort_keys[i] = v;
+}
+
 // Extract uint64 sort key (bytes 0-7 big-endian) from KEY_SIZE-stride key buffer.
 __global__ void extract_uint64_from_keys_kernel(
     const uint8_t* __restrict__ key_buffer,
@@ -345,28 +364,43 @@ ExternalGpuSort::~ExternalGpuSort() {
     sort_ws.free();
 }
 
-// Sort a chunk on GPU using CUB radix sort on 8-byte key prefix + record reorder.
-// CUB does 8 radix passes at near-HBM bandwidth — replaces bitonic sort + K-way merge.
+// Sort a chunk on GPU using LSD radix sort on full KEY_SIZE-byte key + record reorder.
+// For KEY_SIZE ≤ 8: single CUB pass on uint64.
+// For KEY_SIZE > 8: ceil(KEY_SIZE/8) LSD passes, each sorting 8 bytes of key.
 void ExternalGpuSort::sort_chunk_on_gpu(uint8_t* d_in, uint8_t* d_scratch,
                                          uint64_t n, cudaStream_t s) {
     int nthreads = 256;
     int nblks = (n + nthreads - 1) / nthreads;
 
-    // Step 1: Extract big-endian uint64 keys + initialize index array
-    extract_sort_keys_kernel<<<nblks, nthreads, 0, s>>>(
-        d_in, sort_ws.d_keys, sort_ws.d_indices, n);
+    // Initialize identity permutation
+    init_identity_kernel<<<nblks, nthreads, 0, s>>>(sort_ws.d_indices, n);
 
-    // Step 2: CUB radix sort (key, index) pairs — pre-allocated double buffers
-    cub::DoubleBuffer<uint64_t> d_keys_buf(sort_ws.d_keys, sort_ws.d_keys_alt);
-    cub::DoubleBuffer<uint32_t> d_idx_buf(sort_ws.d_indices, sort_ws.d_indices_alt);
+    // LSD multi-pass: sort from least-significant 8-byte chunk to most-significant
+    int num_chunks = (KEY_SIZE + 7) / 8;
+    uint32_t* perm_in = sort_ws.d_indices;
+    uint32_t* perm_out = sort_ws.d_indices_alt;
 
-    size_t temp_bytes = buf_bytes;
-    cub::DeviceRadixSort::SortPairs(d_scratch, temp_bytes,
-        d_keys_buf, d_idx_buf, (int)n, 0, 64, s);
+    for (int chunk = num_chunks - 1; chunk >= 0; chunk--) {
+        int byte_offset = chunk * 8;
+        int chunk_bytes = std::min(8, KEY_SIZE - byte_offset);
 
-    // Step 3: Reorder full records using sorted indices (d_in → d_scratch)
+        // Extract 8 bytes from the key at byte_offset, using permutation order
+        // Read from d_in at RECORD_SIZE stride (records, not packed keys)
+        extract_uint64_from_records_kernel<<<nblks, nthreads, 0, s>>>(
+            d_in, perm_in, sort_ws.d_keys, n, byte_offset, chunk_bytes);
+
+        cub::DoubleBuffer<uint64_t> keys_buf(sort_ws.d_keys, sort_ws.d_keys_alt);
+        cub::DoubleBuffer<uint32_t> idx_buf(perm_in, perm_out);
+        size_t temp_bytes = buf_bytes;
+        cub::DeviceRadixSort::SortPairs(d_scratch, temp_bytes,
+            keys_buf, idx_buf, (int)n, 0, chunk_bytes * 8, s);
+        perm_in = idx_buf.Current();
+        perm_out = idx_buf.Alternate();
+    }
+
+    // Reorder full records using the final sorted permutation (d_in → d_scratch)
     reorder_records_kernel<<<nblks, nthreads, 0, s>>>(
-        d_in, d_scratch, d_idx_buf.Current(), n);
+        d_in, d_scratch, perm_in, n);
 
     // Copy sorted result back to d_in (async — no CPU sync needed)
     CUDA_CHECK(cudaMemcpyAsync(d_in, d_scratch, n * RECORD_SIZE,
@@ -839,19 +873,99 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
         r.pcie_h2d_gb = rg_h2d / 1e9;
         printf("  %d runs in %.0f ms (%.2f GB/s)\n\n", r.num_runs, rg_ms, total_bytes/(rg_ms*1e6));
 
-        // For the merge phase, use the existing key-only merge (upload keys per run)
+        // Merge phase: CPU K-way merge of sorted runs (keys too large for GPU merge)
         sort_ws.free();
         for (int i = 0; i < NBUFS; i++) { if (d_buf[i]) { cudaFree(d_buf[i]); d_buf[i] = nullptr; } }
+        if (d_key_buffer) { cudaFree(d_key_buffer); d_key_buffer = nullptr; }
 
-        printf("== Phase 2: Key-Only Merge ==\n");
-        double mg_h2d = 0, mg_d2h = 0;
-        r.sorted_output = streaming_merge(h_data, num_records, runs,
-                                           r.merge_ms, r.merge_passes, mg_h2d, mg_d2h,
-                                           h_perm, h_output);
-        r.pcie_d2h_gb = mg_d2h / 1e9;
-        r.total_ms = r.run_gen_ms + r.merge_ms;
+        printf("== Phase 2: CPU Parallel Merge ==\n");
+        WallTimer merge_timer; merge_timer.begin();
+
+        // Multi-threaded pairwise cascade merge on CPU
+        // Each pair within a pass is independent → parallel
+        int K = runs.size();
+        if (K <= 1) {
+            // Single run — just copy to output if needed
+            if (K == 1 && h_data != h_output) {
+                memcpy(h_output, h_data, total_bytes);
+            }
+            r.merge_ms = 0;
+        } else {
+            uint8_t* h_src = h_data;
+            uint8_t* h_dst = h_output;
+            int pass = 0;
+            std::vector<RunInfo> cur_runs = runs;
+            int hw_threads = std::max(1, (int)std::thread::hardware_concurrency());
+
+            while (cur_runs.size() > 1) {
+                pass++;
+                int npairs = cur_runs.size() / 2;
+                bool leftover = (cur_runs.size() % 2 == 1);
+
+                // Pre-compute output offsets for each merged pair
+                std::vector<RunInfo> new_runs(npairs + (leftover ? 1 : 0));
+                uint64_t out_off = 0;
+                for (int p = 0; p < npairs; p++) {
+                    uint64_t pair_n = cur_runs[2*p].num_records + cur_runs[2*p+1].num_records;
+                    new_runs[p] = {out_off, pair_n};
+                    out_off += pair_n * RECORD_SIZE;
+                }
+                if (leftover) {
+                    auto& rl = cur_runs[cur_runs.size()-1];
+                    new_runs[npairs] = {out_off, rl.num_records};
+                }
+
+                // Merge pairs in parallel (each thread merges one pair)
+                int nworkers = std::min(npairs, hw_threads);
+                std::vector<std::thread> threads;
+                auto merge_pair = [&](int p) {
+                    auto& ra = cur_runs[2*p];
+                    auto& rb = cur_runs[2*p+1];
+                    const uint8_t* pa = h_src + ra.host_offset;
+                    const uint8_t* pb = h_src + rb.host_offset;
+                    uint8_t* po = h_dst + new_runs[p].host_offset;
+                    uint64_t ia = 0, ib = 0;
+                    while (ia < ra.num_records && ib < rb.num_records) {
+                        if (key_compare(pa + ia*RECORD_SIZE, pb + ib*RECORD_SIZE, KEY_SIZE) <= 0) {
+                            memcpy(po, pa + ia*RECORD_SIZE, RECORD_SIZE); ia++;
+                        } else {
+                            memcpy(po, pb + ib*RECORD_SIZE, RECORD_SIZE); ib++;
+                        }
+                        po += RECORD_SIZE;
+                    }
+                    while (ia < ra.num_records) { memcpy(po, pa+ia*RECORD_SIZE, RECORD_SIZE); ia++; po+=RECORD_SIZE; }
+                    while (ib < rb.num_records) { memcpy(po, pb+ib*RECORD_SIZE, RECORD_SIZE); ib++; po+=RECORD_SIZE; }
+                };
+
+                for (int p = 0; p < npairs; p++) {
+                    threads.emplace_back(merge_pair, p);
+                }
+                // Copy leftover run in main thread
+                if (leftover) {
+                    auto& rl = cur_runs[cur_runs.size()-1];
+                    memcpy(h_dst + new_runs[npairs].host_offset, h_src + rl.host_offset,
+                           rl.num_records * RECORD_SIZE);
+                }
+                for (auto& t : threads) t.join();
+
+                printf("  Merge pass %d: %d -> %d runs (%d threads)\n",
+                       pass, (int)cur_runs.size(), (int)new_runs.size(), nworkers);
+                cur_runs = new_runs;
+                std::swap(h_src, h_dst);
+            }
+            r.merge_ms = merge_timer.end_ms();
+            r.merge_passes = pass;
+            // Result is in h_src after last swap. If it's h_data, copy to h_output
+            if (h_src == h_data) {
+                memcpy(h_output, h_data, total_bytes);
+            }
+        }
+
+        printf("  Merged in %.0f ms\n", r.merge_ms);
+        r.sorted_output = h_output;
         r.sorted_output_size = total_bytes;
         r.sorted_output_is_mmap = h_output_is_mmap;
+        r.total_ms = r.run_gen_ms + r.merge_ms;
         return r;
     }
 
