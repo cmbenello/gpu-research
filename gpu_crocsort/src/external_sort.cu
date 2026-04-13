@@ -988,8 +988,10 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
     printf("== Step 1+2: Key Upload ==\n");
     phase_timer.begin();
 
-    // Free sort buffers to make room
+    // Free sort buffers and workspace to make room for key upload
     for (int i = 0; i < NBUFS; i++) { if (d_buf[i]) { cudaFree(d_buf[i]); d_buf[i] = nullptr; } }
+    sort_ws.free();
+    if (d_key_buffer) { cudaFree(d_key_buffer); d_key_buffer = nullptr; }
 
     uint8_t* d_keys_10byte;
     uint8_t* h_keys = nullptr;
