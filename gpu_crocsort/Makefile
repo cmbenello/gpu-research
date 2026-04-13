@@ -5,7 +5,7 @@
 # Clean: make clean
 
 NVCC = nvcc
-NVCC_FLAGS = -O3 -std=c++17 --expt-relaxed-constexpr -lineinfo
+NVCC_FLAGS = -O3 -std=c++17 --expt-relaxed-constexpr --extended-lambda -lineinfo
 INCLUDES = -Iinclude
 
 # Auto-detect GPU architecture (default to sm_80 for A100)
