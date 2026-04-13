@@ -217,3 +217,15 @@ Each pass is a stable CUB SortPairs on an 8-byte chunk.
 Full correctness verified on both workloads.
 
 Next: OVC compression for prefix-redundant TPC-H keys.
+
+## TPC-H Full-Column Results Summary
+
+| Dataset | Format | Size | Time | Throughput | Status |
+|---------|--------|------|------|-----------|--------|
+| GenSort 60GB | 10B key, 100B rec | 60 GB | 7.7s | 7.8 GB/s | PASS |
+| TPC-H SF10 | 88B key, 120B rec | 7.2 GB | 1.9s | 3.8 GB/s | PASS |
+| TPC-H SF50 | 88B key, 120B rec | 36 GB | OOM | — | keys > GPU |
+
+TPC-H 88B keys need 11 LSD passes (vs 2 for GenSort 10B keys).
+SF50 fails because 300M × 88B = 26.4GB keys > 24GB GPU memory.
+Compression (OVC) would reduce key size and enable larger datasets.
