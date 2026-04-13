@@ -1551,19 +1551,19 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
                     uint8_t tmp[RECORD_SIZE];
                     for (uint64_t g = g0; g < g1; g++) {
                         auto [start, count] = groups[g];
-                        // Insertion sort — groups are small (avg ~few hundred)
                         uint8_t* base = h_output + start * RECORD_SIZE;
-                        for (uint64_t j = 1; j < count; j++) {
-                            uint8_t* cur = base + j * RECORD_SIZE;
-                            if (key_compare(cur - RECORD_SIZE, cur, KEY_SIZE) <= 0) continue;
-                            memcpy(tmp, cur, RECORD_SIZE);
-                            uint64_t k = j;
-                            while (k > 0 && key_compare(base+(k-1)*RECORD_SIZE, tmp, KEY_SIZE) > 0) {
-                                memcpy(base+k*RECORD_SIZE, base+(k-1)*RECORD_SIZE, RECORD_SIZE);
-                                k--;
-                            }
-                            memcpy(base+k*RECORD_SIZE, tmp, RECORD_SIZE);
-                        }
+                        // Build index, sort by full key, apply permutation
+                        std::vector<uint32_t> idx(count);
+                        for (uint64_t j = 0; j < count; j++) idx[j] = j;
+                        std::sort(idx.begin(), idx.end(), [base](uint32_t a, uint32_t b) {
+                            return key_compare(base + (uint64_t)a*RECORD_SIZE,
+                                               base + (uint64_t)b*RECORD_SIZE, KEY_SIZE) < 0;
+                        });
+                        // Apply permutation via tmp buffer
+                        std::vector<uint8_t> tmp2(count * RECORD_SIZE);
+                        for (uint64_t j = 0; j < count; j++)
+                            memcpy(tmp2.data() + j*RECORD_SIZE, base + (uint64_t)idx[j]*RECORD_SIZE, RECORD_SIZE);
+                        memcpy(base, tmp2.data(), count * RECORD_SIZE);
                     }
                 });
             }
