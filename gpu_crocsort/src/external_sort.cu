@@ -1001,100 +1001,113 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
     size_t free_mem_now, dummy2;
     CUDA_CHECK(cudaMemGetInfo(&free_mem_now, &dummy2));
     size_t est_arena = num_records * (2*sizeof(uint64_t) + 2*sizeof(uint32_t)) + 512*1024*1024;
-    // For large keys: try PREFIX SORT (8B GPU sort + CPU fixup for ties).
-    // This avoids uploading full records: PCIe = 8B×N up + 4B×N down vs 2×RECORD_SIZE×N.
-    // Only viable if 8B prefixes fit in GPU and groups are small enough for CPU fixup.
-    size_t prefix_8_bytes = num_records * 8;
+    // For large keys: try PREFIX SORT (16B GPU sort + CPU fixup for ties).
+    // Upload first 16 bytes via strided DMA, GPU sorts by 16B prefix (2 LSD passes),
+    // CPU gathers into prefix-sorted order, then sorts within small contiguous groups.
+    // PCIe = 16B×N up + 4B×N down vs 2×RECORD_SIZE×N for full-record round-trip.
+    static constexpr int PREFIX_BYTES = 16;
+    size_t prefix_total = num_records * PREFIX_BYTES;
     size_t prefix_arena = num_records * (2*sizeof(uint64_t) + 2*sizeof(uint32_t)) + 512*1024*1024;
-    bool use_prefix_sort = (KEY_SIZE > 16 && prefix_8_bytes + prefix_arena < free_mem_now * 0.9);
+    bool use_prefix_sort = (KEY_SIZE > 16 && prefix_total + prefix_arena < free_mem_now * 0.9);
 
     if (use_prefix_sort) {
-        printf("  Using PREFIX SORT: 8B prefix on GPU + CPU fixup for ties\n");
-        printf("  PCIe: %.1f GB keys H2D + %.1f GB perm D2H (vs %.1f GB full-record round-trip)\n",
-               prefix_8_bytes/1e9, total_perm_bytes/1e9, 2*total_bytes/1e9);
+        printf("  Using PREFIX SORT: %dB prefix on GPU + CPU fixup for ties\n", PREFIX_BYTES);
+        printf("  PCIe: %.1f GB H2D + %.1f GB D2H (vs %.1f GB full-record round-trip)\n",
+               prefix_total/1e9, total_perm_bytes/1e9, 2*total_bytes/1e9);
 
-        // Allocate prefix keys and permutation on GPU
+        // Allocate prefix keys and sort workspace on GPU
         uint8_t* d_prefix_keys;
-        CUDA_CHECK(cudaMalloc(&d_prefix_keys, prefix_8_bytes));
+        CUDA_CHECK(cudaMalloc(&d_prefix_keys, prefix_total));
         CUDA_CHECK(cudaMalloc(&d_perm_in, num_records * sizeof(uint32_t)));
         CUDA_CHECK(cudaMalloc(&d_perm_out, num_records * sizeof(uint32_t)));
         uint64_t* d_sort_keys, *d_sort_keys_alt;
         CUDA_CHECK(cudaMalloc(&d_sort_keys, num_records * sizeof(uint64_t)));
         CUDA_CHECK(cudaMalloc(&d_sort_keys_alt, num_records * sizeof(uint64_t)));
 
-        // Step 1: Strided DMA — upload only first 8 bytes of each record's key
-        CUDA_CHECK(cudaMemcpy2D(d_prefix_keys, 8, h_data, RECORD_SIZE,
-                                 8, num_records, cudaMemcpyHostToDevice));
+        // Step 1: Strided DMA — upload first PREFIX_BYTES of each record
+        CUDA_CHECK(cudaMemcpy2D(d_prefix_keys, PREFIX_BYTES, h_data, RECORD_SIZE,
+                                 PREFIX_BYTES, num_records, cudaMemcpyHostToDevice));
         double upload_ms = phase_timer.end_ms();
-        r.pcie_h2d_gb = prefix_8_bytes / 1e9;
+        r.pcie_h2d_gb = prefix_total / 1e9;
         printf("  Uploaded %.2f GB prefix keys in %.0f ms (%.2f GB/s effective)\n",
-               prefix_8_bytes/1e9, upload_ms, total_bytes/(upload_ms*1e6));
+               prefix_total/1e9, upload_ms, total_bytes/(upload_ms*1e6));
 
-        // Step 2: GPU sort by 8-byte prefix (single CUB pass on uint64)
+        // Step 2: GPU LSD sort by 16-byte prefix (2 CUB passes)
         phase_timer.begin();
         int nthreads = 256;
         int nblks = (num_records + nthreads - 1) / nthreads;
-
-        // Initialize identity permutation
         init_identity_kernel<<<nblks, nthreads>>>(d_perm_in, num_records);
-        // Extract uint64 from contiguous 8B prefix buffer (identity perm, stride=8)
-        // Reinterpret 8-byte keys as big-endian uint64 via direct byte extraction
-        {
-            auto extract = [=] __device__ (uint64_t i) -> uint64_t {
-                const uint8_t* k = d_prefix_keys + i * 8;
-                uint64_t v = 0;
-                for (int b = 0; b < 8; b++) v = (v << 8) | k[b];
-                return v;
-            };
-            // Simple kernel via thrust transform or just use extract_sort_keys_kernel analog
-        }
-        // Simpler: just use a lambda-free approach — copy as uint64 and byte-swap
-        // The prefix keys are big-endian. On little-endian GPU, just extract manually.
-        // Use extract_uint64_chunk_kernel which reads from KEY_SIZE-stride key buffer
-        // with identity permutation (chunk 0, 8 bytes). But we need stride=8 not KEY_SIZE.
-        // Solution: just use a tiny dedicated kernel via extract_uint64_from_records_kernel
-        // with RECORD_SIZE=8 — but RECORD_SIZE is a compile constant. Use the packed keys
-        // extraction kernel from compact path which has configurable stride.
-        // Actually simplest: thrust transform
-        {
-            thrust::device_ptr<uint8_t> keys_ptr(d_prefix_keys);
-            thrust::device_ptr<uint64_t> sort_ptr(d_sort_keys);
-            thrust::counting_iterator<uint64_t> idx(0);
-            thrust::transform(idx, idx + num_records, sort_ptr,
-                [d_prefix_keys] __device__ (uint64_t i) {
-                    const uint8_t* k = d_prefix_keys + i * 8;
-                    uint64_t v = 0;
-                    for (int b = 0; b < 8; b++) v = (v << 8) | k[b];
-                    return v;
-                });
-        }
 
+        // CUB temp storage
+        size_t cub_temp_bytes = 0;
         cub::DoubleBuffer<uint64_t> keys_buf(d_sort_keys, d_sort_keys_alt);
         cub::DoubleBuffer<uint32_t> idx_buf(d_perm_in, d_perm_out);
 
-        // CUB needs temp storage
-        size_t cub_temp_bytes = 0;
         cub::DeviceRadixSort::SortPairs(nullptr, cub_temp_bytes,
             keys_buf, idx_buf, (int)num_records, 0, 64);
         void* d_cub_temp;
         CUDA_CHECK(cudaMalloc(&d_cub_temp, cub_temp_bytes));
-        cub::DeviceRadixSort::SortPairs(d_cub_temp, cub_temp_bytes,
-            keys_buf, idx_buf, (int)num_records, 0, 64);
+
+        // LSD: sort by least significant 8 bytes first (bytes 8-15), then bytes 0-7
+        uint32_t* perm_in = d_perm_in;
+        uint32_t* perm_out = d_perm_out;
+
+        for (int pass = 1; pass >= 0; pass--) {
+            int byte_offset = pass * 8;
+            // Extract 8 bytes from prefix buffer at PREFIX_BYTES stride
+            thrust::counting_iterator<uint64_t> count_idx(0);
+            thrust::device_ptr<uint64_t> sk_ptr(d_sort_keys);
+            uint8_t* pk = d_prefix_keys;
+            uint32_t* pi = perm_in;
+            thrust::transform(count_idx, count_idx + num_records, sk_ptr,
+                [pk, pi, byte_offset] __device__ (uint64_t i) {
+                    uint32_t orig = pi[i];
+                    const uint8_t* k = pk + (uint64_t)orig * PREFIX_BYTES + byte_offset;
+                    uint64_t v = 0;
+                    for (int b = 0; b < 8; b++) v = (v << 8) | k[b];
+                    return v;
+                });
+
+            cub::DoubleBuffer<uint64_t> kb(d_sort_keys, d_sort_keys_alt);
+            cub::DoubleBuffer<uint32_t> ib(perm_in, perm_out);
+            size_t temp = cub_temp_bytes;
+            cub::DeviceRadixSort::SortPairs(d_cub_temp, temp,
+                kb, ib, (int)num_records, 0, 64);
+            perm_in = ib.Current();
+            perm_out = ib.Alternate();
+        }
+
         CUDA_CHECK(cudaDeviceSynchronize());
         double sort_ms = phase_timer.end_ms();
-        printf("  GPU prefix sort: %.0f ms\n", sort_ms);
+        printf("  GPU prefix sort (2 LSD passes): %.0f ms\n", sort_ms);
 
         // Step 3: Download sorted prefix keys + permutation
         phase_timer.begin();
-        CUDA_CHECK(cudaMemcpy(h_perm, idx_buf.Current(),
+        CUDA_CHECK(cudaMemcpy(h_perm, perm_in,
                                total_perm_bytes, cudaMemcpyDeviceToHost));
-        // Also download sorted prefix keys for group detection
-        uint8_t* h_sorted_prefixes = (uint8_t*)malloc(prefix_8_bytes);
-        CUDA_CHECK(cudaMemcpy(h_sorted_prefixes, keys_buf.Current(),
-                               num_records * sizeof(uint64_t), cudaMemcpyDeviceToHost));
-        r.pcie_d2h_gb = (total_perm_bytes + num_records * 8) / 1e9;
+        // Download sorted prefix keys for group detection (need the 16B prefixes in sorted order)
+        // Reconstruct by reading h_data[h_perm[i]]'s first 16 bytes on CPU (faster than GPU D2H)
+        // Actually just download the sorted uint64 from the last CUB pass (bytes 0-7)
+        uint8_t* h_sorted_prefixes = (uint8_t*)malloc(num_records * PREFIX_BYTES);
+        // Read prefixes from h_data using permutation (sequential perm access, random h_data access)
+        {
+            int nt = std::max(1, (int)std::thread::hardware_concurrency());
+            uint64_t per_t = (num_records + nt - 1) / nt;
+            std::vector<std::thread> threads;
+            for (int t = 0; t < nt; t++) {
+                threads.emplace_back([&, t]() {
+                    uint64_t lo = t * per_t, hi = std::min(lo + per_t, num_records);
+                    for (uint64_t i = lo; i < hi; i++) {
+                        memcpy(h_sorted_prefixes + i * PREFIX_BYTES,
+                               h_data + (uint64_t)h_perm[i] * RECORD_SIZE, PREFIX_BYTES);
+                    }
+                });
+            }
+            for (auto& t : threads) t.join();
+        }
+        r.pcie_d2h_gb = total_perm_bytes / 1e9;
         double dl_ms = phase_timer.end_ms();
-        printf("  Downloaded perm + prefixes in %.0f ms\n", dl_ms);
+        printf("  Downloaded perm + extracted prefixes in %.0f ms\n", dl_ms);
 
         // Free GPU memory
         cudaFree(d_prefix_keys); cudaFree(d_perm_in); cudaFree(d_perm_out);
@@ -1133,12 +1146,13 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
         phase_timer.begin();
         printf("  CPU fixup: sorting within groups of equal 8B prefixes...\n");
 
-        // Find group boundaries using sorted uint64 prefixes
-        uint64_t* sorted_u64 = (uint64_t*)h_sorted_prefixes;
+        // Find group boundaries using sorted 16-byte prefixes
         std::vector<std::pair<uint64_t, uint64_t>> groups;
         uint64_t grp_start = 0;
         for (uint64_t i = 1; i <= num_records; i++) {
-            if (i == num_records || sorted_u64[i] != sorted_u64[grp_start]) {
+            if (i == num_records ||
+                memcmp(h_sorted_prefixes + i * PREFIX_BYTES,
+                       h_sorted_prefixes + grp_start * PREFIX_BYTES, PREFIX_BYTES) != 0) {
                 groups.push_back({grp_start, i - grp_start});
                 grp_start = i;
             }
