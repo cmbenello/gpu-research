@@ -875,7 +875,7 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
 
     cudaFreeHost(h_perm);
 
-    r.run_gen_ms = upload_ms + sort_ms;  // perm download now pipelined with gather
+    r.run_gen_ms = upload_ms + sort_ms + download_ms;  // no separate extract step with cudaMemcpy2D
     r.merge_ms = gather_ms;
     r.merge_passes = 1;
     r.num_runs = 1;
