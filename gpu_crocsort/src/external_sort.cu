@@ -151,10 +151,18 @@ __global__ void extract_uint32_from_keys_kernel(
     sort_keys[i] = v;
 }
 
-// Extract uint64 sort key from KEY_SIZE-stride key buffer.
-// Uses ALL 10 bytes packed into two sort passes for full correctness.
-// Primary key: bytes[0:8] big-endian uint64 (main sort)
-// Tiebreaker:  bytes[8:10] (handled by segmented sort on ties)
+// Gather uint64 values by permutation: out[i] = src[perm[i]]
+__global__ void gather_uint64_kernel(
+    const uint64_t* __restrict__ src,
+    const uint32_t* __restrict__ perm,
+    uint64_t* __restrict__ out,
+    uint64_t n
+) {
+    uint64_t i = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) out[i] = src[perm[i]];
+}
+
+// Extract uint64 sort key (bytes 0-7 big-endian) from KEY_SIZE-stride key buffer.
 __global__ void extract_uint64_from_keys_kernel(
     const uint8_t* __restrict__ key_buffer,
     uint64_t* __restrict__ sort_keys,
@@ -813,17 +821,51 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
     phase_timer.begin();
 
     int nthreads = 256, nblks = (num_records + nthreads - 1) / nthreads;
+
+    // ── LSD Radix Sort: two passes for full 10-byte key correctness ──
+    // Pass 1: Sort by tiebreaker (bytes 8-9, uint16, 2 radix passes)
+    // Pass 2: Stable sort by primary (bytes 0-7, uint64, 8 radix passes)
+    // Result: correctly sorted by full 10-byte key (lexicographic)
+
+    // Extract primary (uint64, bytes 0-7) and tiebreaker (uint16, bytes 8-9)
     extract_uint64_from_keys_kernel<<<nblks, nthreads, 0, streams[0]>>>(
         d_keys_10byte, d_sort_keys, num_records);
     init_identity_kernel<<<nblks, nthreads, 0, streams[0]>>>(d_perm_in, num_records);
 
-    cub::DoubleBuffer<uint64_t> d_keys_buf(d_sort_keys, d_sort_keys_alt);
-    cub::DoubleBuffer<uint32_t> d_perm_buf(d_perm_in, d_perm_out);
-    // Sort by bytes 0-7 (uint64, 8 radix passes)
-    // Note: bytes 8-9 not sorted — correct for random GenSort, may have ties on TPC-H
-    cub::DeviceRadixSort::SortPairs(d_temp, cub_temp_bytes,
-        d_keys_buf, d_perm_buf, (int)num_records, 0, 64, streams[0]);
-    CUDA_CHECK(cudaStreamSynchronize(streams[0]));
+    // Reuse d_sort_keys_alt temporarily for uint16 tiebreakers
+    // (uint16 array fits in uint64 array: N*2 < N*8)
+    uint16_t* d_tie = reinterpret_cast<uint16_t*>(d_sort_keys_alt);
+    uint16_t* d_tie_alt = d_tie + num_records;  // second half of d_sort_keys_alt
+
+    extract_tiebreaker_kernel<<<nblks, nthreads, 0, streams[0]>>>(
+        d_keys_10byte, d_perm_in, d_tie, num_records);
+
+    // Pass 1: Sort by tiebreaker (stable, 2 radix passes)
+    {
+        cub::DoubleBuffer<uint16_t> tie_buf(d_tie, d_tie_alt);
+        cub::DoubleBuffer<uint32_t> perm_buf(d_perm_in, d_perm_out);
+        size_t tie_temp = cub_temp_bytes;
+        cub::DeviceRadixSort::SortPairs(d_temp, tie_temp,
+            tie_buf, perm_buf, (int)num_records, 0, 16, streams[0]);
+        // After this: perm_buf.Current() has tiebreaker-sorted permutation
+        d_perm_in = perm_buf.Current();
+        d_perm_out = perm_buf.Alternate();
+    }
+
+    // Gather primary keys in tiebreaker-sorted order for the second pass
+    // d_sort_keys has primary keys in ORIGINAL order. We need them in perm order.
+    gather_uint64_kernel<<<nblks, nthreads, 0, streams[0]>>>(
+        d_sort_keys, d_perm_in, d_sort_keys_alt, num_records);
+
+    // Pass 2: Sort by primary key (stable, 8 radix passes)
+    {
+        cub::DoubleBuffer<uint64_t> keys_buf(d_sort_keys_alt, d_sort_keys);
+        cub::DoubleBuffer<uint32_t> perm_buf(d_perm_in, d_perm_out);
+        cub::DeviceRadixSort::SortPairs(d_temp, cub_temp_bytes,
+            keys_buf, perm_buf, (int)num_records, 0, 64, streams[0]);
+        CUDA_CHECK(cudaStreamSynchronize(streams[0]));
+        d_perm_in = perm_buf.Current();
+    }
 
     cudaFree(d_keys_10byte);
 
@@ -834,7 +876,7 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
     printf("== Step 4: Download Permutation ==\n");
     phase_timer.begin();
 
-    CUDA_CHECK(cudaMemcpy(h_perm, d_perm_buf.Current(), total_perm_bytes, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(h_perm, d_perm_in, total_perm_bytes, cudaMemcpyDeviceToHost));
     r.pcie_d2h_gb = total_perm_bytes / 1e9;
 
     cudaFree(d_arena);
