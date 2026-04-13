@@ -808,35 +808,14 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
     uint8_t* d_keys_10byte;
     uint8_t* h_keys = nullptr;
 
-    if (KEY_SIZE * 2 < RECORD_SIZE) {
-        // Key is small fraction of record — strided DMA saves PCIe bandwidth
-        CUDA_CHECK(cudaMalloc(&d_keys_10byte, total_keys_bytes));
-        CUDA_CHECK(cudaMemcpy2DAsync(
-            d_keys_10byte, KEY_SIZE,
-            h_data, RECORD_SIZE,
-            KEY_SIZE, num_records,
-            cudaMemcpyHostToDevice, streams[0]));
-        r.pcie_h2d_gb = total_keys_bytes / 1e9;
-    } else {
-        // Key is large fraction of record — contiguous upload is faster
-        // (avoids strided read amplification on host side)
-        CUDA_CHECK(cudaMalloc(&d_keys_10byte, total_bytes));
-        CUDA_CHECK(cudaMemcpyAsync(d_keys_10byte, h_data, total_bytes,
-                                    cudaMemcpyHostToDevice, streams[0]));
-        r.pcie_h2d_gb = total_bytes / 1e9;
-        // Note: d_keys_10byte now holds full records at RECORD_SIZE stride
-        // The LSD sort kernels use KEY_SIZE stride — need to adjust OR
-        // extract keys on GPU. For now, extract keys on GPU:
-        uint8_t* d_full_records = d_keys_10byte;
-        CUDA_CHECK(cudaMalloc(&d_keys_10byte, total_keys_bytes));
-        // GPU kernel to extract keys at RECORD_SIZE stride → KEY_SIZE stride
-        int nt = 256, nb = (num_records + nt - 1) / nt;
-        // Simple extraction kernel (KEY_SIZE bytes per record)
-        // Reuse the existing extract_keys_kernel from run gen
-        extract_keys_kernel<<<nb, nt, 0, streams[0]>>>(
-            d_full_records, d_keys_10byte, num_records);
-        cudaFree(d_full_records);
-    }
+    // Strided DMA: extract only KEY_SIZE bytes per record from host
+    CUDA_CHECK(cudaMalloc(&d_keys_10byte, total_keys_bytes));
+    CUDA_CHECK(cudaMemcpy2DAsync(
+        d_keys_10byte, KEY_SIZE,
+        h_data, RECORD_SIZE,
+        KEY_SIZE, num_records,
+        cudaMemcpyHostToDevice, streams[0]));
+    r.pcie_h2d_gb = total_keys_bytes / 1e9;
 
     // Allocate arena for CUB sort: uint64 keys + uint32 perm + CUB temp
     size_t cub_temp_bytes = 0;
