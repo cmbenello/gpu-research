@@ -818,156 +818,40 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
     CUDA_CHECK(cudaMemGetInfo(&free_mem_now, &dummy2));
     size_t est_arena = num_records * (2*sizeof(uint64_t) + 2*sizeof(uint32_t)) + 512*1024*1024;
     if (total_keys_bytes + est_arena > free_mem_now * 0.9) {
-        printf("  Keys too large for GPU (%.1f GB keys > GPU capacity)\n", total_keys_bytes/1e9);
-        printf("  Using prefix sort (8B) + CPU fixup for %d-byte keys\n", KEY_SIZE);
+        printf("  Keys too large for GPU (%.1f GB keys > %.1f GB available)\n",
+               total_keys_bytes/1e9, free_mem_now/1e9);
+        printf("  Using run-gen pipeline with per-chunk LSD sort for %d-byte keys\n", KEY_SIZE);
 
-        // ── PREFIX SORT + CPU FIXUP for large keys ──
-        // 1. Upload 8B prefix per record (fits in GPU)
-        // 2. CUB sort by uint64 prefix → partial permutation
-        // 3. Download permutation
-        // 4. CPU fixup: for tied groups (same 8B prefix), sort by full key using std::sort
-
-        uint64_t prefix_bytes = num_records * 8;
-        printf("  Uploading %.2f GB key prefixes...\n", prefix_bytes / 1e9);
-
-        // Allocate for 8B prefix sort (reuse GenSort-style arena)
-        uint64_t* d_prefix_keys;
-        uint64_t* d_prefix_alt;
-        CUDA_CHECK(cudaMalloc(&d_prefix_keys, prefix_bytes));
-        CUDA_CHECK(cudaMalloc(&d_prefix_alt, prefix_bytes));
-        CUDA_CHECK(cudaMalloc(&d_perm_in, total_perm_bytes));
-        CUDA_CHECK(cudaMalloc(&d_perm_out, total_perm_bytes));
-
-        // CPU extraction of 8B prefix into pinned buffer (big-endian uint64)
-        uint64_t* h_prefix;
-        r.pcie_h2d_gb = prefix_bytes / 1e9;
-        CUDA_CHECK(cudaMallocHost(&h_prefix, prefix_bytes));
-        {
-            int nt = std::min(48, (int)std::thread::hardware_concurrency());
-            std::vector<std::thread> threads;
-            uint64_t chunk = (num_records + nt - 1) / nt;
-            for (int t = 0; t < nt; t++) {
-                uint64_t s = (uint64_t)t * chunk, e = std::min(s + chunk, num_records);
-                if (s < e) {
-                    threads.emplace_back([=]() {
-                        for (uint64_t i = s; i < e; i++) {
-                            const uint8_t* k = h_data + i * RECORD_SIZE;
-                            uint64_t v = 0;
-                            for (int b = 0; b < 8; b++) v = (v << 8) | k[b];
-                            h_prefix[i] = v;
-                        }
-                    });
-                }
-            }
-            for (auto& t : threads) t.join();
+        // Fall back to run-gen + merge pipeline
+        // Re-allocate sort buffers (were freed above)
+        for (int i = 0; i < NBUFS; i++) {
+            CUDA_CHECK(cudaMalloc(&d_buf[i], buf_bytes));
         }
-        CUDA_CHECK(cudaMemcpy(d_prefix_keys, h_prefix, prefix_bytes, cudaMemcpyHostToDevice));
+        sort_ws.allocate(buf_records);
 
-        // Init identity permutation
-        {
-            int nt = 256, nb = (num_records + nt - 1) / nt;
-            init_identity_kernel<<<nb, nt, 0, streams[0]>>>(d_perm_in, num_records);
-        }
+        // Run generation with per-chunk CUB sort
+        printf("\n== Phase 1: Run Generation (chunked LSD sort) ==\n");
+        double rg_h2d = 0, rg_d2h = 0;
+        double rg_ms;
+        auto runs = generate_runs_pipelined(h_data, num_records, rg_ms, rg_h2d, rg_d2h);
+        r.run_gen_ms = rg_ms;
+        r.num_runs = runs.size();
+        r.pcie_h2d_gb = rg_h2d / 1e9;
+        printf("  %d runs in %.0f ms (%.2f GB/s)\n\n", r.num_runs, rg_ms, total_bytes/(rg_ms*1e6));
 
-        // CUB sort by uint64 prefix
-        size_t cub_temp = 0;
-        {
-            cub::DoubleBuffer<uint64_t> dk(nullptr,nullptr);
-            cub::DoubleBuffer<uint32_t> dp(nullptr,nullptr);
-            cub::DeviceRadixSort::SortPairs(nullptr, cub_temp, dk, dp, (int)num_records, 0, 64);
-        }
-        void* d_temp;
-        CUDA_CHECK(cudaMalloc(&d_temp, cub_temp));
+        // For the merge phase, use the existing key-only merge (upload keys per run)
+        sort_ws.free();
+        for (int i = 0; i < NBUFS; i++) { if (d_buf[i]) { cudaFree(d_buf[i]); d_buf[i] = nullptr; } }
 
-        cub::DoubleBuffer<uint64_t> kbuf(d_prefix_keys, d_prefix_alt);
-        cub::DoubleBuffer<uint32_t> pbuf(d_perm_in, d_perm_out);
-        cub::DeviceRadixSort::SortPairs(d_temp, cub_temp,
-            kbuf, pbuf, (int)num_records, 0, 64, streams[0]);
-        CUDA_CHECK(cudaStreamSynchronize(streams[0]));
-
-        // Download sorted prefix keys + permutation
-        uint64_t* h_sorted_prefix = h_prefix; // reuse
-        CUDA_CHECK(cudaMemcpy(h_sorted_prefix, kbuf.Current(), prefix_bytes, cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaMemcpy(h_perm, pbuf.Current(), total_perm_bytes, cudaMemcpyDeviceToHost));
-        r.pcie_d2h_gb = (prefix_bytes + total_perm_bytes) / 1e9;
-
-        cudaFree(d_prefix_keys); cudaFree(d_prefix_alt);
-        cudaFree(d_perm_in); cudaFree(d_perm_out);
-        cudaFree(d_temp);
-
-        double gpu_ms = phase_timer.end_ms();
-        printf("  GPU prefix sort: %.0f ms\n", gpu_ms);
-
-        // ── CPU fixup: sort tied groups by full key ──
-        printf("  CPU fixup for tied groups...\n");
-        WallTimer fixup_timer; fixup_timer.begin();
-
-        // Find runs of equal prefix keys and sort each by full key
-        uint64_t ties_fixed = 0;
-        uint64_t i = 0;
-        while (i < num_records) {
-            uint64_t j = i + 1;
-            while (j < num_records && h_sorted_prefix[j] == h_sorted_prefix[i]) j++;
-            if (j - i > 1) {
-                // Tied group [i, j): sort by full key
-                std::sort(h_perm + i, h_perm + j, [&](uint32_t a, uint32_t b) {
-                    return memcmp(h_data + (uint64_t)a * RECORD_SIZE,
-                                  h_data + (uint64_t)b * RECORD_SIZE, KEY_SIZE) < 0;
-                });
-                ties_fixed += j - i;
-            }
-            i = j;
-        }
-
-        double fixup_ms = fixup_timer.end_ms();
-        printf("  Fixed %lu records in %lu tied groups: %.0f ms\n",
-               ties_fixed, ties_fixed > 0 ? ties_fixed : 0, fixup_ms);
-
-        cudaFreeHost(h_prefix);
-
-        r.run_gen_ms = gpu_ms + fixup_ms;
-        r.merge_passes = 1;
-        r.num_runs = 1;
-
-        // ── CPU gather (inline, same as below) ──
-        {
-            printf("== Step 5: CPU Gather ==\n");
-            WallTimer gather_timer; gather_timer.begin();
-            int num_threads = std::min(48, (int)std::thread::hardware_concurrency());
-            std::vector<std::thread> threads;
-            uint64_t chunk = (num_records + num_threads - 1) / num_threads;
-            for (int t = 0; t < num_threads; t++) {
-                uint64_t start = (uint64_t)t * chunk;
-                uint64_t end = std::min(start + chunk, num_records);
-                if (start < end) {
-                    threads.emplace_back([=, &h_data, &h_output, &h_perm]() {
-                        constexpr int BLOCK = 256;
-                        const uint8_t* src_ptrs[BLOCK];
-                        for (uint64_t base = start; base < end; base += BLOCK) {
-                            int count = std::min((uint64_t)BLOCK, end - base);
-                            for (int j = 0; j < count; j++) {
-                                uint32_t idx = h_perm[base + j];
-                                src_ptrs[j] = h_data + (uint64_t)idx * RECORD_SIZE;
-                                __builtin_prefetch(src_ptrs[j], 0, 0);
-                            }
-                            for (int j = 0; j < count; j++) {
-                                memcpy(h_output + (base + j) * RECORD_SIZE, src_ptrs[j], RECORD_SIZE);
-                            }
-                        }
-                    });
-                }
-            }
-            for (auto& t : threads) t.join();
-            double gather_ms = gather_timer.end_ms();
-            printf("  Gathered %.2f GB in %.0f ms (%.2f GB/s)\n",
-                   total_bytes/1e9, gather_ms, total_bytes/(gather_ms*1e6));
-            r.merge_ms = gather_ms;
-        }
-        cudaFreeHost(h_perm);
-        r.sorted_output = h_output;
+        printf("== Phase 2: Key-Only Merge ==\n");
+        double mg_h2d = 0, mg_d2h = 0;
+        r.sorted_output = streaming_merge(h_data, num_records, runs,
+                                           r.merge_ms, r.merge_passes, mg_h2d, mg_d2h,
+                                           h_perm, h_output);
+        r.pcie_d2h_gb = mg_d2h / 1e9;
+        r.total_ms = r.run_gen_ms + r.merge_ms;
         r.sorted_output_size = total_bytes;
         r.sorted_output_is_mmap = h_output_is_mmap;
-        r.total_ms = r.run_gen_ms + r.merge_ms;
         return r;
     }
 
