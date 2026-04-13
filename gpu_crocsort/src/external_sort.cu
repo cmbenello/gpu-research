@@ -1010,6 +1010,10 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
     // Arena: 2×uint64 (sort keys) + 2×uint32 (perm) + CUB temp (~300MB for 600M records)
     size_t prefix_arena = num_records * (2*sizeof(uint64_t) + 2*sizeof(uint32_t)) + 300*1024*1024;
     bool use_prefix_sort = (KEY_SIZE > 16 && prefix_total + prefix_arena < free_mem_now * 0.95);
+    printf("  Prefix sort check: need %.1f GB, have %.1f GB (%.1f×0.95=%.1f) → %s\n",
+           (prefix_total + prefix_arena)/1e9, free_mem_now/1e9,
+           free_mem_now/1e9, free_mem_now*0.95/1e9,
+           use_prefix_sort ? "YES" : "NO");
 
     if (use_prefix_sort) {
         printf("  Using PREFIX SORT: %dB prefix on GPU + CPU fixup for ties\n", PREFIX_BYTES);
