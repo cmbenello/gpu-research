@@ -80,7 +80,7 @@ Full 10-byte key correctness via LSD two-pass radix sort.
 | Dataset | Size | Records | Run Gen | Merge | **Total** | **Throughput** | Verified |
 |---------|------|---------|---------|-------|---------|--------------|---------|
 | SF10 | 7.2 GB | 60M | 1.5s | 0.4s | **1.9s** | **3.7 GB/s** | PASS |
-| SF50 | 36.0 GB | 300M | 5.7s | 4.2s | **9.9s** | **3.6 GB/s** | PASS |
+| SF50 | 36.0 GB | 300M | 5.7s | 3.2s | **8.9s** | **4.1 GB/s** | PASS |
 
 Sort key: All 9 lineitem columns normalized to fixed 88B binary string
 (`l_returnflag`, `l_linestatus`, dates, monetary amounts, integers).
@@ -90,9 +90,20 @@ Architecture for 88B keys (exceeds GPU memory at SF50):
 - **Phase 1**: Triple-buffered pipelined run generation with per-chunk
   LSD radix sort (11 CUB passes for 88B, reading at RECORD_SIZE stride).
   Event-based D2H completion tracking prevents pipeline race conditions.
-- **Phase 2**: Multi-threaded cascade merge with merge-path partitioning.
-  All 48 CPU threads participate in every pass, split via binary search.
-  3 passes for 7 runs (7→4→2→1).
+- **Phase 2**: Single-pass multi-threaded K-way merge with sample-based
+  partitioning. 48 threads each run independent K-way heap merge on their
+  block. 1 pass vs cascade's 3 passes → 3x less memory traffic.
+
+### Bottleneck Analysis (TPC-H SF50 88B)
+
+```
+Component         Time    %    Bottleneck
+─────────────────────────────────────────
+Run gen (7 chunks) 5.7s   64%  GPU sort (11 LSD passes × 7 chunks)
+K-way merge        3.2s   36%  DDR4 bandwidth (72 GB traffic, 48 threads)
+─────────────────────────────────────────
+Total              8.9s  100%
+```
 
 ## Competitive Comparison
 
