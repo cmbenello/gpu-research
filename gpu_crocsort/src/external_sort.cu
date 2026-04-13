@@ -855,9 +855,11 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
     int num_chunks = (KEY_SIZE + 7) / 8;  // ceil(KEY_SIZE / 8)
     printf("  LSD sort: %d passes for %d-byte key\n", num_chunks, KEY_SIZE);
 
+    GpuTimer pass_timer;
     for (int chunk = num_chunks - 1; chunk >= 0; chunk--) {
         int byte_offset = chunk * 8;
         int chunk_bytes = std::min(8, KEY_SIZE - byte_offset);
+        pass_timer.begin();
 
         // Extract uint64 from this chunk of the key (in permutation order)
         // Use a kernel that reads key[perm[i]][byte_offset:byte_offset+8]
@@ -888,6 +890,8 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
             d_perm_in = perm_buf.Current();
             d_perm_out = perm_buf.Alternate();
         }
+        float pass_ms = pass_timer.end();
+        printf("    Pass %d (bytes %d-%d): %.1f ms\n", num_chunks - chunk, byte_offset, byte_offset + chunk_bytes - 1, pass_ms);
     }
     CUDA_CHECK(cudaStreamSynchronize(streams[0]));
 
