@@ -82,6 +82,7 @@ Full 10-byte key correctness via LSD two-pass radix sort.
 | SF10 | 7.2 GB | 60M | 1.5s | 0.4s | **1.9s** | **3.7 GB/s** | PASS |
 | SF50 | 36.0 GB | 300M | 5.7s | 3.2s | **8.9s** | **4.1 GB/s** | PASS |
 | SF100 | 72.0 GB | 600M | 10.8s | 3.5s | **14.3s** | **5.0 GB/s** | PASS |
+| SF100 (compact) | 72.0 GB | 600M | 9.7s | 3.5s | **13.2s** | **5.4 GB/s** | PASS |
 
 Sort key: All 9 lineitem columns normalized to fixed 88B binary string
 (`l_returnflag`, `l_linestatus`, dates, monetary amounts, integers).
