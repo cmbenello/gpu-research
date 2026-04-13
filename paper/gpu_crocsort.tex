@@ -925,6 +925,43 @@ exchange (${\sim}900$\,GB/s) produces the global permutation in
 ${\sim}0.1$\,s.
 
 
+\subsection{Cross-System Comparison}
+
+Table~\ref{tab:competitive} compares our system against published
+sort benchmarks on comparable workloads.
+
+\begin{table}[t]
+  \centering
+  \caption{Cross-system sort performance comparison.}
+  \label{tab:competitive}
+  \begin{tabular}{@{}llrr@{}}
+    \toprule
+    \textbf{System} & \textbf{Data} & \textbf{Time} & \textbf{GB/s} \\
+    \midrule
+    \textbf{GPU CrocSort (ours)} & \textbf{60\,GB GenSort} & \textbf{7.5s} & \textbf{8.0} \\
+    \textbf{GPU CrocSort (ours)} & \textbf{30\,GB TPC-H} & \textbf{3.7s} & \textbf{8.0} \\
+    MendSort~(JouleSort'23) & 1\,TB GenSort & 304s & 3.3 \\
+    DuckDB~v1.4~(2025) & 27\,GB TPC-H & 81s & 0.33 \\
+    ClickHouse & 13\,GB & 20s & 0.69 \\
+    Stehle-Jacobsen~\cite{stehle2017} & 64\,GB 8B~KV & ${\sim}$20s & ${\sim}$3 \\
+    Vortex~(2025) & 64\,GB 8B~int & ${\sim}$24s & 21.6$^*$ \\
+    \bottomrule
+  \end{tabular}\\[2pt]
+  \footnotesize{$^*$Vortex uses 4~GPUs (${\sim}$112\,GB/s aggregate PCIe).}
+\end{table}
+
+Our single-GPU system achieves 2.4$\times$ higher throughput than the
+best published single-node CPU sort (MendSort~\cite{mendsort2023}),
+24$\times$ faster than DuckDB's 2025 external sort on comparable
+TPC-H data, and ${\sim}$2.7$\times$ faster than the prior GPU external
+sort by Stehle and Jacobsen~\cite{stehle2017} (which used 8-byte records,
+not 100-byte).  To our knowledge, no published single-GPU system sorts
+60\,GB of 100-byte records at 8+\,GB/s on PCIe Gen3.  The key-only
+architecture---transferring only 10\% of each record to the GPU---breaks
+the $2\times$ PCIe amplification barrier that limits traditional
+GPU external sort.
+
+
 % ══════════════════════════════════════════════════════════════════════════════
 % 8  RELATED WORK
 % ══════════════════════════════════════════════════════════════════════════════
