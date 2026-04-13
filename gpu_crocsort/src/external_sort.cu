@@ -537,10 +537,9 @@ ExternalGpuSort::ExternalGpuSort() {
     size_t free_mem, total_mem;
     CUDA_CHECK(cudaMemGetInfo(&free_mem, &total_mem));
     // Sort buffers get 65% of GPU memory (3 × ~5.5GB each)
-    // Key buffer allocated separately in sort() based on actual data size
     gpu_budget = (size_t)(free_mem * 0.65);
-    key_buffer_capacity = 0; // computed dynamically
-    d_key_buffer = nullptr; // allocated lazily in sort()
+    key_buffer_capacity = 0;
+    d_key_buffer = nullptr;
     d_ovc_buffer = nullptr;
     d_prefix_buffer = nullptr;
     d_global_perm = nullptr;
@@ -555,9 +554,10 @@ ExternalGpuSort::ExternalGpuSort() {
     printf("[ExternalSort] Triple-buffer: %d × %.2f GB (%.0f M records each)\n",
            NBUFS, buf_bytes/1e9, buf_records/1e6);
 
+    // Allocate host pinned buffers and streams/events (not GPU buffers yet — lazy alloc)
     for (int i = 0; i < NBUFS; i++) {
+        d_buf[i] = nullptr;  // allocated lazily in sort()
         CUDA_CHECK(cudaMallocHost(&h_pin[i], buf_bytes));
-        CUDA_CHECK(cudaMalloc(&d_buf[i], buf_bytes));
         CUDA_CHECK(cudaStreamCreate(&streams[i]));
         CUDA_CHECK(cudaEventCreate(&events[i]));
     }
@@ -1062,6 +1062,12 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
     if (num_records <= 1) return r;
     uint64_t total_bytes = num_records * RECORD_SIZE;
     printf("[ExternalSort] Sorting %lu records (%.2f GB)\n\n", num_records, total_bytes/1e9);
+
+    // Lazy-allocate GPU buffers if needed
+    if (!d_buf[0]) {
+        for (int i = 0; i < NBUFS; i++)
+            CUDA_CHECK(cudaMalloc(&d_buf[i], buf_bytes));
+    }
 
     // Fast path: fits in one buffer
     if (num_records <= buf_records) {
