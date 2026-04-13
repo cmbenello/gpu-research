@@ -162,3 +162,17 @@ System is now 100% CPU-gather-dominated.
 
 All sizes verified correct (PASS). THP enabled.
 Architecture: single-pass key-only sort via cudaMemcpy2D strided DMA.
+
+## Cycle 36: mmap + MAP_POPULATE for Gather Output
+
+Pre-fault all output pages at allocation time. Eliminates page faults
+during gather and enables better THP coverage.
+
+| Data | Time  | Throughput | vs Original |
+|------|-------|-----------|-------------|
+| 10GB |  1.6s | 6.33 GB/s | — |
+| 20GB |  2.9s | 6.91 GB/s | **17.8×** |
+| 40GB |  5.5s | 7.32 GB/s | — |
+| 60GB |  7.3s | 8.22 GB/s | **31.2×** |
+
+Gather: 4.0s → 3.4s (15% faster) from MAP_POPULATE + THP on mmap.
