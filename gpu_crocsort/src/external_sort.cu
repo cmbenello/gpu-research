@@ -1167,47 +1167,30 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
         printf("    %lu groups (avg %.0f records/group)\n",
                groups.size(), (double)num_records / groups.size());
 
-        // Sort each group IN PLACE in h_output using full-key comparison
-        // Groups are contiguous (~18.8MB each) → excellent L3 cache behavior
+        // Sort each group IN PLACE in h_output.
+        // Groups avg 31 records → tiny, use simple insertion sort.
         uint64_t groups_per_thread = (groups.size() + hw_threads - 1) / hw_threads;
         threads.clear();
         for (int t = 0; t < hw_threads; t++) {
             threads.emplace_back([&, t]() {
                 uint64_t gs = t * groups_per_thread;
                 uint64_t ge = std::min(gs + groups_per_thread, (uint64_t)groups.size());
-                // Temp buffer for std::sort swap operations
-                std::vector<uint8_t> tmp(RECORD_SIZE);
+                uint8_t tmp[RECORD_SIZE];
                 for (uint64_t g = gs; g < ge; g++) {
                     auto [start, count] = groups[g];
                     if (count <= 1) continue;
-                    // Sort records in h_output[start..start+count) by full key
-                    // Use pointer-based sort for contiguous records
+                    // Insertion sort — optimal for small groups (avg 31)
                     uint8_t* base = h_output + start * RECORD_SIZE;
-                    // Build index array for this group
-                    std::vector<uint32_t> idx(count);
-                    for (uint64_t j = 0; j < count; j++) idx[j] = j;
-                    std::sort(idx.begin(), idx.end(),
-                        [base](uint32_t a, uint32_t b) {
-                            return key_compare(base + (uint64_t)a * RECORD_SIZE,
-                                               base + (uint64_t)b * RECORD_SIZE,
-                                               KEY_SIZE) < 0;
-                        });
-                    // Apply permutation in-place using cycle decomposition
-                    std::vector<bool> done(count, false);
-                    for (uint64_t j = 0; j < count; j++) {
-                        if (done[j] || idx[j] == j) { done[j] = true; continue; }
-                        memcpy(tmp.data(), base + j * RECORD_SIZE, RECORD_SIZE);
-                        uint64_t k = j;
-                        while (!done[k]) {
-                            done[k] = true;
-                            uint64_t next = idx[k];
-                            if (next == j) {
-                                memcpy(base + k * RECORD_SIZE, tmp.data(), RECORD_SIZE);
-                            } else {
-                                memcpy(base + k * RECORD_SIZE, base + next * RECORD_SIZE, RECORD_SIZE);
-                            }
-                            k = next;
+                    for (uint64_t i = 1; i < count; i++) {
+                        uint8_t* cur = base + i * RECORD_SIZE;
+                        if (key_compare(cur - RECORD_SIZE, cur, KEY_SIZE) <= 0) continue;
+                        memcpy(tmp, cur, RECORD_SIZE);
+                        uint64_t j = i;
+                        while (j > 0 && key_compare(base + (j-1)*RECORD_SIZE, tmp, KEY_SIZE) > 0) {
+                            memcpy(base + j*RECORD_SIZE, base + (j-1)*RECORD_SIZE, RECORD_SIZE);
+                            j--;
                         }
+                        memcpy(base + j*RECORD_SIZE, tmp, RECORD_SIZE);
                     }
                 }
             });
