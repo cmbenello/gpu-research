@@ -200,3 +200,20 @@ No further software optimization possible. Gains require faster hardware.
 TPC-H is 14% faster than random GenSort for the same data size.
 Note: sorts by bytes 0-7 only (orderkey). Bytes 8-9 (linenumber)
 not sorted — records within the same order may be out of order.
+
+## TPC-H Full-Column Sort (88B normalized key, 120B records)
+
+TPC-H SF10 lineitem with full sort order matching CrocSort paper:
+ORDER BY l_returnflag, l_linestatus, l_shipdate, l_shipinstruct, 
+         l_shipmode, l_comment, l_orderkey, l_linenumber
+
+| Dataset | Key | Record | Size | Time | Throughput | Passes |
+|---------|-----|--------|------|------|-----------|--------|
+| TPC-H SF10 | 88B | 120B | 7.2 GB | 1.9s | 3.78 GB/s | 11 |
+| GenSort | 10B | 100B | 60 GB | 7.7s | 7.78 GB/s | 2 |
+
+LSD multi-pass radix sort: ceil(KEY_SIZE/8) CUB passes.
+Each pass is a stable CUB SortPairs on an 8-byte chunk.
+Full correctness verified on both workloads.
+
+Next: OVC compression for prefix-redundant TPC-H keys.
