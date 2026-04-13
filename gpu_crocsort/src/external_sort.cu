@@ -268,6 +268,55 @@ __global__ void extract_uint64_from_compact_kernel(
 }
 #endif // USE_COMPACT_KEY
 
+// ── OVC Architecture kernels ──────────────────────────────────────
+// Compute OVCs for a sorted run: compare adjacent sorted records.
+// OVC[0] = OVC_INITIAL, OVC[i] = ovc_compute_delta(record[i-1], record[i]).
+__global__ void compute_run_ovcs_kernel(
+    const uint8_t* __restrict__ sorted_records,
+    uint32_t* __restrict__ ovcs,
+    uint64_t num_records
+) {
+    uint64_t i = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= num_records) return;
+    if (i == 0) {
+        ovcs[i] = OVC_INITIAL;
+    } else {
+        const uint8_t* prev = sorted_records + (i - 1) * RECORD_SIZE;
+        const uint8_t* curr = sorted_records + i * RECORD_SIZE;
+        ovcs[i] = ovc_compute_delta(prev, curr, KEY_SIZE);
+    }
+}
+
+// Extract 8-byte big-endian prefix from sorted records (for OVC tiebreaking)
+__global__ void extract_prefix8_kernel(
+    const uint8_t* __restrict__ sorted_records,
+    uint64_t* __restrict__ prefixes,
+    uint64_t num_records
+) {
+    uint64_t i = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= num_records) return;
+    const uint8_t* k = sorted_records + i * RECORD_SIZE;
+    uint64_t v = 0;
+    for (int b = 0; b < 8; b++) v = (v << 8) | k[b];
+    prefixes[i] = v;
+}
+
+// Build global permutation: map sorted position to original h_data index.
+// After sort_chunk_on_gpu, the chunk's records are sorted in d_buf[cur].
+// local_perm[i] = the original index within the chunk of the i-th sorted record.
+// global_perm[run_offset + i] = chunk_start + local_perm[i].
+__global__ void build_global_perm_kernel(
+    const uint32_t* __restrict__ local_perm,
+    uint32_t* __restrict__ global_perm,
+    uint64_t chunk_start,    // record offset of this chunk in h_data
+    uint64_t run_offset,     // position in the global OVC/perm arrays
+    uint64_t num_records
+) {
+    uint64_t i = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= num_records) return;
+    global_perm[run_offset + i] = (uint32_t)(chunk_start + local_perm[i]);
+}
+
 // Extract uint64 from records at RECORD_SIZE stride (for in-chunk LSD sort)
 __global__ void extract_uint64_from_records_kernel(
     const uint8_t* __restrict__ records,
@@ -410,10 +459,18 @@ class ExternalGpuSort {
     cudaStream_t streams[NBUFS];
     cudaEvent_t events[NBUFS];
 
-    // Persistent key buffer
+    // Persistent key buffer (for small-key single-pass path)
     uint8_t* d_key_buffer;
     uint64_t key_buffer_capacity;
     std::vector<uint64_t> run_key_offsets;
+
+    // OVC merge buffers (for large-key path: persistent across run gen)
+    uint32_t* d_ovc_buffer;        // 4B OVC per record
+    uint64_t* d_prefix_buffer;     // 8B key prefix per record (tiebreaker)
+    uint32_t* d_global_perm;       // global index per record
+    uint64_t  ovc_buffer_records;  // capacity in records
+    uint64_t  ovc_run_offset;     // current write position in OVC/perm/prefix buffers
+    uint64_t  ovc_chunk_start;    // record offset of current chunk in h_data
 
     // Pre-allocated sort workspace (avoids cudaMalloc per chunk)
     SortWorkspace sort_ws;
@@ -457,6 +514,12 @@ ExternalGpuSort::ExternalGpuSort() {
     gpu_budget = (size_t)(free_mem * 0.65);
     key_buffer_capacity = 0; // computed dynamically
     d_key_buffer = nullptr; // allocated lazily in sort()
+    d_ovc_buffer = nullptr;
+    d_prefix_buffer = nullptr;
+    d_global_perm = nullptr;
+    ovc_buffer_records = 0;
+    ovc_run_offset = 0;
+    ovc_chunk_start = 0;
     buf_records = (gpu_budget / NBUFS) / RECORD_SIZE;
     buf_bytes = buf_records * RECORD_SIZE;
 
@@ -481,6 +544,9 @@ ExternalGpuSort::~ExternalGpuSort() {
         cudaEventDestroy(events[i]);
     }
     if (d_key_buffer) cudaFree(d_key_buffer);
+    if (d_ovc_buffer) cudaFree(d_ovc_buffer);
+    if (d_prefix_buffer) cudaFree(d_prefix_buffer);
+    if (d_global_perm) cudaFree(d_global_perm);
     sort_ws.free();
 }
 
@@ -538,7 +604,50 @@ void ExternalGpuSort::sort_chunk_on_gpu(uint8_t* d_in, uint8_t* d_scratch,
     }
 #endif
 
-    // Reorder full records using the final sorted permutation (d_in → d_scratch)
+    // OVC mode: extract OVCs + prefixes + global perm instead of reordering records.
+    // This avoids the D2H of sorted records — only OVCs + perm are downloaded.
+    if (d_ovc_buffer && ovc_run_offset + n <= ovc_buffer_records) {
+        // Compute OVCs by comparing adjacent records via permutation
+        // OVC[0] = INITIAL, OVC[i] = delta(record[perm[i-1]], record[perm[i]])
+        // We need a kernel that reads records via permutation, not from sorted output
+        // (because we're NOT reordering records in OVC mode)
+
+        // Extract 8B prefix for each record in sorted order
+        // prefix[i] = first 8 bytes of record[perm[i]]
+        {
+            uint32_t* pi = perm_in;
+            uint64_t* prefixes = d_prefix_buffer + ovc_run_offset;
+            uint32_t* ovcs = d_ovc_buffer + ovc_run_offset;
+            uint8_t* recs = d_in;
+            auto extract_and_ovc = [=] __device__ (uint64_t i) {
+                uint32_t idx = pi[i];
+                const uint8_t* k = recs + (uint64_t)idx * RECORD_SIZE;
+                // Extract 8B prefix
+                uint64_t v = 0;
+                for (int b = 0; b < 8; b++) v = (v << 8) | k[b];
+                prefixes[i] = v;
+                // Compute OVC
+                if (i == 0) {
+                    ovcs[i] = OVC_INITIAL;
+                } else {
+                    uint32_t prev_idx = pi[i - 1];
+                    const uint8_t* prev_k = recs + (uint64_t)prev_idx * RECORD_SIZE;
+                    ovcs[i] = ovc_compute_delta(prev_k, k, KEY_SIZE);
+                }
+            };
+            thrust::counting_iterator<uint64_t> count_idx(0);
+            thrust::for_each(thrust::device, count_idx, count_idx + n, extract_and_ovc);
+        }
+
+        // Build global perm: global_perm[run_offset + i] = chunk_start + perm[i]
+        build_global_perm_kernel<<<nblks, nthreads, 0, s>>>(
+            perm_in, d_global_perm, ovc_chunk_start, ovc_run_offset, n);
+
+        ovc_run_offset += n;
+        return; // Don't reorder records — they stay unsorted in d_buf
+    }
+
+    // Standard path: reorder full records using the final sorted permutation
     reorder_records_kernel<<<nblks, nthreads, 0, s>>>(
         d_in, d_scratch, perm_in, n);
 

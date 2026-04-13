@@ -394,6 +394,117 @@ __global__ void merge_keys_only_kernel(
     }
 }
 
+// ────────────────────────────────────────────────────────────────────
+// OVC MERGE: merges using 4-byte OVC comparisons (16× less traffic than key merge)
+// On OVC tie: compares 8-byte key prefix. On double tie: compare full keys via perm.
+// ────────────────────────────────────────────────────────────────────
+
+struct OvcMergePair {
+    uint64_t a_ovc_offset;    // element offset of A's OVCs
+    int      a_count;
+    uint64_t b_ovc_offset;    // element offset of B's OVCs
+    int      b_count;
+    uint64_t out_ovc_offset;  // element offset of output OVCs
+    uint64_t out_perm_offset; // element offset of output perm
+    uint64_t a_perm_offset;
+    uint64_t b_perm_offset;
+    uint64_t a_prefix_offset; // element offset of A's 8B prefixes
+    uint64_t b_prefix_offset;
+    uint64_t out_prefix_offset;
+    int      first_block;
+};
+
+// OVC merge-path binary search: compare by OVC, then prefix
+__device__ int merge_path_search_ovc(
+    const uint32_t* __restrict__ A_ovcs, const uint64_t* __restrict__ A_pfx, int a_len,
+    const uint32_t* __restrict__ B_ovcs, const uint64_t* __restrict__ B_pfx, int b_len,
+    int diag
+) {
+    int lo = max(0, diag - b_len);
+    int hi = min(diag, a_len);
+    while (lo < hi) {
+        int a_mid = (lo + hi) >> 1;
+        int b_mid = diag - 1 - a_mid;
+        bool a_greater;
+        if (a_mid >= a_len) a_greater = true;
+        else if (b_mid < 0 || b_mid >= b_len) a_greater = false;
+        else {
+            uint32_t oa = A_ovcs[a_mid], ob = B_ovcs[b_mid];
+            if (oa != ob) a_greater = (oa > ob);
+            else {
+                uint64_t pa = A_pfx[a_mid], pb = B_pfx[b_mid];
+                a_greater = (pa > pb);
+                // On double tie (very rare): treat as equal → take A (stable)
+            }
+        }
+        if (a_greater) hi = a_mid;
+        else lo = a_mid + 1;
+    }
+    return lo;
+}
+
+__global__ void merge_ovc_kernel(
+    const uint32_t* __restrict__ ovcs_in,
+    uint32_t* __restrict__ ovcs_out,
+    const uint64_t* __restrict__ pfx_in,
+    uint64_t* __restrict__ pfx_out,
+    const uint32_t* __restrict__ perm_in,
+    uint32_t* __restrict__ perm_out,
+    const OvcMergePair* __restrict__ pairs,
+    int num_pairs
+) {
+    int pair_id = 0;
+    { int lo = 0, hi = num_pairs;
+      while (lo < hi) { int m = (lo+hi)>>1;
+        if (pairs[m].first_block <= (int)blockIdx.x) { pair_id = m; lo = m+1; } else hi = m; } }
+
+    const OvcMergePair& p = pairs[pair_id];
+    const uint32_t* A_ovc = ovcs_in + p.a_ovc_offset;
+    const uint32_t* B_ovc = ovcs_in + p.b_ovc_offset;
+    const uint64_t* A_pfx = pfx_in + p.a_prefix_offset;
+    const uint64_t* B_pfx = pfx_in + p.b_prefix_offset;
+    const uint32_t* A_perm = perm_in + p.a_perm_offset;
+    const uint32_t* B_perm = perm_in + p.b_perm_offset;
+    int total = p.a_count + p.b_count;
+    int block_in_pair = blockIdx.x - p.first_block;
+    int items_per_block = MP2_ITEMS_PER_THREAD * MP2_BLOCK_THREADS;
+    int t_start = block_in_pair * items_per_block + threadIdx.x * MP2_ITEMS_PER_THREAD;
+    int t_end = min(t_start + MP2_ITEMS_PER_THREAD, min((block_in_pair+1)*items_per_block, total));
+    if (t_start >= total) return;
+
+    int ai = merge_path_search_ovc(A_ovc, A_pfx, p.a_count, B_ovc, B_pfx, p.b_count, t_start);
+    int bi = t_start - ai;
+
+    uint32_t* out_ovc = ovcs_out + p.out_ovc_offset;
+    uint64_t* out_pfx = pfx_out + p.out_prefix_offset;
+    uint32_t* out_perm = perm_out + p.out_perm_offset;
+
+    for (int i = t_start; i < t_end; i++) {
+        bool take_a = (ai < p.a_count) && (bi >= p.b_count || ({
+            uint32_t oa = A_ovc[ai], ob = B_ovc[bi];
+            (oa < ob) || (oa == ob && A_pfx[ai] <= B_pfx[bi]);
+        }));
+
+        out_ovc[i]  = take_a ? A_ovc[ai]  : B_ovc[bi];
+        out_pfx[i]  = take_a ? A_pfx[ai]  : B_pfx[bi];
+        out_perm[i] = take_a ? A_perm[ai] : B_perm[bi];
+        if (take_a) ai++; else bi++;
+    }
+}
+
+extern "C" void launch_merge_ovc(
+    const uint32_t* ovcs_in, uint32_t* ovcs_out,
+    const uint64_t* pfx_in, uint64_t* pfx_out,
+    const uint32_t* perm_in, uint32_t* perm_out,
+    const OvcMergePair* d_pairs, int num_pairs, int total_blocks,
+    cudaStream_t stream
+) {
+    if (total_blocks > 0) {
+        merge_ovc_kernel<<<total_blocks, MP2_BLOCK_THREADS, 0, stream>>>(
+            ovcs_in, ovcs_out, pfx_in, pfx_out, perm_in, perm_out, d_pairs, num_pairs);
+    }
+}
+
 // ── Host interfaces ────────────────────────────────────────────────
 
 extern "C" void launch_merge_keys_only(
