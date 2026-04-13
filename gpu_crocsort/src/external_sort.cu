@@ -1521,7 +1521,7 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
                total_bytes/1e9, gather_ms, total_bytes/(gather_ms*1e6));
 
         r.merge_ms = merge_ms + dl_ms + gather_ms;
-        r.merge_passes = pass;
+        r.merge_passes = 2; // 2 CUB LSD passes (index + prefix)
         r.sorted_output = h_output;
         r.sorted_output_size = total_bytes;
         r.sorted_output_is_mmap = h_output_is_mmap;
