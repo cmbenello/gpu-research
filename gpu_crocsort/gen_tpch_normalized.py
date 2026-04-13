@@ -55,19 +55,14 @@ def main():
     con.execute("INSTALL tpch; LOAD tpch;")
     con.execute(f"CALL dbgen(sf={sf});")
 
-    # Fetch lineitem with sort columns
-    print("Querying lineitem table...")
-    result = con.execute("""
-        SELECT l_returnflag, l_linestatus,
-               l_shipdate, l_commitdate, l_receiptdate,
-               l_extendedprice, l_discount, l_tax, l_quantity,
-               l_orderkey, l_partkey, l_suppkey, l_linenumber
-        FROM lineitem
-    """).fetchall()
-
-    nrows = len(result)
+    # Count rows first
+    nrows = con.execute("SELECT COUNT(*) FROM lineitem").fetchone()[0]
     elapsed = time.time() - t0
-    print(f"  {nrows:,} rows in {elapsed:.1f}s")
+    print(f"  {nrows:,} rows, counted in {elapsed:.1f}s")
+
+    # Fetch in chunks to avoid OOM
+    CHUNK = 5_000_000
+    print(f"Querying lineitem table in chunks of {CHUNK//1000000}M...")
 
     # Epoch for dates
     from datetime import date
@@ -83,88 +78,73 @@ def main():
         buf = bytearray(RECORD_SIZE)
         written = 0
         t1 = time.time()
-        for row in result:
-            (returnflag, linestatus, shipdate, commitdate, receiptdate,
-             extprice, discount, tax, quantity,
-             orderkey, partkey, suppkey, linenumber) = row
+        offset = 0
+        while offset < nrows:
+            limit = min(CHUNK, nrows - offset)
+            rows = con.execute(f"""
+                SELECT l_returnflag, l_linestatus,
+                       l_shipdate, l_commitdate, l_receiptdate,
+                       l_extendedprice, l_discount, l_tax, l_quantity,
+                       l_orderkey, l_partkey, l_suppkey, l_linenumber
+                FROM lineitem
+                LIMIT {limit} OFFSET {offset}
+            """).fetchall()
+            offset += len(rows)
 
-            # Clear buffer
-            for i in range(RECORD_SIZE):
-                buf[i] = 0
+            for row in rows:
+                (returnflag, linestatus, shipdate, commitdate, receiptdate,
+                 extprice, discount, tax, quantity,
+                 orderkey, partkey, suppkey, linenumber) = row
 
-            # Key: normalize each field to binary where memcmp = correct order
-            off = 0
+                # Clear buffer
+                for i in range(RECORD_SIZE):
+                    buf[i] = 0
 
-            # [0] returnflag: 1 byte ASCII
-            buf[off] = ord(returnflag) if isinstance(returnflag, str) else returnflag
-            off += 1
+                off = 0
+                buf[off] = ord(returnflag) if isinstance(returnflag, str) else returnflag
+                off += 1
+                buf[off] = ord(linestatus) if isinstance(linestatus, str) else linestatus
+                off += 1
+                days = (shipdate - epoch).days if hasattr(shipdate, 'year') else int(shipdate)
+                struct.pack_into('>I', buf, off, days + 2**31)
+                off += 4
+                days = (commitdate - epoch).days if hasattr(commitdate, 'year') else int(commitdate)
+                struct.pack_into('>I', buf, off, days + 2**31)
+                off += 4
+                days = (receiptdate - epoch).days if hasattr(receiptdate, 'year') else int(receiptdate)
+                struct.pack_into('>I', buf, off, days + 2**31)
+                off += 4
+                cents = int(round(float(extprice) * 100))
+                struct.pack_into('>q', buf, off, cents + 2**62)
+                off += 8
+                hundredths = int(round(float(discount) * 100))
+                struct.pack_into('>q', buf, off, hundredths + 2**62)
+                off += 8
+                hundredths = int(round(float(tax) * 100))
+                struct.pack_into('>q', buf, off, hundredths + 2**62)
+                off += 8
+                qty = int(round(float(quantity) * 100))
+                struct.pack_into('>q', buf, off, qty + 2**62)
+                off += 8
+                struct.pack_into('>Q', buf, off, int(orderkey))
+                off += 8
+                struct.pack_into('>I', buf, off, int(partkey))
+                off += 4
+                struct.pack_into('>I', buf, off, int(suppkey))
+                off += 4
+                struct.pack_into('>I', buf, off, int(linenumber))
+                off += 4
 
-            # [1] linestatus: 1 byte ASCII
-            buf[off] = ord(linestatus) if isinstance(linestatus, str) else linestatus
-            off += 1
+                # [66:88] padding + [88:120] value already zeroed
 
-            # [2:6] shipdate: days since epoch, big-endian uint32
-            days = (shipdate - epoch).days if hasattr(shipdate, 'year') else int(shipdate)
-            struct.pack_into('>I', buf, off, days + 2**31)  # offset to make unsigned
-            off += 4
-
-            # [6:10] commitdate
-            days = (commitdate - epoch).days if hasattr(commitdate, 'year') else int(commitdate)
-            struct.pack_into('>I', buf, off, days + 2**31)
-            off += 4
-
-            # [10:14] receiptdate
-            days = (receiptdate - epoch).days if hasattr(receiptdate, 'year') else int(receiptdate)
-            struct.pack_into('>I', buf, off, days + 2**31)
-            off += 4
-
-            # [14:22] extendedprice: cents, big-endian int64 + offset
-            cents = int(round(float(extprice) * 100))
-            struct.pack_into('>q', buf, off, cents + 2**62)
-            off += 8
-
-            # [22:30] discount
-            hundredths = int(round(float(discount) * 100))
-            struct.pack_into('>q', buf, off, hundredths + 2**62)
-            off += 8
-
-            # [30:38] tax
-            hundredths = int(round(float(tax) * 100))
-            struct.pack_into('>q', buf, off, hundredths + 2**62)
-            off += 8
-
-            # [38:46] quantity
-            qty = int(round(float(quantity) * 100))
-            struct.pack_into('>q', buf, off, qty + 2**62)
-            off += 8
-
-            # [46:54] orderkey
-            struct.pack_into('>Q', buf, off, int(orderkey))
-            off += 8
-
-            # [54:58] partkey
-            struct.pack_into('>I', buf, off, int(partkey))
-            off += 4
-
-            # [58:62] suppkey
-            struct.pack_into('>I', buf, off, int(suppkey))
-            off += 4
-
-            # [62:66] linenumber
-            struct.pack_into('>I', buf, off, int(linenumber))
-            off += 4
-
-            # [66:88] padding (already zeroed)
-            # [88:120] value (already zeroed)
-
-            f.write(buf)
-            written += 1
-            if written % 10000000 == 0:
-                elapsed = time.time() - t1
-                rate = written / elapsed
-                eta = (nrows - written) / rate
-                print(f"  {written/1e6:.0f}M / {nrows/1e6:.0f}M ({100*written/nrows:.0f}%) "
-                      f"ETA: {eta:.0f}s")
+                f.write(buf)
+                written += 1
+                if written % 10000000 == 0:
+                    elapsed = time.time() - t1
+                    rate = written / elapsed
+                    eta = (nrows - written) / rate
+                    print(f"  {written/1e6:.0f}M / {nrows/1e6:.0f}M ({100*written/nrows:.0f}%) "
+                          f"ETA: {eta:.0f}s")
 
     elapsed = time.time() - t0
     size_gb = os.path.getsize(outpath) / 1e9
