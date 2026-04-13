@@ -838,42 +838,9 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
         CUDA_CHECK(cudaMalloc(&d_perm_in, total_perm_bytes));
         CUDA_CHECK(cudaMalloc(&d_perm_out, total_perm_bytes));
 
-        // Strided DMA: extract first 8 bytes from each RECORD_SIZE-stride record
-        CUDA_CHECK(cudaMemcpy2DAsync(
-            d_prefix_keys, 8,
-            h_data, RECORD_SIZE,
-            8, num_records,
-            cudaMemcpyHostToDevice, streams[0]));
-        r.pcie_h2d_gb = prefix_bytes / 1e9;
-
-        // Extract big-endian uint64 from the 8-byte prefix on GPU
-        {
-            int nt = 256, nb = (num_records + nt - 1) / nt;
-            // The DMA already placed 8 bytes per record at stride 8 in d_prefix_keys.
-            // But they're raw bytes, not big-endian uint64. Extract:
-            // Actually cudaMemcpy2D copies bytes verbatim. The first 8 bytes of each
-            // KEY_SIZE-byte key are already big-endian from our normalized format.
-            // We need to reinterpret as big-endian uint64. Use a kernel:
-            extract_uint64_from_keys_kernel<<<nb, nt, 0, streams[0]>>>(
-                reinterpret_cast<uint8_t*>(d_prefix_keys), d_prefix_keys, num_records);
-            // Wait, this reads from d_prefix_keys at KEY_SIZE stride but data is at 8B stride.
-            // Need a special kernel. Actually, we can just byte-swap in-place:
-        }
-
-        // Simpler: extract uint64 directly from h_data (first 8 bytes of each record)
-        // using the extract_sort_keys_kernel which reads at RECORD_SIZE stride
-        // Upload to a temp buffer at RECORD_SIZE stride... no, that's the full records.
-        //
-        // Cleanest: use a kernel that reads 8 bytes at 8-byte stride (the DMA output)
-        // and converts to big-endian uint64.
-
-        // Actually, the DMA wrote bytes [0:8) of each key at pitch=8. That IS the
-        // big-endian uint64 encoding. On a little-endian GPU, we need byte-swap.
-        // The extract_sort_keys_kernel does this from RECORD_SIZE stride.
-        // Let me just upload the first 8 bytes raw and byte-swap on GPU:
-
-        // Forget the DMA approach — just do CPU extraction of 8B prefix into pinned buffer
+        // CPU extraction of 8B prefix into pinned buffer (big-endian uint64)
         uint64_t* h_prefix;
+        r.pcie_h2d_gb = prefix_bytes / 1e9;
         CUDA_CHECK(cudaMallocHost(&h_prefix, prefix_bytes));
         {
             int nt = std::min(48, (int)std::thread::hardware_concurrency());
