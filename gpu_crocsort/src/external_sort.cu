@@ -249,6 +249,38 @@ __global__ void extract_keys_kernel(
     for (int b = 0; b < KEY_SIZE; b++) dst[b] = src[b];
 }
 
+// Extract all KEY_SIZE bytes from records into packed key buffer (for LSD)
+__global__ void extract_all_keys_kernel(
+    const uint8_t* __restrict__ records,
+    uint8_t* __restrict__ packed_keys,
+    uint64_t num_records
+) {
+    uint64_t i = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= num_records) return;
+    const uint8_t* src = records + i * RECORD_SIZE;
+    uint8_t* dst = packed_keys + i * KEY_SIZE;
+    for (int b = 0; b < KEY_SIZE; b++) dst[b] = src[b];
+}
+
+// Extract uint64 from packed key buffer at KEY_SIZE stride (for LSD passes 2+)
+__global__ void extract_uint64_from_packed_keys_kernel(
+    const uint8_t* __restrict__ packed_keys,
+    const uint32_t* __restrict__ perm,
+    uint64_t* __restrict__ sort_keys,
+    uint64_t num_records,
+    int byte_offset,
+    int chunk_bytes
+) {
+    uint64_t i = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= num_records) return;
+    uint32_t orig_idx = perm[i];
+    const uint8_t* k = packed_keys + (uint64_t)orig_idx * KEY_SIZE + byte_offset;
+    uint64_t v = 0;
+    for (int b = 0; b < chunk_bytes; b++) v = (v << 8) | k[b];
+    v <<= (8 - chunk_bytes) * 8;
+    sort_keys[i] = v;
+}
+
 // Pre-allocated workspace for sort_chunk_on_gpu (allocated once, reused per chunk)
 struct SortWorkspace {
     // CUB radix sort workspace
@@ -256,6 +288,7 @@ struct SortWorkspace {
     uint64_t* d_keys_alt = nullptr;
     uint32_t* d_indices = nullptr;
     uint32_t* d_indices_alt = nullptr;
+    uint8_t*  d_packed_keys = nullptr;  // For large KEY_SIZE: packed key buffer
     uint64_t capacity = 0;
 
     void allocate(uint64_t max_records) {
@@ -266,12 +299,20 @@ struct SortWorkspace {
         CUDA_CHECK(cudaMalloc(&d_keys_alt, max_records * sizeof(uint64_t)));
         CUDA_CHECK(cudaMalloc(&d_indices, max_records * sizeof(uint32_t)));
         CUDA_CHECK(cudaMalloc(&d_indices_alt, max_records * sizeof(uint32_t)));
+        // For large keys: allocate packed key buffer if KEY_SIZE > 8
+        if (KEY_SIZE > 8) {
+            cudaError_t err = cudaMalloc(&d_packed_keys, max_records * KEY_SIZE);
+            if (err != cudaSuccess) {
+                d_packed_keys = nullptr;  // Fallback to reading from records
+            }
+        }
     }
     void free() {
         if (d_keys) { cudaFree(d_keys); d_keys = nullptr; }
         if (d_keys_alt) { cudaFree(d_keys_alt); d_keys_alt = nullptr; }
         if (d_indices) { cudaFree(d_indices); d_indices = nullptr; }
         if (d_indices_alt) { cudaFree(d_indices_alt); d_indices_alt = nullptr; }
+        if (d_packed_keys) { cudaFree(d_packed_keys); d_packed_keys = nullptr; }
         capacity = 0;
     }
 };
@@ -380,14 +421,27 @@ void ExternalGpuSort::sort_chunk_on_gpu(uint8_t* d_in, uint8_t* d_scratch,
     uint32_t* perm_in = sort_ws.d_indices;
     uint32_t* perm_out = sort_ws.d_indices_alt;
 
+    // For large keys: extract all keys into packed buffer first (one pass over
+    // records at RECORD_SIZE stride), then all LSD passes read from packed keys
+    // at KEY_SIZE stride (better locality, especially for non-identity permutations)
+    bool use_packed = (sort_ws.d_packed_keys != nullptr && KEY_SIZE > 8);
+    if (use_packed) {
+        extract_all_keys_kernel<<<nblks, nthreads, 0, s>>>(d_in, sort_ws.d_packed_keys, n);
+    }
+
     for (int chunk = num_chunks - 1; chunk >= 0; chunk--) {
         int byte_offset = chunk * 8;
         int chunk_bytes = std::min(8, KEY_SIZE - byte_offset);
 
-        // Extract 8 bytes from the key at byte_offset, using permutation order
-        // Read from d_in at RECORD_SIZE stride (records, not packed keys)
-        extract_uint64_from_records_kernel<<<nblks, nthreads, 0, s>>>(
-            d_in, perm_in, sort_ws.d_keys, n, byte_offset, chunk_bytes);
+        if (use_packed) {
+            // Read from packed key buffer at KEY_SIZE stride (better cache)
+            extract_uint64_from_packed_keys_kernel<<<nblks, nthreads, 0, s>>>(
+                sort_ws.d_packed_keys, perm_in, sort_ws.d_keys, n, byte_offset, chunk_bytes);
+        } else {
+            // Fallback: read from records at RECORD_SIZE stride
+            extract_uint64_from_records_kernel<<<nblks, nthreads, 0, s>>>(
+                d_in, perm_in, sort_ws.d_keys, n, byte_offset, chunk_bytes);
+        }
 
         cub::DoubleBuffer<uint64_t> keys_buf(sort_ws.d_keys, sort_ws.d_keys_alt);
         cub::DoubleBuffer<uint32_t> idx_buf(perm_in, perm_out);
