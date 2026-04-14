@@ -1436,13 +1436,18 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
         CUDA_CHECK(cudaMalloc(&d_perm_alt, num_records * sizeof(uint32_t)));
 
         // CUB temp storage (query max of all three passes)
-        size_t cub_temp1 = 0, cub_temp2 = 0, cub_temp3 = 0;
-        cub::DeviceRadixSort::SortPairs(nullptr, cub_temp1,
-            (uint32_t*)nullptr, (uint32_t*)nullptr, (int)num_records, 0, 32);
-        cub::DeviceRadixSort::SortPairs(nullptr, cub_temp2,
-            (uint64_t*)nullptr, (uint64_t*)nullptr, (int)num_records, 0, 64);
-        cub_temp3 = cub_temp2;
-        size_t max_temp = std::max({cub_temp1, cub_temp2, cub_temp3});
+        size_t cub_temp1 = 0, cub_temp2 = 0;
+        {
+            cub::DoubleBuffer<uint32_t> k32(nullptr,nullptr);
+            cub::DoubleBuffer<uint32_t> v32(nullptr,nullptr);
+            cub::DeviceRadixSort::SortPairs(nullptr, cub_temp1, k32, v32, (int)num_records, 0, 32);
+        }
+        {
+            cub::DoubleBuffer<uint64_t> k64(nullptr,nullptr);
+            cub::DoubleBuffer<uint32_t> v32(nullptr,nullptr);
+            cub::DeviceRadixSort::SortPairs(nullptr, cub_temp2, k64, v32, (int)num_records, 0, 64);
+        }
+        size_t max_temp = std::max(cub_temp1, cub_temp2);
         void* d_cub_temp;
         CUDA_CHECK(cudaMalloc(&d_cub_temp, max_temp));
 
