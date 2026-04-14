@@ -343,6 +343,18 @@ __global__ void extract_dual_prefix_kernel(
     prefix2[i] = v2;
 }
 
+// Simple gather kernels for reordering satellite arrays during LSD merge
+__global__ void gather_uint64_kernel(const uint64_t* src, const uint32_t* idx,
+                                      uint64_t* dst, uint64_t n) {
+    uint64_t i = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) dst[i] = src[idx[i]];
+}
+__global__ void gather_uint32_kernel(const uint32_t* src, const uint32_t* idx,
+                                      uint32_t* dst, uint64_t n) {
+    uint64_t i = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) dst[i] = src[idx[i]];
+}
+
 // Extract uint64 from records at RECORD_SIZE stride (for in-chunk LSD sort)
 __global__ void extract_uint64_from_records_kernel(
     const uint8_t* __restrict__ records,
@@ -1485,18 +1497,20 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
         int nthreads2 = 256;
         int nblks2 = (num_records + nthreads2 - 1) / nthreads2;
 
-        // TWO CUB LSD passes for 16B prefix sort:
-        // Pass 1: sort by prefix2 (bytes 8-15, less significant)
-        // Pass 2: sort by prefix1 (bytes 0-7, most significant)
-        // After pass 2: records sorted by 16B prefix. Ties ~965K groups of ~621 avg.
+        // TWO CUB LSD passes for 16B prefix sort.
+        // Key trick: each pass sorts (key, local_index), then gathers ALL satellites
+        // using the local_index. This solves the "CUB carries only one value" problem.
         //
-        // Memory management: after pass 1, free d_ovc_buffer (prefix2) to make room
-        // for the gather buffer needed to reorder prefix1.
+        // Memory: d_prefix_buffer (4.8GB), d_ovc_buffer (4.8GB), d_global_perm (2.4GB)
+        //         = 12GB persistent. Need: 1 alt uint64 (4.8GB) + 1 alt uint32 (2.4GB)
+        //         + CUB temp (0.5GB) = 7.7GB. Total: 19.7GB < 25GB. Fits!
 
         uint64_t* d_pfx_alt2;
-        uint32_t* d_perm_alt2;
+        uint32_t* d_idx_buf;  // identity index for tracking sort permutation
+        uint32_t* d_idx_alt;
         CUDA_CHECK(cudaMalloc(&d_pfx_alt2, num_records * sizeof(uint64_t)));
-        CUDA_CHECK(cudaMalloc(&d_perm_alt2, num_records * sizeof(uint32_t)));
+        CUDA_CHECK(cudaMalloc(&d_idx_buf, num_records * sizeof(uint32_t)));
+        CUDA_CHECK(cudaMalloc(&d_idx_alt, num_records * sizeof(uint32_t)));
 
         size_t cub_merge_temp = 0;
         {
@@ -1507,90 +1521,50 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
         void* d_cub_merge_temp;
         CUDA_CHECK(cudaMalloc(&d_cub_merge_temp, cub_merge_temp));
 
-        // LSD Pass 1: Sort by prefix2 (bytes 8-15), carry global_perm
+        int nblks_m = (num_records + 255) / 256;
+
+        // LSD Pass 1: Sort by prefix2 (bytes 8-15, less significant)
+        // Sort (key=prefix2, val=identity_index). Then gather prefix1 and perm using index.
+        init_identity_kernel<<<nblks_m, 256>>>(d_idx_buf, num_records);
         {
             cub::DoubleBuffer<uint64_t> key_buf(d_ovc_buffer, d_pfx_alt2);
-            cub::DoubleBuffer<uint32_t> val_buf(d_global_perm, d_perm_alt2);
+            cub::DoubleBuffer<uint32_t> val_buf(d_idx_buf, d_idx_alt);
             size_t temp = cub_merge_temp;
             cub::DeviceRadixSort::SortPairs(d_cub_merge_temp, temp,
                 key_buf, val_buf, (int)num_records, 0, 64);
-            d_ovc_buffer = key_buf.Current();
-            d_global_perm = val_buf.Current();
-            d_perm_alt2 = val_buf.Alternate();
+            d_idx_buf = val_buf.Current();
+            d_idx_alt = val_buf.Alternate();
+        }
+        // Gather prefix1 and global_perm using the sorted index
+        // Reuse d_ovc_buffer (sorted prefix2, no longer needed) as temp for gather
+        {
+            // Gather prefix1: d_pfx_alt2[i] = d_prefix_buffer[d_idx_buf[i]]
+            gather_uint64_kernel<<<nblks_m, 256>>>(d_prefix_buffer, d_idx_buf, d_pfx_alt2, num_records);
+            std::swap(d_prefix_buffer, d_pfx_alt2);
+            // Gather perm: d_idx_alt[i] = d_global_perm[d_idx_buf[i]]
+            gather_uint32_kernel<<<nblks_m, 256>>>(d_global_perm, d_idx_buf, d_idx_alt, num_records);
+            std::swap(d_global_perm, d_idx_alt);
         }
         CUDA_CHECK(cudaDeviceSynchronize());
         double pass1_ms = merge_timer.end_ms();
-        printf("  Pass 1 (sort by bytes 8-15): %.0f ms\n", pass1_ms);
+        printf("  Pass 1 (sort by bytes 8-15 + gather): %.0f ms\n", pass1_ms);
 
-        // Reorder prefix1 to match the pass-1 order.
-        // Use d_pfx_alt2 as temp: gather prefix1 using the sorted index.
-        // CUB sort re-ordered val_buf (perm). We need the same reorder on prefix1.
-        // Since CUB SortPairs internally permutes (key,val) together, and we lost
-        // the mapping, we use the result perm to gather prefix1.
-        //
-        // Actually, CUB SortPairs(key=prefix2, val=perm) gives us perm sorted by prefix2.
-        // prefix1 is NOT reordered. We need prefix1 reordered to match.
-        // The d_global_perm array IS the new order: d_global_perm[i] = original global idx.
-        // But we can't use d_global_perm to gather prefix1 because prefix1 is indexed by
-        // RUN POSITION (the same order as the pre-sort layout), not by global idx.
-        //
-        // SIMPLER: Before CUB pass 1, compute a local index (0..N-1) and carry it as value
-        // instead of d_global_perm. After CUB, use the local index to gather both
-        // prefix1 AND d_global_perm.
-        //
-        // But we need d_global_perm in the output... Let me rethink.
-
-        // APPROACH: Each LSD pass sorts (key, index) where index is an identity.
-        // After each pass, gather ALL satellite arrays using the sorted index.
-        // This requires an extra uint32 index array.
-        //
-        // But we're tight on memory. Let me just carry perm in pass 1,
-        // then rebuild prefix1 order using a scatter/gather.
-
-        // We know: after pass 1, d_ovc_buffer has sorted prefix2 values,
-        // and d_global_perm has the corresponding global perm entries.
-        // But d_prefix_buffer (prefix1) is in the ORIGINAL order.
-        // We need prefix1 reordered to match the pass-1 output order.
-        //
-        // The relationship: pass-1 output[i] came from input position j,
-        // where j is unknown (CUB doesn't expose the internal permutation).
-        //
-        // SOLUTION: In pass 1, sort (key=prefix2, val=local_index) where
-        // local_index = identity(0..N-1). Then use local_index to gather
-        // prefix1 and global_perm.
-
-        // OK let me redo pass 1 with an identity index as value:
-        // ... this is getting complex. Let me take a totally different approach.
-
-        // CLEANEST: free prefix2 (d_ovc_buffer), then do a SINGLE CUB pass
-        // sorting by prefix1, carrying perm. Then CPU fixup on 8B groups (3,817 groups).
-        // But that's what we already tried — 31s fixup.
-
-        // The issue is that CUB SortPairs can only carry ONE satellite array.
-        // For LSD with 3 satellites (prefix1, prefix2, perm), we need a way to
-        // reorder all 3 together.
-
-        // PRAGMATIC FIX: Just accept the 8B prefix + CPU fixup, but optimize
-        // the fixup itself. Instead of std::sort on 157K-record groups (O(N log N)),
-        // use a MULTI-THREADED merge-path sort within each group.
-
-        // For now: single pass on prefix1, CPU fixup with parallel std::sort.
-        // The fixup should be ~5s with proper parallelism (not 31s).
-
-        // Pass: Sort by prefix1 (bytes 0-7)
+        // LSD Pass 2: Sort by prefix1 (bytes 0-7, most significant)
         merge_timer.begin();
         {
             cub::DoubleBuffer<uint64_t> key_buf(d_prefix_buffer, d_pfx_alt2);
-            cub::DoubleBuffer<uint32_t> val_buf(d_global_perm, d_perm_alt2);
+            cub::DoubleBuffer<uint32_t> val_buf(d_global_perm, d_idx_alt);
             size_t temp = cub_merge_temp;
             cub::DeviceRadixSort::SortPairs(d_cub_merge_temp, temp,
                 key_buf, val_buf, (int)num_records, 0, 64);
             d_global_perm = val_buf.Current();
         }
         CUDA_CHECK(cudaDeviceSynchronize());
-        double merge_ms = pass1_ms + merge_timer.end_ms();
-        printf("  Sort by 8B prefix: %.0f ms (total GPU merge: %.0f ms)\n",
-               merge_timer.end_ms(), merge_ms);
+        double pass2_ms = merge_timer.end_ms();
+        printf("  Pass 2 (sort by bytes 0-7): %.0f ms\n", pass2_ms);
+
+        double merge_ms = pass1_ms + pass2_ms;
+        printf("  GPU 16B prefix merge: %.0f ms (2 LSD passes)\n", merge_ms);
 
         // Download final permutation
         phase_timer.begin();
@@ -1603,7 +1577,8 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
         cudaFree(d_prefix_buffer); d_prefix_buffer = nullptr;
         cudaFree(d_ovc_buffer); d_ovc_buffer = nullptr;
         cudaFree(d_global_perm); d_global_perm = nullptr;
-        cudaFree(d_pfx_alt2); cudaFree(d_perm_alt2); cudaFree(d_cub_merge_temp);
+        cudaFree(d_pfx_alt2); cudaFree(d_idx_buf); cudaFree(d_idx_alt);
+        cudaFree(d_cub_merge_temp);
 
         // CPU gather: apply permutation to original h_data
         phase_timer.begin();
@@ -1637,12 +1612,13 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
         printf("== Phase 4: CPU Prefix Fixup ==\n");
         {
             int hw = std::max(1, (int)std::thread::hardware_concurrency());
-            // Find groups of equal 8B prefixes (GPU sorted by 8B only!)
+            // Find groups of equal 16B prefixes (GPU sorted by 16B via 2 LSD passes)
             std::vector<std::pair<uint64_t, uint64_t>> groups;
             uint64_t gs = 0;
+            int cmp_bytes = std::min(16, (int)KEY_SIZE);
             for (uint64_t i = 1; i <= num_records; i++) {
                 if (i == num_records ||
-                    memcmp(h_output + i * RECORD_SIZE, h_output + gs * RECORD_SIZE, 8) != 0) {
+                    memcmp(h_output + i * RECORD_SIZE, h_output + gs * RECORD_SIZE, cmp_bytes) != 0) {
                     if (i - gs > 1) groups.push_back({gs, i - gs});
                     gs = i;
                 }
