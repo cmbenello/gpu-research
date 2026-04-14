@@ -1,0 +1,16 @@
+CUDA error at src/external_sort.cu:1922: out of memory
+════════════════════════════════════════════════════
+  GPU External Merge Sort — Streaming Benchmark
+════════════════════════════════════════════════════
+GPU: Quadro RTX 6000 (25.4 GB HBM, 72 SMs, 672 GB/s BW)
+Data: 80.00 GB (800000000 records × 100 bytes) (random)
+
+Allocating 80.00 GB pinned host memory...
+Generating random data...
+  Generated in 121477 ms
+
+[ExternalSort] GPU: 25.06 GB free, budget: 16.29 GB
+[ExternalSort] Triple-buffer: 3 × 5.43 GB (54 M records each)
+[ExternalSort] Sorting 800000000 records (80.00 GB)
+
+== Step 1+2: Key Upload ==

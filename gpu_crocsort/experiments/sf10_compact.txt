@@ -1,0 +1,109 @@
+════════════════════════════════════════════════════
+  GPU External Merge Sort — Streaming Benchmark
+════════════════════════════════════════════════════
+GPU: Quadro RTX 6000 (25.4 GB HBM, 72 SMs, 672 GB/s BW)
+Data: 7.20 GB (59986052 records × 120 bytes) (from file)
+
+Allocating 7.20 GB pinned host memory...
+Loading from /tmp/lineitem_sf10_normalized.bin...
+  Loaded 7.20 GB in 18519 ms (0.39 GB/s)
+
+
+══════════ Experiment run 1/3 ══════════
+[ExternalSort] GPU: 25.20 GB free, budget: 16.38 GB
+[ExternalSort] Triple-buffer: 3 × 5.46 GB (46 M records each)
+[ExternalSort] Sorting 59986052 records (7.20 GB)
+
+== Step 1+2: Key Upload ==
+  Uploaded 3.96 GB keys (strided, GPU-direct) in 32 ms (225.36 GB/s effective)
+== Step 3: GPU CUB Radix Sort ==
+  LSD sort: 9 passes for 66-byte key
+    Pass 1 (bytes 64-65): 0.0 ms
+    Pass 2 (bytes 56-63): 0.0 ms
+    Pass 3 (bytes 48-55): 0.0 ms
+    Pass 4 (bytes 40-47): 0.0 ms
+    Pass 5 (bytes 32-39): 0.0 ms
+    Pass 6 (bytes 24-31): 0.0 ms
+    Pass 7 (bytes 16-23): 0.0 ms
+    Pass 8 (bytes 8-15): 0.0 ms
+    Pass 9 (bytes 0-7): 0.0 ms
+  Sorted 59986052 keys in 951 ms
+== Step 4: Download Permutation ==
+  Downloaded 0.24 GB perm in 21 ms
+== Step 5: CPU Gather ==
+  Gathered 7.20 GB in 206 ms (34.88 GB/s)
+
+[ExternalSort] ═══════════════════════════════════════
+  DONE: 1210 ms (gen: 1004 + merge: 206)
+  Throughput: 5.95 GB/s
+  Runs: 1 | Merge passes: 1
+  PCIe: 4.0 GB H2D + 0.2 GB D2H = 4.2 GB total (0.6x amplification)
+═══════════════════════════════════════════════════════
+
+CSV,Quadro RTX 6000,7.20,59986052,1,1,1003.58,206.40,1209.97,5.9492,3.96,0.24,4.20,0.6
+
+══════════ Experiment run 2/3 ══════════
+[ExternalSort] GPU: 25.20 GB free, budget: 16.38 GB
+[ExternalSort] Triple-buffer: 3 × 5.46 GB (46 M records each)
+[ExternalSort] Sorting 59986052 records (7.20 GB)
+
+== Step 1+2: Key Upload ==
+  Uploaded 3.96 GB keys (strided, GPU-direct) in 13 ms (534.49 GB/s effective)
+== Step 3: GPU CUB Radix Sort ==
+  LSD sort: 9 passes for 66-byte key
+    Pass 1 (bytes 64-65): 0.0 ms
+    Pass 2 (bytes 56-63): 0.0 ms
+    Pass 3 (bytes 48-55): 0.0 ms
+    Pass 4 (bytes 40-47): 0.0 ms
+    Pass 5 (bytes 32-39): 0.0 ms
+    Pass 6 (bytes 24-31): 0.0 ms
+    Pass 7 (bytes 16-23): 0.0 ms
+    Pass 8 (bytes 8-15): 0.0 ms
+    Pass 9 (bytes 0-7): 0.0 ms
+  Sorted 59986052 keys in 936 ms
+== Step 4: Download Permutation ==
+  Downloaded 0.24 GB perm in 21 ms
+== Step 5: CPU Gather ==
+  Gathered 7.20 GB in 221 ms (32.63 GB/s)
+
+[ExternalSort] ═══════════════════════════════════════
+  DONE: 1191 ms (gen: 970 + merge: 221)
+  Throughput: 6.04 GB/s
+  Runs: 1 | Merge passes: 1
+  PCIe: 4.0 GB H2D + 0.2 GB D2H = 4.2 GB total (0.6x amplification)
+═══════════════════════════════════════════════════════
+
+CSV,Quadro RTX 6000,7.20,59986052,1,1,970.47,220.58,1191.05,6.0437,3.96,0.24,4.20,0.6
+
+══════════ Experiment run 3/3 ══════════
+[ExternalSort] GPU: 25.20 GB free, budget: 16.38 GB
+[ExternalSort] Triple-buffer: 3 × 5.46 GB (46 M records each)
+[ExternalSort] Sorting 59986052 records (7.20 GB)
+
+== Step 1+2: Key Upload ==
+  Uploaded 3.96 GB keys (strided, GPU-direct) in 13 ms (534.81 GB/s effective)
+== Step 3: GPU CUB Radix Sort ==
+  LSD sort: 9 passes for 66-byte key
+    Pass 1 (bytes 64-65): 0.0 ms
+    Pass 2 (bytes 56-63): 0.0 ms
+    Pass 3 (bytes 48-55): 0.0 ms
+    Pass 4 (bytes 40-47): 0.0 ms
+    Pass 5 (bytes 32-39): 0.0 ms
+    Pass 6 (bytes 24-31): 0.0 ms
+    Pass 7 (bytes 16-23): 0.0 ms
+    Pass 8 (bytes 8-15): 0.0 ms
+    Pass 9 (bytes 0-7): 0.0 ms
+  Sorted 59986052 keys in 941 ms
+== Step 4: Download Permutation ==
+  Downloaded 0.24 GB perm in 21 ms
+== Step 5: CPU Gather ==
+  Gathered 7.20 GB in 216 ms (33.27 GB/s)
+
+[ExternalSort] ═══════════════════════════════════════
+  DONE: 1192 ms (gen: 975 + merge: 216)
+  Throughput: 6.04 GB/s
+  Runs: 1 | Merge passes: 1
+  PCIe: 4.0 GB H2D + 0.2 GB D2H = 4.2 GB total (0.6x amplification)
+═══════════════════════════════════════════════════════
+
+CSV,Quadro RTX 6000,7.20,59986052,1,1,975.29,216.35,1191.64,6.0407,3.96,0.24,4.20,0.6

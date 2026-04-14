@@ -1,0 +1,70 @@
+════════════════════════════════════════════════════
+  GPU External Merge Sort — Streaming Benchmark
+════════════════════════════════════════════════════
+GPU: Quadro RTX 6000 (25.4 GB HBM, 72 SMs, 672 GB/s BW)
+Data: 72.00 GB (600037902 records × 120 bytes) (from file)
+
+Allocating 72.00 GB pinned host memory...
+Loading from /tmp/lineitem_sf100_normalized.bin...
+  Loaded 72.00 GB in 183097 ms (0.39 GB/s)
+
+
+══════════ Experiment run 1/2 ══════════
+[ExternalSort] GPU: 25.07 GB free, budget: 16.30 GB
+[ExternalSort] Triple-buffer: 3 × 5.43 GB (45 M records each)
+[ExternalSort] Sorting 600037902 records (72.00 GB)
+
+== Step 1+2: Key Upload ==
+  Keys too large for single-pass (39.6 GB > 22.5 GB)
+  Using OVC ARCHITECTURE: run-gen + GPU OVC merge + CPU gather
+  OVC buffers: 12.0 GB (4B OVC + 8B prefix + 4B perm per record)
+  Reduced triple-buffer: 3 × 3.91 GB (33 M records each)
+
+== Phase 1: Run Generation (chunked LSD sort) ==
+  Run 1/19: 3730.0 MB sorted      Run 2/19: 3730.0 MB sorted      Run 3/19: 3730.0 MB sorted      Run 4/19: 3730.0 MB sorted      Run 5/19: 3730.0 MB sorted      Run 6/19: 3730.0 MB sorted      Run 7/19: 3730.0 MB sorted      Run 8/19: 3730.0 MB sorted      Run 9/19: 3730.0 MB sorted      Run 10/19: 3730.0 MB sorted      Run 11/19: 3730.0 MB sorted      Run 12/19: 3730.0 MB sorted      Run 13/19: 3730.0 MB sorted      Run 14/19: 3730.0 MB sorted      Run 15/19: 3730.0 MB sorted      Run 16/19: 3730.0 MB sorted      Run 17/19: 3730.0 MB sorted      Run 18/19: 3730.0 MB sorted      Run 19/19: 1528.7 MB sorted    
+  19 runs in 5937 ms (12.13 GB/s)
+
+== Phase 2: GPU 16B Prefix Merge (2 CUB LSD passes) ==
+  GPU free before merge alloc: 13.04 GB
+  GPU free after merge alloc: 3.43 GB
+  Pass 1 (sort by pfx2 + gather): 9 ms
+  GPU 16B tie check: NO TIES — fixup skipped
+  Pass 2 (sort by pfx1): 0 ms
+  GPU 16B prefix merge total: 9 ms
+  Downloaded perm in 183 ms
+== Phase 3: CPU Gather ==
+  Gathered 72.00 GB in 1717 ms (41.93 GB/s)
+== Phase 4: CPU Fixup (skipped — no pfx1 ties) ==
+  Total merge+gather+fixup: 1908 ms
+
+CSV,Quadro RTX 6000,72.00,600037902,19,2,5936.98,1908.42,7845.41,9.1779,72.00,2.40,74.40,1.0
+
+══════════ Experiment run 2/2 ══════════
+[ExternalSort] GPU: 25.07 GB free, budget: 16.29 GB
+[ExternalSort] Triple-buffer: 3 × 5.43 GB (45 M records each)
+[ExternalSort] Sorting 600037902 records (72.00 GB)
+
+== Step 1+2: Key Upload ==
+  Keys too large for single-pass (39.6 GB > 22.5 GB)
+  Using OVC ARCHITECTURE: run-gen + GPU OVC merge + CPU gather
+  OVC buffers: 12.0 GB (4B OVC + 8B prefix + 4B perm per record)
+  Reduced triple-buffer: 3 × 3.91 GB (33 M records each)
+
+== Phase 1: Run Generation (chunked LSD sort) ==
+  Run 1/19: 3728.2 MB sorted      Run 2/19: 3728.2 MB sorted      Run 3/19: 3728.2 MB sorted      Run 4/19: 3728.2 MB sorted      Run 5/19: 3728.2 MB sorted      Run 6/19: 3728.2 MB sorted      Run 7/19: 3728.2 MB sorted      Run 8/19: 3728.2 MB sorted      Run 9/19: 3728.2 MB sorted      Run 10/19: 3728.2 MB sorted      Run 11/19: 3728.2 MB sorted      Run 12/19: 3728.2 MB sorted      Run 13/19: 3728.2 MB sorted      Run 14/19: 3728.2 MB sorted      Run 15/19: 3728.2 MB sorted      Run 16/19: 3728.2 MB sorted      Run 17/19: 3728.2 MB sorted      Run 18/19: 3728.2 MB sorted      Run 19/19: 1561.1 MB sorted    
+  19 runs in 5936 ms (12.13 GB/s)
+
+== Phase 2: GPU 16B Prefix Merge (2 CUB LSD passes) ==
+  GPU free before merge alloc: 13.03 GB
+  GPU free after merge alloc: 3.43 GB
+  Pass 1 (sort by pfx2 + gather): 9 ms
+  GPU 16B tie check: NO TIES — fixup skipped
+  Pass 2 (sort by pfx1): 0 ms
+  GPU 16B prefix merge total: 9 ms
+  Downloaded perm in 189 ms
+== Phase 3: CPU Gather ==
+  Gathered 72.00 GB in 2045 ms (35.20 GB/s)
+== Phase 4: CPU Fixup (skipped — no pfx1 ties) ==
+  Total merge+gather+fixup: 2243 ms
+
+CSV,Quadro RTX 6000,72.00,600037902,19,2,5936.01,2242.90,8178.91,8.8037,72.00,2.40,74.40,1.0

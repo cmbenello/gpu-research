@@ -1,0 +1,62 @@
+════════════════════════════════════════════════════
+  GPU External Merge Sort — Streaming Benchmark
+════════════════════════════════════════════════════
+GPU: Quadro RTX 6000 (25.4 GB HBM, 72 SMs, 672 GB/s BW)
+Data: 10.00 GB (100000000 records × 100 bytes) (random)
+
+Allocating 10.00 GB pinned host memory...
+Generating random data...
+  Generated in 15205 ms
+
+
+══════════ Experiment run 1/2 ══════════
+[ExternalSort] GPU: 25.20 GB free, budget: 16.38 GB
+[ExternalSort] Triple-buffer: 3 × 5.46 GB (55 M records each)
+[ExternalSort] Sorting 100000000 records (10.00 GB)
+
+== Step 1+2: Key Upload ==
+  Uploaded 1.00 GB keys (strided, GPU-direct) in 33 ms (302.15 GB/s effective)
+== Step 3: GPU CUB Radix Sort ==
+  LSD sort: 2 passes for 10-byte key
+    Pass 1 (bytes 8-9): 0.0 ms
+    Pass 2 (bytes 0-7): 0.0 ms
+  Sorted 100000000 keys in 842 ms
+== Step 4: Download Permutation ==
+  Downloaded 0.40 GB perm in 32 ms
+== Step 5: CPU Gather ==
+  Gathered 10.00 GB in 332 ms (30.11 GB/s)
+
+[ExternalSort] ═══════════════════════════════════════
+  DONE: 1239 ms (gen: 907 + merge: 332)
+  Throughput: 8.07 GB/s
+  Runs: 1 | Merge passes: 1
+  PCIe: 1.0 GB H2D + 0.4 GB D2H = 1.4 GB total (0.1x amplification)
+═══════════════════════════════════════════════════════
+
+CSV,Quadro RTX 6000,10.00,100000000,1,1,906.63,332.15,1238.77,8.0725,1.00,0.40,1.40,0.1
+
+══════════ Experiment run 2/2 ══════════
+[ExternalSort] GPU: 25.20 GB free, budget: 16.38 GB
+[ExternalSort] Triple-buffer: 3 × 5.46 GB (55 M records each)
+[ExternalSort] Sorting 100000000 records (10.00 GB)
+
+== Step 1+2: Key Upload ==
+  Uploaded 1.00 GB keys (strided, GPU-direct) in 14 ms (733.63 GB/s effective)
+== Step 3: GPU CUB Radix Sort ==
+  LSD sort: 2 passes for 10-byte key
+    Pass 1 (bytes 8-9): 0.0 ms
+    Pass 2 (bytes 0-7): 0.0 ms
+  Sorted 100000000 keys in 830 ms
+== Step 4: Download Permutation ==
+  Downloaded 0.40 GB perm in 32 ms
+== Step 5: CPU Gather ==
+  Gathered 10.00 GB in 327 ms (30.57 GB/s)
+
+[ExternalSort] ═══════════════════════════════════════
+  DONE: 1203 ms (gen: 876 + merge: 327)
+  Throughput: 8.31 GB/s
+  Runs: 1 | Merge passes: 1
+  PCIe: 1.0 GB H2D + 0.4 GB D2H = 1.4 GB total (0.1x amplification)
+═══════════════════════════════════════════════════════
+
+CSV,Quadro RTX 6000,10.00,100000000,1,1,875.70,327.08,1202.78,8.3141,1.00,0.40,1.40,0.1

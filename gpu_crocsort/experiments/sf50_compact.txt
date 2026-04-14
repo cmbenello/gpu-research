@@ -1,0 +1,100 @@
+════════════════════════════════════════════════════
+  GPU External Merge Sort — Streaming Benchmark
+════════════════════════════════════════════════════
+GPU: Quadro RTX 6000 (25.4 GB HBM, 72 SMs, 672 GB/s BW)
+Data: 36.00 GB (300005811 records × 120 bytes) (from file)
+
+Allocating 36.00 GB pinned host memory...
+Loading from /tmp/lineitem_sf50_normalized.bin...
+  Loaded 36.00 GB in 91240 ms (0.39 GB/s)
+
+
+══════════ Experiment run 1/3 ══════════
+[ExternalSort] GPU: 25.15 GB free, budget: 16.35 GB
+[ExternalSort] Triple-buffer: 3 × 5.45 GB (45 M records each)
+[ExternalSort] Sorting 300005811 records (36.00 GB)
+
+== Step 1+2: Key Upload ==
+  Keys too large for single-pass (19.8 GB > 22.6 GB)
+  Using OVC ARCHITECTURE: run-gen + GPU OVC merge + CPU gather
+  OVC buffers: 6.0 GB (4B OVC + 8B prefix + 4B perm per record)
+  COMPACT UPLOAD: 170M rec/chunk, 2 chunks, PCIe 9.6 GB (vs 36.0 GB full), CUB scratch 134 MB
+
+== Phase 1: Run Generation (chunked LSD sort) ==
+  Run 1/2: 19484.9 MB (compact upload 5196.0 MB)      Run 2/2: 14848.1 MB (compact upload 3959.5 MB)    
+  2 runs in 1287 ms (27.97 GB/s)
+
+== Phase 2: GPU 16B Prefix Merge (2 CUB LSD passes) ==
+  GPU free before merge alloc: 19.11 GB
+  GPU free after merge alloc: 14.30 GB
+  Pass 1 (sort by pfx2 + gather): 5 ms
+  GPU 16B tie check: NO TIES — fixup skipped
+  Pass 2 (sort by pfx1): 0 ms
+  GPU 16B prefix merge total: 5 ms
+  Downloaded perm in 91 ms
+== Phase 3: CPU Gather ==
+  Gathered 36.00 GB in 1297 ms (27.76 GB/s)
+== Phase 4: CPU Fixup (skipped — no pfx1 ties) ==
+  Total merge+gather+fixup: 1393 ms
+
+CSV,Quadro RTX 6000,36.00,300005811,2,2,1287.18,1392.92,2680.11,13.4326,9.60,1.20,10.80,0.3
+
+══════════ Experiment run 2/3 ══════════
+[ExternalSort] GPU: 25.14 GB free, budget: 16.34 GB
+[ExternalSort] Triple-buffer: 3 × 5.45 GB (45 M records each)
+[ExternalSort] Sorting 300005811 records (36.00 GB)
+
+== Step 1+2: Key Upload ==
+  Keys too large for single-pass (19.8 GB > 22.6 GB)
+  Using OVC ARCHITECTURE: run-gen + GPU OVC merge + CPU gather
+  OVC buffers: 6.0 GB (4B OVC + 8B prefix + 4B perm per record)
+  COMPACT UPLOAD: 170M rec/chunk, 2 chunks, PCIe 9.6 GB (vs 36.0 GB full), CUB scratch 134 MB
+
+== Phase 1: Run Generation (chunked LSD sort) ==
+  Run 1/2: 19481.6 MB (compact upload 5195.1 MB)      Run 2/2: 14851.3 MB (compact upload 3960.4 MB)    
+  2 runs in 1326 ms (27.15 GB/s)
+
+== Phase 2: GPU 16B Prefix Merge (2 CUB LSD passes) ==
+  GPU free before merge alloc: 19.10 GB
+  GPU free after merge alloc: 14.30 GB
+  Pass 1 (sort by pfx2 + gather): 5 ms
+  GPU 16B tie check: NO TIES — fixup skipped
+  Pass 2 (sort by pfx1): 0 ms
+  GPU 16B prefix merge total: 5 ms
+  Downloaded perm in 91 ms
+== Phase 3: CPU Gather ==
+  Gathered 36.00 GB in 1273 ms (28.27 GB/s)
+== Phase 4: CPU Fixup (skipped — no pfx1 ties) ==
+  Total merge+gather+fixup: 1369 ms
+
+CSV,Quadro RTX 6000,36.00,300005811,2,2,1325.94,1369.39,2695.33,13.3567,9.60,1.20,10.80,0.3
+
+══════════ Experiment run 3/3 ══════════
+[ExternalSort] GPU: 25.14 GB free, budget: 16.34 GB
+[ExternalSort] Triple-buffer: 3 × 5.45 GB (45 M records each)
+[ExternalSort] Sorting 300005811 records (36.00 GB)
+
+== Step 1+2: Key Upload ==
+  Keys too large for single-pass (19.8 GB > 22.6 GB)
+  Using OVC ARCHITECTURE: run-gen + GPU OVC merge + CPU gather
+  OVC buffers: 6.0 GB (4B OVC + 8B prefix + 4B perm per record)
+  COMPACT UPLOAD: 170M rec/chunk, 2 chunks, PCIe 9.6 GB (vs 36.0 GB full), CUB scratch 134 MB
+
+== Phase 1: Run Generation (chunked LSD sort) ==
+  Run 1/2: 19478.4 MB (compact upload 5194.2 MB)      Run 2/2: 14854.6 MB (compact upload 3961.2 MB)    
+  2 runs in 1296 ms (27.78 GB/s)
+
+== Phase 2: GPU 16B Prefix Merge (2 CUB LSD passes) ==
+  GPU free before merge alloc: 19.10 GB
+  GPU free after merge alloc: 14.30 GB
+  Pass 1 (sort by pfx2 + gather): 5 ms
+  GPU 16B tie check: NO TIES — fixup skipped
+  Pass 2 (sort by pfx1): 0 ms
+  GPU 16B prefix merge total: 5 ms
+  Downloaded perm in 91 ms
+== Phase 3: CPU Gather ==
+  Gathered 36.00 GB in 1318 ms (27.31 GB/s)
+== Phase 4: CPU Fixup (skipped — no pfx1 ties) ==
+  Total merge+gather+fixup: 1415 ms
+
+CSV,Quadro RTX 6000,36.00,300005811,2,2,1296.10,1414.55,2710.65,13.2812,9.60,1.20,10.80,0.3
