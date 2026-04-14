@@ -317,31 +317,30 @@ __global__ void build_global_perm_kernel(
     global_perm[run_offset + i] = (uint32_t)(chunk_start + local_perm[i]);
 }
 
-// Combined OVC + prefix extraction via permutation (for OVC merge architecture)
-// For sorted position i: reads record[perm[i]], computes OVC vs record[perm[i-1]]
-__global__ void extract_ovc_and_prefix_kernel(
+// Extract 16B of key (two uint64 prefixes) via permutation for GPU prefix merge.
+// prefix1[i] = big-endian uint64 of bytes 0-7 of record[perm[i]]
+// prefix2[i] = big-endian uint64 of bytes 8-15 of record[perm[i]]
+__global__ void extract_dual_prefix_kernel(
     const uint8_t* __restrict__ records,
     const uint32_t* __restrict__ perm,
-    uint32_t* __restrict__ ovcs,
-    uint64_t* __restrict__ prefixes,
+    uint64_t* __restrict__ prefix1,   // bytes 0-7
+    uint64_t* __restrict__ prefix2,   // bytes 8-15
     uint64_t num_records
 ) {
     uint64_t i = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= num_records) return;
     uint32_t idx = perm[i];
     const uint8_t* k = records + (uint64_t)idx * RECORD_SIZE;
-    // Extract 8B big-endian prefix
-    uint64_t v = 0;
-    for (int b = 0; b < 8; b++) v = (v << 8) | k[b];
-    prefixes[i] = v;
-    // Compute OVC
-    if (i == 0) {
-        ovcs[i] = OVC_INITIAL;
-    } else {
-        uint32_t prev_idx = perm[i - 1];
-        const uint8_t* prev_k = records + (uint64_t)prev_idx * RECORD_SIZE;
-        ovcs[i] = ovc_compute_delta(prev_k, k, KEY_SIZE);
-    }
+    // Extract bytes 0-7
+    uint64_t v1 = 0;
+    for (int b = 0; b < 8; b++) v1 = (v1 << 8) | k[b];
+    prefix1[i] = v1;
+    // Extract bytes 8-15 (or up to KEY_SIZE)
+    uint64_t v2 = 0;
+    int end = (KEY_SIZE < 16) ? KEY_SIZE : 16;
+    for (int b = 8; b < end; b++) v2 = (v2 << 8) | k[b];
+    v2 <<= (8 - (end - 8)) * 8;  // left-align if fewer than 8 bytes
+    prefix2[i] = v2;
 }
 
 // Extract uint64 from records at RECORD_SIZE stride (for in-chunk LSD sort)
@@ -493,12 +492,12 @@ class ExternalGpuSort {
     uint64_t key_buffer_capacity;
     std::vector<uint64_t> run_key_offsets;
 
-    // OVC merge buffers (for large-key path: persistent across run gen)
-    uint32_t* d_ovc_buffer;        // 4B OVC per record
-    uint64_t* d_prefix_buffer;     // 8B key prefix per record (tiebreaker)
+    // Prefix merge buffers (for large-key path: persistent across run gen)
+    uint64_t* d_ovc_buffer;        // 8B secondary prefix (bytes 8-15) per record
+    uint64_t* d_prefix_buffer;     // 8B primary prefix (bytes 0-7) per record
     uint32_t* d_global_perm;       // global index per record
     uint64_t  ovc_buffer_records;  // capacity in records
-    uint64_t  ovc_run_offset;     // current write position in OVC/perm/prefix buffers
+    uint64_t  ovc_run_offset;     // current write position in prefix/perm buffers
     uint64_t  ovc_chunk_start;    // record offset of current chunk in h_data
 
     // Pre-allocated sort workspace (avoids cudaMalloc per chunk)
@@ -646,10 +645,12 @@ void ExternalGpuSort::sort_chunk_on_gpu(uint8_t* d_in, uint8_t* d_scratch,
         // We need a kernel that reads records via permutation, not from sorted output
         // (because we're NOT reordering records in OVC mode)
 
-        // Extract OVCs and 8B prefixes from records via permutation
-        extract_ovc_and_prefix_kernel<<<nblks, nthreads, 0, s>>>(
-            d_in, perm_in, d_ovc_buffer + ovc_run_offset,
-            d_prefix_buffer + ovc_run_offset, n);
+        // Extract 16B of key (two 8B prefixes) from records via permutation
+        extract_dual_prefix_kernel<<<nblks, nthreads, 0, s>>>(
+            d_in, perm_in,
+            d_prefix_buffer + ovc_run_offset,  // bytes 0-7
+            d_ovc_buffer + ovc_run_offset,     // bytes 8-15 (repurposed from OVC)
+            n);
 
         // Build global perm: global_perm[run_offset + i] = chunk_start + perm[i]
         build_global_perm_kernel<<<nblks, nthreads, 0, s>>>(
@@ -1355,8 +1356,8 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
     }
 #endif // PREFIX SORT disabled
 
-    // Check: OVC buffers fit in GPU? Need: 4B OVC + 8B prefix + 4B perm = 16B per record
-    size_t ovc_total = num_records * (sizeof(uint32_t) + sizeof(uint64_t) + sizeof(uint32_t));
+    // Check: prefix merge buffers fit? Need: 8B pfx1 + 8B pfx2 + 4B perm = 20B per record
+    size_t ovc_total = num_records * (sizeof(uint64_t) + sizeof(uint64_t) + sizeof(uint32_t));
     bool use_ovc = (total_keys_bytes + est_arena > free_mem_now * 0.9) &&
                    (ovc_total + 2*buf_bytes + 512*1024*1024 < free_mem_now * 0.95);
 
@@ -1366,9 +1367,9 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
         printf("  Using OVC ARCHITECTURE: run-gen + GPU OVC merge + CPU gather\n");
         printf("  OVC buffers: %.1f GB (4B OVC + 8B prefix + 4B perm per record)\n", ovc_total/1e9);
 
-        // Allocate OVC merge buffers first (persistent across run gen)
-        CUDA_CHECK(cudaMalloc(&d_ovc_buffer, num_records * sizeof(uint32_t)));
-        CUDA_CHECK(cudaMalloc(&d_prefix_buffer, num_records * sizeof(uint64_t)));
+        // Allocate prefix merge buffers first (persistent across run gen)
+        CUDA_CHECK(cudaMalloc(&d_ovc_buffer, num_records * sizeof(uint64_t)));     // bytes 8-15
+        CUDA_CHECK(cudaMalloc(&d_prefix_buffer, num_records * sizeof(uint64_t)));  // bytes 0-7
         CUDA_CHECK(cudaMalloc(&d_global_perm, num_records * sizeof(uint32_t)));
         ovc_buffer_records = num_records;
         ovc_run_offset = 0;
@@ -1409,80 +1410,152 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
         for (int i = 0; i < NBUFS; i++) { if (d_buf[i]) { cudaFree(d_buf[i]); d_buf[i] = nullptr; } }
         if (d_key_buffer) { cudaFree(d_key_buffer); d_key_buffer = nullptr; }
 
-        printf("== Phase 2: GPU Prefix Merge (CUB LSD on 8B prefix + index) ==\n");
+        printf("== Phase 2: GPU Prefix Merge (CUB LSD on 16B prefix + index) ==\n");
         WallTimer merge_timer; merge_timer.begin();
 
-        // We have d_prefix_buffer (uint64, 8B per record) and d_global_perm (uint32).
-        // LSD approach: 2 CUB passes
-        //   Pass 1: sort by d_global_perm (ensures stable ordering within runs)
-        //   Pass 2: sort by d_prefix_buffer (primary key)
-        // After pass 2: records with equal prefixes preserve run-internal order.
+        // We have: d_prefix_buffer (bytes 0-7), d_ovc_buffer (bytes 8-15), d_global_perm.
+        // LSD: 3 CUB passes (least significant first):
+        //   Pass 1: sort by global_index (preserves run-internal order for ties)
+        //   Pass 2: sort by prefix2 (bytes 8-15)
+        //   Pass 3: sort by prefix1 (bytes 0-7, most significant)
+        // After: records sorted by 16B prefix, ties preserve run-internal order.
 
-        // Allocate alt buffers for CUB double-buffering
-        uint64_t* d_pfx_alt;
+        // For CUB SortPairs, we need ONE "value" array that follows the keys.
+        // LSD with 3 different key types (uint32, uint64, uint64) requires
+        // moving all satellite data each pass. Pack prefix1+prefix2+perm as satellites.
+        // Approach: treat perm as key in pass 1, then prefix2 as key in pass 2,
+        // then prefix1 as key in pass 3. Each pass carries the other two as a combined value.
+        // CUB only supports one key + one value, so we chain the sorts.
+
+        // Allocate alt buffers
+        uint64_t* d_pfx1_alt;  // alt for prefix1 (bytes 0-7)
+        uint64_t* d_pfx2_alt;  // alt for prefix2 (bytes 8-15)
         uint32_t* d_perm_alt;
-        CUDA_CHECK(cudaMalloc(&d_pfx_alt, num_records * sizeof(uint64_t)));
+        CUDA_CHECK(cudaMalloc(&d_pfx1_alt, num_records * sizeof(uint64_t)));
+        CUDA_CHECK(cudaMalloc(&d_pfx2_alt, num_records * sizeof(uint64_t)));
         CUDA_CHECK(cudaMalloc(&d_perm_alt, num_records * sizeof(uint32_t)));
 
-        // Free OVC buffer (not needed for prefix merge)
-        cudaFree(d_ovc_buffer); d_ovc_buffer = nullptr;
-
-        // CUB temp storage
-        size_t cub_temp_bytes = 0;
-        {
-            cub::DoubleBuffer<uint64_t> pfx_buf(d_prefix_buffer, d_pfx_alt);
-            cub::DoubleBuffer<uint32_t> pm_buf(d_global_perm, d_perm_alt);
-            cub::DeviceRadixSort::SortPairs(nullptr, cub_temp_bytes,
-                pm_buf, pfx_buf, (int)num_records, 0, 32);
-        }
-        // Also check prefix sort temp
-        size_t cub_temp_bytes2 = 0;
-        {
-            cub::DoubleBuffer<uint64_t> pfx_buf(d_prefix_buffer, d_pfx_alt);
-            cub::DoubleBuffer<uint32_t> pm_buf(d_global_perm, d_perm_alt);
-            cub::DeviceRadixSort::SortPairs(nullptr, cub_temp_bytes2,
-                pfx_buf, pm_buf, (int)num_records, 0, 64);
-        }
-        size_t max_temp = std::max(cub_temp_bytes, cub_temp_bytes2);
+        // CUB temp storage (query max of all three passes)
+        size_t cub_temp1 = 0, cub_temp2 = 0, cub_temp3 = 0;
+        cub::DeviceRadixSort::SortPairs(nullptr, cub_temp1,
+            (uint32_t*)nullptr, (uint32_t*)nullptr, (int)num_records, 0, 32);
+        cub::DeviceRadixSort::SortPairs(nullptr, cub_temp2,
+            (uint64_t*)nullptr, (uint64_t*)nullptr, (int)num_records, 0, 64);
+        cub_temp3 = cub_temp2;
+        size_t max_temp = std::max({cub_temp1, cub_temp2, cub_temp3});
         void* d_cub_temp;
         CUDA_CHECK(cudaMalloc(&d_cub_temp, max_temp));
 
-        // Pass 1: Sort by global_perm (key=uint32 perm, value=uint64 prefix)
-        // This establishes correct ordering within runs for equal prefixes.
+        // Pass 1: Sort by global_index
+        // key=perm, value=perm (self-sort to establish index order)
+        // But CUB SortPairs needs key+value. We sort perm as key, and use prefix1 as value
+        // (prefix2 must also follow — we'll handle it by sorting perm on ALL satellite arrays)
+        // Simpler approach: CUB sort (key=perm, val=perm) then use result to reorder others.
+        // Actually simplest: just sort all 3 arrays by perm using CUB on (perm, prefix1),
+        // then separately reorder prefix2 using the same permutation.
+
+        // APPROACH: For each LSD pass, sort (key, perm) pairs. Then apply the perm
+        // change to reorder the other satellite arrays.
+        // Actually, CUB SortPairs naturally reorders the value array alongside keys.
+        // We need ALL satellite data to follow. With 3 arrays, we need either:
+        // a) Pack into a single struct value (complex)
+        // b) Do 3 separate sorts but each carrying all data somehow
+        // c) Sort keys+one value, then gather the other arrays using the result order
+
+        // SIMPLEST CORRECT APPROACH:
+        // Do CUB SortPairs on (key, perm) for each LSD pass. After each pass,
+        // reorder prefix1 and prefix2 using a gather kernel based on the new perm order.
+
+        // Actually even simpler: We only need the FINAL permutation for the gather.
+        // So we can compose the permutations from each CUB pass.
+        // But CUB SortPairs internally gives us sorted (key, value) where value = perm.
+        // After pass 1: perm is sorted by index.
+        // We need prefix1 and prefix2 reordered to match. Use a gather.
+
+        // Let me just do it the clean way: for each LSD pass, sort (key, index_into_current)
+        // then gather all satellite arrays using the resulting permutation.
+
+        // Build identity index for pass tracking
+        int nthreads2 = 256;
+        int nblks2 = (num_records + nthreads2 - 1) / nthreads2;
+
+        auto gather_uint64 = [&](const uint64_t* src, uint64_t* dst, const uint32_t* idx) {
+            thrust::counting_iterator<uint64_t> ci(0);
+            thrust::device_ptr<uint64_t> dst_ptr(dst);
+            uint64_t N = num_records;
+            thrust::transform(thrust::device, ci, ci + N, dst_ptr,
+                [src, idx] __device__ (uint64_t i) { return src[idx[i]]; });
+        };
+        auto gather_uint32 = [&](const uint32_t* src, uint32_t* dst, const uint32_t* idx) {
+            thrust::counting_iterator<uint64_t> ci(0);
+            thrust::device_ptr<uint32_t> dst_ptr(dst);
+            uint64_t N = num_records;
+            thrust::transform(thrust::device, ci, ci + N, dst_ptr,
+                [src, idx] __device__ (uint64_t i) { return src[idx[i]]; });
+        };
+
+        // Temp index array for tracking sort order
+        uint32_t* d_sort_idx;
+        uint32_t* d_sort_idx_alt;
+        CUDA_CHECK(cudaMalloc(&d_sort_idx, num_records * sizeof(uint32_t)));
+        CUDA_CHECK(cudaMalloc(&d_sort_idx_alt, num_records * sizeof(uint32_t)));
+
+        // Pass 1: Sort by global_perm (least significant)
         {
+            init_identity_kernel<<<nblks2, nthreads2>>>(d_sort_idx, num_records);
             cub::DoubleBuffer<uint32_t> key_buf(d_global_perm, d_perm_alt);
-            cub::DoubleBuffer<uint64_t> val_buf(d_prefix_buffer, d_pfx_alt);
+            cub::DoubleBuffer<uint32_t> val_buf(d_sort_idx, d_sort_idx_alt);
             size_t temp = max_temp;
             cub::DeviceRadixSort::SortPairs(d_cub_temp, temp,
                 key_buf, val_buf, (int)num_records, 0, 32);
-            // After: key_buf.Current() has sorted perm, val_buf.Current() has reordered prefixes
-            d_global_perm = key_buf.Current();
-            d_perm_alt = key_buf.Alternate();
-            d_prefix_buffer = val_buf.Current();
-            d_pfx_alt = val_buf.Alternate();
+            // Reorder prefix1 and prefix2 using val_buf.Current()
+            gather_uint64(d_prefix_buffer, d_pfx1_alt, val_buf.Current());
+            gather_uint64(d_ovc_buffer, d_pfx2_alt, val_buf.Current());
+            gather_uint32(d_global_perm, d_perm_alt, val_buf.Current());
+            std::swap(d_prefix_buffer, d_pfx1_alt);
+            std::swap(d_ovc_buffer, d_pfx2_alt);
+            std::swap(d_global_perm, d_perm_alt);
         }
         CUDA_CHECK(cudaDeviceSynchronize());
         double pass1_ms = merge_timer.end_ms();
         printf("  Pass 1 (sort by index): %.0f ms\n", pass1_ms);
 
+        // Pass 2: Sort by prefix2 (bytes 8-15)
         merge_timer.begin();
-        // Pass 2: Sort by prefix (key=uint64 prefix, value=uint32 perm)
-        // CUB stable radix sort: equal prefixes maintain pass-1 order (by index).
         {
-            cub::DoubleBuffer<uint64_t> key_buf(d_prefix_buffer, d_pfx_alt);
-            cub::DoubleBuffer<uint32_t> val_buf(d_global_perm, d_perm_alt);
+            init_identity_kernel<<<nblks2, nthreads2>>>(d_sort_idx, num_records);
+            cub::DoubleBuffer<uint64_t> key_buf(d_ovc_buffer, d_pfx2_alt);
+            cub::DoubleBuffer<uint32_t> val_buf(d_sort_idx, d_sort_idx_alt);
             size_t temp = max_temp;
             cub::DeviceRadixSort::SortPairs(d_cub_temp, temp,
                 key_buf, val_buf, (int)num_records, 0, 64);
-            d_prefix_buffer = key_buf.Current();
-            d_global_perm = val_buf.Current();
+            gather_uint64(d_prefix_buffer, d_pfx1_alt, val_buf.Current());
+            gather_uint32(d_global_perm, d_perm_alt, val_buf.Current());
+            std::swap(d_prefix_buffer, d_pfx1_alt);
+            std::swap(d_global_perm, d_perm_alt);
         }
         CUDA_CHECK(cudaDeviceSynchronize());
         double pass2_ms = merge_timer.end_ms();
-        printf("  Pass 2 (sort by prefix): %.0f ms\n", pass2_ms);
+        printf("  Pass 2 (sort by prefix2, bytes 8-15): %.0f ms\n", pass2_ms);
 
-        double merge_ms = pass1_ms + pass2_ms;
-        printf("  GPU prefix merge: %.0f ms (2 LSD passes)\n", merge_ms);
+        // Pass 3: Sort by prefix1 (bytes 0-7, most significant)
+        merge_timer.begin();
+        {
+            init_identity_kernel<<<nblks2, nthreads2>>>(d_sort_idx, num_records);
+            cub::DoubleBuffer<uint64_t> key_buf(d_prefix_buffer, d_pfx1_alt);
+            cub::DoubleBuffer<uint32_t> val_buf(d_sort_idx, d_sort_idx_alt);
+            size_t temp = max_temp;
+            cub::DeviceRadixSort::SortPairs(d_cub_temp, temp,
+                key_buf, val_buf, (int)num_records, 0, 64);
+            gather_uint32(d_global_perm, d_perm_alt, val_buf.Current());
+            std::swap(d_global_perm, d_perm_alt);
+        }
+        CUDA_CHECK(cudaDeviceSynchronize());
+        double pass3_ms = merge_timer.end_ms();
+        printf("  Pass 3 (sort by prefix1, bytes 0-7): %.0f ms\n", pass3_ms);
+
+        double merge_ms = pass1_ms + pass2_ms + pass3_ms;
+        printf("  GPU prefix merge: %.0f ms (3 LSD passes for 16B prefix)\n", merge_ms);
 
         // Download final permutation
         phase_timer.begin();
@@ -1493,8 +1566,10 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
 
         // Free GPU buffers
         cudaFree(d_prefix_buffer); d_prefix_buffer = nullptr;
+        cudaFree(d_ovc_buffer); d_ovc_buffer = nullptr;
         cudaFree(d_global_perm); d_global_perm = nullptr;
-        cudaFree(d_pfx_alt); cudaFree(d_perm_alt); cudaFree(d_cub_temp);
+        cudaFree(d_pfx1_alt); cudaFree(d_pfx2_alt); cudaFree(d_perm_alt);
+        cudaFree(d_sort_idx); cudaFree(d_sort_idx_alt); cudaFree(d_cub_temp);
 
         // CPU gather: apply permutation to original h_data
         phase_timer.begin();
@@ -1528,12 +1603,13 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
         printf("== Phase 4: CPU Prefix Fixup ==\n");
         {
             int hw = std::max(1, (int)std::thread::hardware_concurrency());
-            // Find groups of equal 8B prefixes in the gathered output
+            // Find groups of equal 16B prefixes in the gathered output
             std::vector<std::pair<uint64_t, uint64_t>> groups;
             uint64_t gs = 0;
+            int pfx_cmp_bytes = std::min(16, (int)KEY_SIZE);
             for (uint64_t i = 1; i <= num_records; i++) {
                 if (i == num_records ||
-                    memcmp(h_output + i * RECORD_SIZE, h_output + gs * RECORD_SIZE, 8) != 0) {
+                    memcmp(h_output + i * RECORD_SIZE, h_output + gs * RECORD_SIZE, pfx_cmp_bytes) != 0) {
                     if (i - gs > 1) groups.push_back({gs, i - gs});
                     gs = i;
                 }
