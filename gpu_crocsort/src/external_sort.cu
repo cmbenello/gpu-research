@@ -1528,48 +1528,8 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
         void* d_cub_merge_temp;
         CUDA_CHECK(cudaMalloc(&d_cub_merge_temp, cub_merge_temp));
 
-        int nblks_m = (num_records + 255) / 256;
-
-        // LSD Pass 1: Sort by prefix2 (bytes 8-15), carrying global_perm as value.
-        // After: prefix2 is sorted, perm is reordered to match. Prefix1 NOT reordered.
-        {
-            cub::DoubleBuffer<uint64_t> key_buf(d_ovc_buffer, d_pfx_alt2);
-            cub::DoubleBuffer<uint32_t> val_buf(d_global_perm, d_perm_alt2);
-            size_t temp = cub_merge_temp;
-            cub::DeviceRadixSort::SortPairs(d_cub_merge_temp, temp,
-                key_buf, val_buf, (int)num_records, 0, 64);
-            d_ovc_buffer = key_buf.Current();
-            d_pfx_alt2 = key_buf.Alternate();
-            d_global_perm = val_buf.Current();
-            d_perm_alt2 = val_buf.Alternate();
-        }
-        // Gather prefix1 to match pass-1 order.
-        // We don't know the internal permutation CUB applied, but we know
-        // CUB moved d_global_perm alongside the keys. The d_global_perm values
-        // are original h_data indices, NOT indices into the prefix arrays.
-        // We need the sort's INTERNAL permutation to gather prefix1.
-        //
-        // TRICK: The input perm was [p0, p1, p2, ...] where pi = original h_data index.
-        // After CUB sort by prefix2, perm[i] still holds original h_data indices, but
-        // they're now in prefix2-sorted order. We need prefix1[i] to also be in that order.
-        // But prefix1 is indexed by the PRE-SORT position, and we don't have the mapping.
-        //
-        // FIX: Instead of carrying perm in pass 1, carry an IDENTITY INDEX as value.
-        // Then use the identity index to gather BOTH prefix1 AND perm.
-        // This requires perm_alt2 as identity buffer AND a separate output for perm gather.
-        // But we only have 2 uint32 buffers (perm + perm_alt2).
-        //
-        // ALTERNATIVE: Do pass 1 with (key=prefix2, val=identity), gather prefix1+perm.
-        // Need: 1 extra uint32 buffer = 2.4GB. Total = 22.1GB... might not fit.
-
-        // SIMPLEST THAT WORKS: skip pass 1 entirely. Just do pass 2 (sort by prefix1).
-        // Accept the 8B prefix + CPU fixup. Use the WORKING 8B approach.
-        // With std::sort the fixup should be faster than insertion sort.
-        // Let's measure the actual std::sort time.
-        CUDA_CHECK(cudaDeviceSynchronize());
-        double pass1_ms = merge_timer.end_ms();
-
-        // Pass 2: Sort by prefix1 (bytes 0-7)
+        // Sort by prefix1 (bytes 0-7) only. CPU fixup resolves 8B prefix ties.
+        // (16B LSD merge requires satellite gather which needs more memory than available)
         merge_timer.begin();
         {
             cub::DoubleBuffer<uint64_t> key_buf(d_prefix_buffer, d_pfx_alt2);
@@ -1582,8 +1542,8 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
         CUDA_CHECK(cudaDeviceSynchronize());
         double pass2_ms = merge_timer.end_ms();
 
-        double merge_ms = pass1_ms + pass2_ms;
-        printf("  GPU prefix merge: %.0f ms\n", merge_ms);
+        double merge_ms = pass2_ms;
+        printf("  GPU prefix merge (sort by 8B prefix): %.0f ms\n", merge_ms);
 
         // Download final permutation
         phase_timer.begin();
