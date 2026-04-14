@@ -1485,117 +1485,36 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
         int nthreads2 = 256;
         int nblks2 = (num_records + nthreads2 - 1) / nthreads2;
 
-        // 3-pass LSD: sort by (global_index, prefix2, prefix1) from least significant.
-        // Each pass: CUB SortPairs(key, perm). After each pass, also reorder the
-        // satellite arrays (the other prefix) via thrust::gather using d_pfx_alt as temp.
+        // Single CUB pass: sort by 8B prefix (bytes 0-7), carry global_perm as value.
+        // Then CPU fixup resolves ties (records with equal 8B prefix but different remaining bytes).
+        // Free unused d_ovc_buffer to make room for CUB alt buffers.
+        cudaFree(d_ovc_buffer); d_ovc_buffer = nullptr;
 
-        // Pass 1: Sort by global_perm (least significant key)
-        // After this: all arrays ordered by global_index (preserves run-internal order)
+        uint64_t* d_pfx_alt2;
+        uint32_t* d_perm_alt2;
+        CUDA_CHECK(cudaMalloc(&d_pfx_alt2, num_records * sizeof(uint64_t)));
+        CUDA_CHECK(cudaMalloc(&d_perm_alt2, num_records * sizeof(uint32_t)));
+
+        size_t cub_merge_temp = 0;
         {
-            cub::DoubleBuffer<uint32_t> key_buf(d_global_perm, d_perm_alt);
-            cub::DoubleBuffer<uint64_t> val_buf(d_prefix_buffer, d_pfx_alt);
-            size_t temp = max_temp;
-            cub::DeviceRadixSort::SortPairs(d_cub_temp, temp,
-                key_buf, val_buf, (int)num_records, 0, 32);
-            d_global_perm = key_buf.Current();
-            d_perm_alt = key_buf.Alternate();
-            d_prefix_buffer = val_buf.Current();
-            d_pfx_alt = val_buf.Alternate();
-            // Also reorder d_ovc_buffer (prefix2) to match
-            // Use d_pfx_alt as temp (it's now the alternate of val_buf = unused)
-            // Can't easily reorder without knowing the permutation...
-            // SIMPLER: instead of 3-pass LSD with satellite reordering,
-            // just use CUB on (key=perm, val=perm) to get index order, then
-            // rebuild from there.
-        }
-        // The satellite reordering problem makes multi-pass LSD with 3 arrays hard
-        // without extra memory. Let me use a different approach:
-        // Just sort by GLOBAL_PERM as the only key, with PREFIX1 as value.
-        // Then sort by PREFIX2 as key, with PREFIX1 as value (stable).
-        // Then sort by PREFIX1 as key, with PERM as value.
-        // But each pass only carries ONE satellite — we lose the other.
-
-        // SIMPLEST CORRECT APPROACH with minimal memory:
-        // Combine prefix1 (8B) and prefix2 (8B) into a single 16B sort key.
-        // But CUB doesn't support 16B keys.
-        // Alternative: sort by a composite key by interleaving bytes.
-        // Or: just do CUB sort on prefix1 first, then within-group sort on prefix2.
-        // That's a 2-pass approach with segmented sort for the second pass.
-
-        // ACTUAL SIMPLEST: Build a single uint64 composite key:
-        // high 32 bits = first 4 bytes of prefix1 (most significant)
-        // low 32 bits = global_index (for stability)
-        // This gives correct ordering for records that differ in first 4 bytes.
-        // For ties in first 4 bytes: sorted by index (run-internal order preserved).
-        // Fixup: records with same first 4 bytes but different bytes 4-15.
-
-        // Wait — this is getting complicated. Let me just go back to the working
-        // 8B prefix + fixup approach, but use std::sort (not insertion sort) and
-        // accept the fixup time. The REAL question is whether the fixup on ~965K
-        // groups is fast enough with std::sort.
-
-        // Actually, 8B gives 3,817 groups. The std::sort on 157K records was 38.7s.
-        // If I use a BETTER 8B prefix (packing more discriminating columns first),
-        // I might get more unique values. Current bytes 0-7 are:
-        // returnflag(1), linestatus(1), shipdate(4), commitdate_hi(2)
-        // Only 3,817 unique. But if I pack e.g. orderkey (8B) as the prefix,
-        // there'd be ~600M/4 = 150M unique values! Avg group size = 4.
-
-        // The problem: orderkey is at bytes 46-53, not 0-7. The current
-        // extraction takes bytes 0-7. But I can extract ANY 8 bytes that
-        // maximize uniqueness. Let me extract bytes 46-53 (orderkey) instead!
-
-        // FOR NOW: just use the 8B approach with the fixup. Fix the extraction
-        // to use a more discriminating prefix later.
-
-        // FREE everything and fall through to 8B approach
-        cudaFree(d_pfx_alt); cudaFree(d_perm_alt); cudaFree(d_cub_temp);
-
-        // Simpler: single CUB pass on prefix1 + perm
-        {
-            cub::DoubleBuffer<uint64_t> key_buf(d_prefix_buffer, d_pfx_alt);
-            // whoops d_pfx_alt was freed. Let me re-allocate it.
-        }
-        // OK this is getting messy. Let me take the clean approach:
-        // FREE all merge buffers, re-allocate cleanly.
-        // Actually, re-read what we need:
-        // - d_prefix_buffer has 8B prefix (bytes 0-7) per record
-        // - d_ovc_buffer has 8B prefix (bytes 8-15) per record
-        // - d_global_perm has global index per record
-        // After freeing d_buf and sort_ws, we have 25 - 12 = ~13GB free.
-        // CUB needs: 1 alt uint64 (4.8GB) + 1 alt uint32 (2.4GB) + temp (0.5GB) = 7.7GB.
-        // 7.7 < 13. Should fit!
-
-        // Let me restart this block cleanly.
-        }
-        // Re-allocate for merge
-        CUDA_CHECK(cudaMalloc(&d_pfx_alt, num_records * sizeof(uint64_t)));
-        CUDA_CHECK(cudaMalloc(&d_perm_alt, num_records * sizeof(uint32_t)));
-        {
-            size_t ct = 0;
             cub::DoubleBuffer<uint64_t> kb(nullptr,nullptr);
             cub::DoubleBuffer<uint32_t> vb(nullptr,nullptr);
-            cub::DeviceRadixSort::SortPairs(nullptr, ct, kb, vb, (int)num_records, 0, 64);
-            CUDA_CHECK(cudaMalloc(&d_cub_temp, ct));
-            max_temp = ct;
+            cub::DeviceRadixSort::SortPairs(nullptr, cub_merge_temp, kb, vb, (int)num_records, 0, 64);
         }
+        void* d_cub_merge_temp;
+        CUDA_CHECK(cudaMalloc(&d_cub_merge_temp, cub_merge_temp));
 
-        // Pass 1: Sort by prefix1 (bytes 0-7) with perm as value
         {
-            cub::DoubleBuffer<uint64_t> key_buf(d_prefix_buffer, d_pfx_alt);
-            cub::DoubleBuffer<uint32_t> val_buf(d_global_perm, d_perm_alt);
-            size_t temp = max_temp;
-            cub::DeviceRadixSort::SortPairs(d_cub_temp, temp,
+            cub::DoubleBuffer<uint64_t> key_buf(d_prefix_buffer, d_pfx_alt2);
+            cub::DoubleBuffer<uint32_t> val_buf(d_global_perm, d_perm_alt2);
+            size_t temp = cub_merge_temp;
+            cub::DeviceRadixSort::SortPairs(d_cub_merge_temp, temp,
                 key_buf, val_buf, (int)num_records, 0, 64);
-            d_prefix_buffer = key_buf.Current();
             d_global_perm = val_buf.Current();
         }
         CUDA_CHECK(cudaDeviceSynchronize());
-        double pass1_ms = merge_timer.end_ms();
-        printf("  Pass 1 (sort by 8B prefix): %.0f ms\n", pass1_ms);
-
-        double merge_ms = pass1_ms;
-        printf("  GPU prefix merge: %.0f ms\n", merge_ms);
+        double merge_ms = merge_timer.end_ms();
+        printf("  CUB sort by 8B prefix: %.0f ms\n", merge_ms);
 
         // Download final permutation
         phase_timer.begin();
@@ -1604,11 +1523,10 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
         r.pcie_d2h_gb = total_perm_bytes / 1e9;
         printf("  Downloaded perm in %.0f ms\n", dl_ms);
 
-        // Free GPU buffers
+        // Free ALL GPU buffers
         cudaFree(d_prefix_buffer); d_prefix_buffer = nullptr;
-        cudaFree(d_ovc_buffer); d_ovc_buffer = nullptr;
         cudaFree(d_global_perm); d_global_perm = nullptr;
-        cudaFree(d_pfx_alt); cudaFree(d_perm_alt); cudaFree(d_cub_temp);
+        cudaFree(d_pfx_alt2); cudaFree(d_perm_alt2); cudaFree(d_cub_merge_temp);
 
         // CPU gather: apply permutation to original h_data
         phase_timer.begin();
