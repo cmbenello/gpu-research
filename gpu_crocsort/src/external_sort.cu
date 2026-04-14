@@ -1507,6 +1507,13 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
         // Memory: persistent 12GB (pfx1 + pfx2 + perm). New: pfx_alt (4.8GB) + perm_alt (2.4GB) + CUB (0.5GB) = 7.7GB.
         // Total: 19.7GB. Available after freeing d_buf (11.7GB) + sort_ws (~2GB): ~13.7GB. Fits!
 
+        {
+            size_t fr, tt;
+            cudaMemGetInfo(&fr, &tt);
+            printf("  GPU free before merge alloc: %.2f GB / %.2f GB\n", fr/1e9, tt/1e9);
+            printf("  Need: pfx_alt=%.1fGB + perm_alt=%.1fGB + CUB~0.5GB = %.1fGB\n",
+                num_records*8/1e9, num_records*4/1e9, (num_records*12+500000000)/1e9);
+        }
         uint64_t* d_pfx_alt2;
         uint32_t* d_perm_alt2;
         CUDA_CHECK(cudaMalloc(&d_pfx_alt2, num_records * sizeof(uint64_t)));
