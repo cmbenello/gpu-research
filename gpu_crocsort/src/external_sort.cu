@@ -343,12 +343,7 @@ __global__ void extract_dual_prefix_kernel(
     prefix2[i] = v2;
 }
 
-// Simple gather kernels for reordering satellite arrays during LSD merge
-__global__ void gather_uint64_kernel(const uint64_t* src, const uint32_t* idx,
-                                      uint64_t* dst, uint64_t n) {
-    uint64_t i = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < n) dst[i] = src[idx[i]];
-}
+// Simple gather for uint32 (used in LSD merge satellite reordering)
 __global__ void gather_uint32_kernel(const uint32_t* src, const uint32_t* idx,
                                       uint32_t* dst, uint64_t n) {
     uint64_t i = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
