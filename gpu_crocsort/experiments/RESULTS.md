@@ -23,10 +23,12 @@ All times exclude data loading/generation. Median of 2-3 runs shown (page cache 
 
 ## Key Findings
 
-- **TPC-H SF100 compact: 3.26s best** (vs 13.2s baseline; 4x speedup today from 8.3s → 3.26s)
+- **TPC-H SF100 compact: 3.26s best / 3.74s (verified median)** (vs 13.2s baseline; 4x speedup today)
 - **GenSort 60GB: 4.56s** (vs paper's 7.9s; 1.7x speedup from CPU gather improvements)
 - **PCIe amplification**: compact TPC-H = 0.3x (19GB keys vs 72GB data); GenSort = 0.14x
 - **Compact upload win**: 2.1-2.5x vs non-compact on TPC-H (3.26s vs 7.85s for SF100)
+- **Gather bandwidth**: 30-80 GB/s (variance from NUMA + page cache warmth)
+- **All results verified correct** (PASS on all runs with --runs 3)
 
 ## Optimizations Applied Today
 
