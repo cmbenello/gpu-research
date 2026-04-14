@@ -2149,32 +2149,8 @@ int main(int argc, char** argv) {
     for (int run = 0; run < num_experiment_runs; run++) {
         if (num_experiment_runs > 1) {
             printf("\n══════════ Experiment run %d/%d ══════════\n", run+1, num_experiment_runs);
-            if (run > 0 && input_file) {
-                // Re-read via mmap + parallel memcpy (page cache → pinned memory)
-                WallTimer rt; rt.begin();
-                int fd = open(input_file, O_RDONLY);
-                void* mapped = mmap(nullptr, total_bytes, PROT_READ, MAP_PRIVATE|MAP_POPULATE, fd, 0);
-                if (mapped != MAP_FAILED) {
-                    int hw = std::max(1, (int)std::thread::hardware_concurrency());
-                    uint64_t chunk = (total_bytes + hw - 1) / hw;
-                    std::vector<std::thread> threads;
-                    for (int t = 0; t < hw; t++) {
-                        threads.emplace_back([&, t]() {
-                            uint64_t lo = t * chunk;
-                            uint64_t hi = std::min(lo + chunk, total_bytes);
-                            if (lo < hi) memcpy(h_data + lo, (uint8_t*)mapped + lo, hi - lo);
-                        });
-                    }
-                    for (auto& t : threads) t.join();
-                    munmap(mapped, total_bytes);
-                } else {
-                    FILE* f = fopen(input_file, "rb");
-                    fread(h_data, 1, total_bytes, f);
-                    fclose(f);
-                }
-                close(fd);
-                printf("  Re-loaded in %.0f ms\n", rt.end_ms());
-            }
+            // h_data is not mutated by sort() — sorted output goes to a separate h_output
+            // buffer that's freed after verification. No reload needed.
         }
 
         ExternalGpuSort sorter;
