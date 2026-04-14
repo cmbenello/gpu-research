@@ -1795,7 +1795,7 @@ run_generation:
                     for (int w = 0; w < WORDS; w++)
                         _mm_stream_si64((long long*)(dst + w), src[w]);
                 }
-                _mm_sfence(); // flush write-combining buffers
+                _mm_sfence();
             });
         }
         for (auto& t : threads) t.join();
