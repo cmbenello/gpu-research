@@ -803,28 +803,35 @@ ExternalGpuSort::generate_runs_pipelined(
 
         int hw = std::max(1, (int)std::thread::hardware_concurrency());
 
+        // Helper lambda: multi-threaded compact key extraction for one chunk
+        auto do_extract = [&](uint64_t offset, uint64_t cur_n, int ping) {
+            uint64_t per_t = (cur_n + hw - 1) / hw;
+            std::vector<std::thread> threads;
+            for (int t = 0; t < hw; t++) {
+                threads.emplace_back([&, t, offset, cur_n, ping]() {
+                    uint64_t lo = t * per_t, hi = std::min(lo + per_t, cur_n);
+                    for (uint64_t j = lo; j < hi; j++) {
+                        const uint8_t* rec = h_data + (offset + j) * RECORD_SIZE;
+                        uint8_t* ck = h_compact[ping] + j * COMPACT_KEY_SIZE;
+                        for (int b = 0; b < 26; b++) ck[b] = rec[h_cmap[b]];
+                        ck[26]=0; ck[27]=0; ck[28]=0; ck[29]=0; ck[30]=0; ck[31]=0;
+                    }
+                });
+            }
+            for (auto& t : threads) t.join();
+        };
+
+        // Pipeline: overlap CPU extraction of chunk c+1 with GPU sort of chunk c.
+        // Extract chunk 0 first, then loop with prefetch of c+1 running in parallel.
+        {
+            uint64_t cur_n0 = std::min(buf_records, num_records);
+            do_extract(0, cur_n0, 0);
+        }
+
         for (int c = 0; c < total_chunks; c++) {
             uint64_t offset = (uint64_t)c * buf_records;
             uint64_t cur_n = std::min(buf_records, num_records - offset);
             int ping = c % 2;
-
-            // CPU: multi-threaded compact key extraction into h_compact[ping]
-            {
-                uint64_t per_t = (cur_n + hw - 1) / hw;
-                std::vector<std::thread> threads;
-                for (int t = 0; t < hw; t++) {
-                    threads.emplace_back([&, t, offset, cur_n, ping]() {
-                        uint64_t lo = t * per_t, hi = std::min(lo + per_t, cur_n);
-                        for (uint64_t j = lo; j < hi; j++) {
-                            const uint8_t* rec = h_data + (offset + j) * RECORD_SIZE;
-                            uint8_t* ck = h_compact[ping] + j * COMPACT_KEY_SIZE;
-                            for (int b = 0; b < 26; b++) ck[b] = rec[h_cmap[b]];
-                            ck[26]=0; ck[27]=0; ck[28]=0; ck[29]=0; ck[30]=0; ck[31]=0;
-                        }
-                    });
-                }
-                for (auto& t : threads) t.join();
-            }
 
             // Wait for previous sort to finish reading d_compact
             if (c > 0) {
@@ -847,6 +854,14 @@ ExternalGpuSort::generate_runs_pipelined(
 
             // Record sort completion so next H2D can safely overwrite d_compact
             CUDA_CHECK(cudaEventRecord(sort_done, streams[1]));
+
+            // In parallel with GPU work: extract compact keys for chunk c+1
+            if (c + 1 < total_chunks) {
+                uint64_t next_offset = (uint64_t)(c+1) * buf_records;
+                uint64_t next_n = std::min(buf_records, num_records - next_offset);
+                int next_ping = (c+1) % 2;
+                do_extract(next_offset, next_n, next_ping);
+            }
 
             runs.push_back({offset * RECORD_SIZE, cur_n});
             printf("\r  Run %d/%d: %.1f MB (compact upload %.1f MB)    ", c+1, total_chunks,
