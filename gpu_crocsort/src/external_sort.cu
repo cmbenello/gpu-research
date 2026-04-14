@@ -1560,13 +1560,12 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
         printf("== Phase 4: CPU Prefix Fixup ==\n");
         {
             int hw = std::max(1, (int)std::thread::hardware_concurrency());
-            // Find groups of equal 16B prefixes in the gathered output
+            // Find groups of equal 8B prefixes (GPU sorted by 8B only!)
             std::vector<std::pair<uint64_t, uint64_t>> groups;
             uint64_t gs = 0;
-            int pfx_cmp_bytes = std::min(16, (int)KEY_SIZE);
             for (uint64_t i = 1; i <= num_records; i++) {
                 if (i == num_records ||
-                    memcmp(h_output + i * RECORD_SIZE, h_output + gs * RECORD_SIZE, pfx_cmp_bytes) != 0) {
+                    memcmp(h_output + i * RECORD_SIZE, h_output + gs * RECORD_SIZE, 8) != 0) {
                     if (i - gs > 1) groups.push_back({gs, i - gs});
                     gs = i;
                 }
@@ -1585,18 +1584,25 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
                     for (uint64_t g = g0; g < g1; g++) {
                         auto [start, count] = groups[g];
                         uint8_t* base = h_output + start * RECORD_SIZE;
-                        // Build index, sort by full key, apply permutation
+                        // Use std::sort on records in-place via index + gather
                         std::vector<uint32_t> idx(count);
-                        for (uint64_t j = 0; j < count; j++) idx[j] = j;
+                        for (uint32_t j = 0; j < (uint32_t)count; j++) idx[j] = j;
                         std::sort(idx.begin(), idx.end(), [base](uint32_t a, uint32_t b) {
                             return key_compare(base + (uint64_t)a*RECORD_SIZE,
                                                base + (uint64_t)b*RECORD_SIZE, KEY_SIZE) < 0;
                         });
+                        // Check if already sorted (common case)
+                        bool sorted = true;
+                        for (uint64_t j = 0; j < count; j++) {
+                            if (idx[j] != j) { sorted = false; break; }
+                        }
+                        if (sorted) continue;
                         // Apply permutation via tmp buffer
-                        std::vector<uint8_t> tmp2(count * RECORD_SIZE);
+                        std::vector<uint8_t> buf(count * RECORD_SIZE);
                         for (uint64_t j = 0; j < count; j++)
-                            memcpy(tmp2.data() + j*RECORD_SIZE, base + (uint64_t)idx[j]*RECORD_SIZE, RECORD_SIZE);
-                        memcpy(base, tmp2.data(), count * RECORD_SIZE);
+                            memcpy(buf.data() + j*RECORD_SIZE,
+                                   base + (uint64_t)idx[j]*RECORD_SIZE, RECORD_SIZE);
+                        memcpy(base, buf.data(), count * RECORD_SIZE);
                     }
                 });
             }
