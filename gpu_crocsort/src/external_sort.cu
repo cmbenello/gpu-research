@@ -220,11 +220,29 @@ __global__ void extract_uint64_chunk_kernel(
 
 #ifdef USE_COMPACT_KEY
 static constexpr int COMPACT_KEY_SIZE = 32;
-// Compact map: which byte positions of the KEY actually vary (detected at runtime).
-// Filled by detect_compact_map(); uploaded to d_compact_map before sort.
-__constant__ int d_compact_map[64];     // up to 64 varying byte positions
-__constant__ int d_compact_count;        // actual count (≤ COMPACT_KEY_SIZE for compact path)
-// Host-side mirror (used by CPU compact extraction and CPU fixup)
+// Compact map: hardcoded TPC-H byte positions for the GPU fallback kernels
+// (build_compact_keys_kernel / extract_compact_prefix_from_records_kernel).
+// NOTE: updating this via cudaMemcpyToSymbol forces eager CUDA module loading
+// and causes "no kernel image" PTX-JIT failures on Turing when the sm_80 build
+// is used. We leave it at the compile-time initializer. The compact-upload
+// path (extracts on CPU) uses g_compact_map instead, so runtime detection
+// still applies to the actual hot path — only the unused GPU fallback kernels
+// still reference the hardcoded TPC-H map.
+__constant__ int d_compact_map[26] = {
+    0, 1,           // returnflag, linestatus
+    4, 5,           // shipdate varying
+    8, 9,           // commitdate varying
+    12, 13,         // receiptdate varying
+    19, 20, 21,     // extprice varying (3 bytes)
+    29,             // discount varying
+    37,             // tax varying
+    44, 45,         // quantity varying
+    51, 52, 53,     // orderkey varying
+    54, 55, 56, 57, // partkey (all 4 bytes)
+    59, 60, 61,     // suppkey varying
+    65              // linenumber varying
+};
+// Host-side runtime-detected map (used by CPU compact extraction)
 static int g_compact_map[64];
 static int g_compact_count = 0;
 
@@ -313,10 +331,10 @@ __global__ void build_compact_keys_kernel(
     if (i >= num_records) return;
     const uint8_t* rec = records + i * RECORD_SIZE;
     uint8_t* ck = compact_keys + i * COMPACT_KEY_SIZE;
-    int n = d_compact_count;
-    if (n > COMPACT_KEY_SIZE) n = COMPACT_KEY_SIZE;
-    for (int b = 0; b < n; b++) ck[b] = rec[d_compact_map[b]];
-    for (int b = n; b < COMPACT_KEY_SIZE; b++) ck[b] = 0;
+    #pragma unroll
+    for (int b = 0; b < 26; b++) ck[b] = rec[d_compact_map[b]];
+    // Pad remaining bytes with zero
+    ck[26] = 0; ck[27] = 0; ck[28] = 0; ck[29] = 0; ck[30] = 0; ck[31] = 0;
 }
 
 // Extract uint64 from compact key buffer at COMPACT_KEY_SIZE stride
@@ -351,12 +369,11 @@ __global__ void extract_compact_prefix_from_records_kernel(
     if (i >= num_records) return;
     uint32_t idx = perm[i];
     const uint8_t* rec = records + (uint64_t)idx * RECORD_SIZE;
-    int n = d_compact_count;
     uint64_t v1 = 0;
-    for (int b = 0; b < 8; b++) v1 = (v1 << 8) | (b < n ? rec[d_compact_map[b]] : 0);
+    for (int b = 0; b < 8; b++) v1 = (v1 << 8) | rec[d_compact_map[b]];
     prefix1[i] = v1;
     uint64_t v2 = 0;
-    for (int b = 8; b < 16; b++) v2 = (v2 << 8) | (b < n ? rec[d_compact_map[b]] : 0);
+    for (int b = 8; b < 16; b++) v2 = (v2 << 8) | rec[d_compact_map[b]];
     prefix2[i] = v2;
 }
 // Extract 16B prefix from compact key buffer (not from full records).
@@ -1345,10 +1362,10 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
             decision = "too many varying bytes — no compression benefit, use full upload";
         printf("[CompactDetect] Compactness: %d/%d = %.0f%% varying. Decision: %s\n",
                g_compact_count, KEY_SIZE, compactness * 100.0, decision);
-        // Upload to device constant memory
-        CUDA_CHECK(cudaMemcpyToSymbol(d_compact_map, g_compact_map,
-                                       sizeof(int) * std::min(g_compact_count, 64)));
-        CUDA_CHECK(cudaMemcpyToSymbol(d_compact_count, &g_compact_count, sizeof(int)));
+        // Intentionally NO cudaMemcpyToSymbol(d_compact_map, ...) — that forces
+        // eager CUDA module load and breaks PTX-JIT on Turing (see note at
+        // d_compact_map declaration). The compact-upload hot path uses
+        // g_compact_map on CPU and doesn't reference d_compact_map at all.
     }
 #endif
 
