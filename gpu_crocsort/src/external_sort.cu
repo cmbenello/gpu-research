@@ -220,31 +220,17 @@ __global__ void extract_uint64_chunk_kernel(
 
 #ifdef USE_COMPACT_KEY
 static constexpr int COMPACT_KEY_SIZE = 32;
-// Compact map: hardcoded TPC-H byte positions for the GPU fallback kernels
-// (build_compact_keys_kernel / extract_compact_prefix_from_records_kernel).
-// NOTE: updating this via cudaMemcpyToSymbol forces eager CUDA module loading
-// and causes "no kernel image" PTX-JIT failures on Turing when the sm_80 build
-// is used. We leave it at the compile-time initializer. The compact-upload
-// path (extracts on CPU) uses g_compact_map instead, so runtime detection
-// still applies to the actual hot path — only the unused GPU fallback kernels
-// still reference the hardcoded TPC-H map.
-__constant__ int d_compact_map[26] = {
-    0, 1,           // returnflag, linestatus
-    4, 5,           // shipdate varying
-    8, 9,           // commitdate varying
-    12, 13,         // receiptdate varying
-    19, 20, 21,     // extprice varying (3 bytes)
-    29,             // discount varying
-    37,             // tax varying
-    44, 45,         // quantity varying
-    51, 52, 53,     // orderkey varying
-    54, 55, 56, 57, // partkey (all 4 bytes)
-    59, 60, 61,     // suppkey varying
-    65              // linenumber varying
-};
-// Host-side runtime-detected map (used by CPU compact extraction)
+// Runtime-detected compact map (no hardcoded TPC-H values).
+// Host-side: filled by detect_compact_map() at sort entry.
+// Device-side: a plain cudaMalloc'd buffer, NOT __constant__ memory.
+// We deliberately avoid cudaMemcpyToSymbol on a __constant__ symbol because
+// that forces eager CUDA module loading, which triggers a PTX→sm_75 JIT
+// failure on Turing ("no kernel image available"). Using cudaMalloc +
+// cudaMemcpy + pass-by-pointer keeps module loading lazy so only the kernels
+// we actually launch get JIT'd.
 static int g_compact_map[64];
 static int g_compact_count = 0;
+static int* d_compact_map_ptr = nullptr;   // device buffer, size 64*sizeof(int)
 
 // TODO: measure the contribution of each stage independently:
 //   (1) how much does compact-key compression alone shrink the key / speed up sort?
@@ -325,16 +311,17 @@ static int detect_compact_map(const uint8_t* h_data, uint64_t num_records,
 __global__ void build_compact_keys_kernel(
     const uint8_t* __restrict__ records,
     uint8_t* __restrict__ compact_keys,
-    uint64_t num_records
+    uint64_t num_records,
+    const int* __restrict__ cmap,
+    int cmap_n
 ) {
     uint64_t i = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= num_records) return;
     const uint8_t* rec = records + i * RECORD_SIZE;
     uint8_t* ck = compact_keys + i * COMPACT_KEY_SIZE;
-    #pragma unroll
-    for (int b = 0; b < 26; b++) ck[b] = rec[d_compact_map[b]];
-    // Pad remaining bytes with zero
-    ck[26] = 0; ck[27] = 0; ck[28] = 0; ck[29] = 0; ck[30] = 0; ck[31] = 0;
+    int n = cmap_n < COMPACT_KEY_SIZE ? cmap_n : COMPACT_KEY_SIZE;
+    for (int b = 0; b < n; b++) ck[b] = rec[cmap[b]];
+    for (int b = n; b < COMPACT_KEY_SIZE; b++) ck[b] = 0;
 }
 
 // Extract uint64 from compact key buffer at COMPACT_KEY_SIZE stride
@@ -356,24 +343,26 @@ __global__ void extract_uint64_from_compact_kernel(
     sort_keys[i] = v;
 }
 // Extract 16B compact key prefix directly from original records using the byte map.
-// No separate compact key buffer needed — reads d_compact_map positions from records.
-// This gives 16 of 26 varying bytes, much higher entropy than raw record bytes 0-15.
+// No separate compact key buffer needed — reads cmap positions from records.
+// Gives first min(16, cmap_n) varying bytes — much higher entropy than raw record bytes 0-15.
 __global__ void extract_compact_prefix_from_records_kernel(
     const uint8_t* __restrict__ records,
     const uint32_t* __restrict__ perm,
     uint64_t* __restrict__ prefix1,   // compact positions 0-7
     uint64_t* __restrict__ prefix2,   // compact positions 8-15
-    uint64_t num_records
+    uint64_t num_records,
+    const int* __restrict__ cmap,
+    int cmap_n
 ) {
     uint64_t i = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= num_records) return;
     uint32_t idx = perm[i];
     const uint8_t* rec = records + (uint64_t)idx * RECORD_SIZE;
     uint64_t v1 = 0;
-    for (int b = 0; b < 8; b++) v1 = (v1 << 8) | rec[d_compact_map[b]];
+    for (int b = 0; b < 8; b++) v1 = (v1 << 8) | (b < cmap_n ? rec[cmap[b]] : 0);
     prefix1[i] = v1;
     uint64_t v2 = 0;
-    for (int b = 8; b < 16; b++) v2 = (v2 << 8) | rec[d_compact_map[b]];
+    for (int b = 8; b < 16; b++) v2 = (v2 << 8) | (b < cmap_n ? rec[cmap[b]] : 0);
     prefix2[i] = v2;
 }
 // Extract 16B prefix from compact key buffer (not from full records).
@@ -754,7 +743,8 @@ void ExternalGpuSort::sort_chunk_on_gpu(uint8_t* d_in, uint8_t* d_scratch,
     if (sort_ws.d_compact) {
     // Compact key path: build 32B keys from varying bytes, then 4 LSD passes
     if (!compact_preloaded)
-        build_compact_keys_kernel<<<nblks, nthreads, 0, s>>>(d_in, sort_ws.d_compact, n);
+        build_compact_keys_kernel<<<nblks, nthreads, 0, s>>>(
+            d_in, sort_ws.d_compact, n, d_compact_map_ptr, g_compact_count);
 
     int num_chunks = (COMPACT_KEY_SIZE + 7) / 8;  // 4 for 32B
     for (int chunk = num_chunks - 1; chunk >= 0; chunk--) {
@@ -820,7 +810,7 @@ void ExternalGpuSort::sort_chunk_on_gpu(uint8_t* d_in, uint8_t* d_scratch,
                 d_in, perm_in,
                 d_prefix_buffer + ovc_run_offset,
                 d_ovc_buffer + ovc_run_offset,
-                n);
+                n, d_compact_map_ptr, g_compact_count);
         }
         used_compact_prefix = true;
 #else
@@ -1362,10 +1352,15 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
             decision = "too many varying bytes — no compression benefit, use full upload";
         printf("[CompactDetect] Compactness: %d/%d = %.0f%% varying. Decision: %s\n",
                g_compact_count, KEY_SIZE, compactness * 100.0, decision);
-        // Intentionally NO cudaMemcpyToSymbol(d_compact_map, ...) — that forces
-        // eager CUDA module load and breaks PTX-JIT on Turing (see note at
-        // d_compact_map declaration). The compact-upload hot path uses
-        // g_compact_map on CPU and doesn't reference d_compact_map at all.
+        // Allocate + upload the runtime compact map to a plain device buffer.
+        // Using cudaMalloc + cudaMemcpy (not cudaMemcpyToSymbol on a __constant__
+        // symbol) keeps CUDA module loading lazy — the buggy PTX-JIT path on
+        // Turing only triggers if we eagerly touch a __constant__ symbol.
+        if (!d_compact_map_ptr) {
+            CUDA_CHECK(cudaMalloc(&d_compact_map_ptr, 64 * sizeof(int)));
+        }
+        CUDA_CHECK(cudaMemcpy(d_compact_map_ptr, g_compact_map,
+                              64 * sizeof(int), cudaMemcpyHostToDevice));
     }
 #endif
 
