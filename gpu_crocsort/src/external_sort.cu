@@ -1590,10 +1590,10 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
         printf("== Phase 4: CPU Prefix Fixup ==\n");
         {
             int hw = std::max(1, (int)std::thread::hardware_concurrency());
-            // Find groups of equal 16B prefixes (GPU sorted by 16B via 2 LSD passes)
+            // Find groups of equal 8B prefixes (GPU sorted by 8B only)
             std::vector<std::pair<uint64_t, uint64_t>> groups;
             uint64_t gs = 0;
-            int cmp_bytes = std::min(16, (int)KEY_SIZE);
+            int cmp_bytes = 8;  // GPU sorted by first 8 bytes of key
             for (uint64_t i = 1; i <= num_records; i++) {
                 if (i == num_records ||
                     memcmp(h_output + i * RECORD_SIZE, h_output + gs * RECORD_SIZE, cmp_bytes) != 0) {
