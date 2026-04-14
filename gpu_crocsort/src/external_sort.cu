@@ -220,21 +220,89 @@ __global__ void extract_uint64_chunk_kernel(
 
 #ifdef USE_COMPACT_KEY
 static constexpr int COMPACT_KEY_SIZE = 32;
-// Source byte offsets within the RECORD for each compact key byte
-__constant__ int d_compact_map[26] = {
-    0, 1,           // returnflag, linestatus
-    4, 5,           // shipdate varying
-    8, 9,           // commitdate varying
-    12, 13,         // receiptdate varying
-    19, 20, 21,     // extprice varying (3 bytes)
-    29,             // discount varying
-    37,             // tax varying
-    44, 45,         // quantity varying
-    51, 52, 53,     // orderkey varying
-    54, 55, 56, 57, // partkey (all 4 bytes)
-    59, 60, 61,     // suppkey varying
-    65              // linenumber varying
-};
+// Compact map: which byte positions of the KEY actually vary (detected at runtime).
+// Filled by detect_compact_map(); uploaded to d_compact_map before sort.
+__constant__ int d_compact_map[64];     // up to 64 varying byte positions
+__constant__ int d_compact_count;        // actual count (≤ COMPACT_KEY_SIZE for compact path)
+// Host-side mirror (used by CPU compact extraction and CPU fixup)
+static int g_compact_map[64];
+static int g_compact_count = 0;
+
+// TODO: measure the contribution of each stage independently:
+//   (1) how much does compact-key compression alone shrink the key / speed up sort?
+//   (2) how much additional compression/benefit does OVC give on top of that?
+// Want per-stage numbers (key bytes, PCIe bytes, CUB pass count, wall time) so we
+// can tell whether OVC is still pulling weight once the key is already compact.
+//
+// TODO: design a compression method specifically tailored to OVC.
+// Current approach (byte-position varies-or-not) is order-preserving but coarse —
+// keeps a whole byte if any bit varies. OVC compares adjacent sorted records and
+// encodes the first differing position, so an OVC-aware compression could:
+//   - use per-byte value ranges (min/max from sample) to pack at bit granularity
+//   - detect correlated byte groups that always co-vary (encode jointly)
+//   - exploit that OVC needs order-preserving equivalence, not exact bytes
+// Goal: shrink compact key below 32B (fewer CUB passes) while staying OVC-compatible.
+//
+// Detect which byte positions vary across a SAMPLE of records.
+//
+// Strategy: stratified random sampling. Divide the data into N buckets of size
+// stride; pick one random index from each bucket. Combines stride coverage
+// (sees all regions) with random offset (avoids periodic-alignment pathology).
+//
+// Probabilistic: a byte that varies in only K records (K << total) has
+// (K/total)^N probability of being missed at sample size N. For 1M sample
+// of 600M records, missing a byte that varies in 1% of records has prob
+// (0.99)^1M ≈ 0. Missing one that varies in 0.0001% (60 records) has prob
+// (0.9999999)^1M ≈ 90%. So sub-rare variations CAN be missed.
+//
+// Tunable via COMPACT_SAMPLE env var. Future work: characterize miss
+// probability vs. sample size on real datasets, compare strategies:
+//   - pure stride        (cheap, vulnerable to alignment)
+//   - stratified random  (current default — balanced)
+//   - reservoir sampling (uniform but more compute)
+//   - full scan          (deterministic, ~1-2s for 72GB)
+static int detect_compact_map(const uint8_t* h_data, uint64_t num_records,
+                               int* h_map_out) {
+    uint64_t sample_target = 1000000;
+    if (const char* e = getenv("COMPACT_SAMPLE")) {
+        long v = atol(e);
+        if (v > 0) sample_target = (uint64_t)v;
+    }
+    uint64_t sample_n = std::min(num_records, sample_target);
+    uint64_t stride = std::max((uint64_t)1, num_records / sample_n);
+
+    uint8_t mn[KEY_SIZE], mx[KEY_SIZE];
+    for (int b = 0; b < KEY_SIZE; b++) { mn[b] = 0xff; mx[b] = 0; }
+
+    // Stratified random: one random pick from each [bucket*stride, (bucket+1)*stride).
+    // Deterministic LCG seed for reproducibility (override via COMPACT_SEED env).
+    uint64_t seed = 0x12345678ULL;
+    if (const char* e = getenv("COMPACT_SEED")) seed = (uint64_t)atoll(e);
+
+    for (uint64_t bucket = 0; bucket * stride < num_records; bucket++) {
+        // LCG step: next = a*x + c (Numerical Recipes constants)
+        seed = seed * 1664525ULL + 1013904223ULL;
+        uint64_t bucket_lo = bucket * stride;
+        uint64_t bucket_hi = std::min(bucket_lo + stride, num_records);
+        uint64_t off = (bucket_hi > bucket_lo) ? (seed % (bucket_hi - bucket_lo)) : 0;
+        uint64_t i = bucket_lo + off;
+        const uint8_t* rec = h_data + i * RECORD_SIZE;
+        for (int b = 0; b < KEY_SIZE; b++) {
+            uint8_t v = rec[b];
+            if (v < mn[b]) mn[b] = v;
+            if (v > mx[b]) mx[b] = v;
+        }
+    }
+
+    int count = 0;
+    for (int b = 0; b < KEY_SIZE; b++) {
+        if (mn[b] != mx[b]) {
+            if (count < 64) h_map_out[count] = b;
+            count++;
+        }
+    }
+    return count;
+}
 
 __global__ void build_compact_keys_kernel(
     const uint8_t* __restrict__ records,
@@ -245,10 +313,10 @@ __global__ void build_compact_keys_kernel(
     if (i >= num_records) return;
     const uint8_t* rec = records + i * RECORD_SIZE;
     uint8_t* ck = compact_keys + i * COMPACT_KEY_SIZE;
-    #pragma unroll
-    for (int b = 0; b < 26; b++) ck[b] = rec[d_compact_map[b]];
-    // Pad remaining bytes with zero
-    ck[26] = 0; ck[27] = 0; ck[28] = 0; ck[29] = 0; ck[30] = 0; ck[31] = 0;
+    int n = d_compact_count;
+    if (n > COMPACT_KEY_SIZE) n = COMPACT_KEY_SIZE;
+    for (int b = 0; b < n; b++) ck[b] = rec[d_compact_map[b]];
+    for (int b = n; b < COMPACT_KEY_SIZE; b++) ck[b] = 0;
 }
 
 // Extract uint64 from compact key buffer at COMPACT_KEY_SIZE stride
@@ -283,11 +351,12 @@ __global__ void extract_compact_prefix_from_records_kernel(
     if (i >= num_records) return;
     uint32_t idx = perm[i];
     const uint8_t* rec = records + (uint64_t)idx * RECORD_SIZE;
+    int n = d_compact_count;
     uint64_t v1 = 0;
-    for (int b = 0; b < 8; b++) v1 = (v1 << 8) | rec[d_compact_map[b]];
+    for (int b = 0; b < 8; b++) v1 = (v1 << 8) | (b < n ? rec[d_compact_map[b]] : 0);
     prefix1[i] = v1;
     uint64_t v2 = 0;
-    for (int b = 8; b < 16; b++) v2 = (v2 << 8) | rec[d_compact_map[b]];
+    for (int b = 8; b < 16; b++) v2 = (v2 << 8) | (b < n ? rec[d_compact_map[b]] : 0);
     prefix2[i] = v2;
 }
 // Extract 16B prefix from compact key buffer (not from full records).
@@ -785,12 +854,12 @@ ExternalGpuSort::generate_runs_pipelined(
     // Instead of uploading 120B records (72GB for SF100), extract 32B compact
     // keys on CPU and upload only those. 3.75× less PCIe traffic.
     // Pipeline: CPU extract → H2D compact keys → GPU sort (from d_compact)
-    bool use_compact_upload = (d_ovc_buffer && sort_ws.d_compact);
+    // Compact upload only valid if sample detected ≤ COMPACT_KEY_SIZE varying bytes.
+    bool use_compact_upload = (d_ovc_buffer && sort_ws.d_compact &&
+                                g_compact_count > 0 && g_compact_count <= COMPACT_KEY_SIZE);
     if (use_compact_upload) {
-        static const int h_cmap[26] = {
-            0, 1, 4, 5, 8, 9, 12, 13, 19, 20, 21, 29, 37, 44, 45, 51, 52, 53,
-            54, 55, 56, 57, 59, 60, 61, 65
-        };
+        const int* h_cmap = g_compact_map;
+        const int cmap_n = g_compact_count;
 
         // Use h_pin[0] and h_pin[1] as double-buffered staging for compact keys.
         // They're allocated at buf_bytes (3.7GB each), plenty for compact keys (1GB).
@@ -813,8 +882,8 @@ ExternalGpuSort::generate_runs_pipelined(
                     for (uint64_t j = lo; j < hi; j++) {
                         const uint8_t* rec = h_data + (offset + j) * RECORD_SIZE;
                         uint8_t* ck = h_compact[ping] + j * COMPACT_KEY_SIZE;
-                        for (int b = 0; b < 26; b++) ck[b] = rec[h_cmap[b]];
-                        ck[26]=0; ck[27]=0; ck[28]=0; ck[29]=0; ck[30]=0; ck[31]=0;
+                        for (int b = 0; b < cmap_n; b++) ck[b] = rec[h_cmap[b]];
+                        for (int b = cmap_n; b < COMPACT_KEY_SIZE; b++) ck[b] = 0;
                     }
                 });
             }
@@ -1242,6 +1311,46 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
     if (num_records <= 1) return r;
     uint64_t total_bytes = num_records * RECORD_SIZE;
     printf("[ExternalSort] Sorting %lu records (%.2f GB)\n\n", num_records, total_bytes/1e9);
+
+#ifdef USE_COMPACT_KEY
+    // Detect varying byte positions in the sort key from a 1M-record sample.
+    // This makes the compact-key optimization general — works on any dataset,
+    // not just TPC-H. Cost: ~10-50ms (one sequential scan over 0.4-2 GB).
+    {
+        WallTimer dt; dt.begin();
+        g_compact_count = detect_compact_map(h_data, num_records, g_compact_map);
+        double det_ms = dt.end_ms();
+        uint64_t s_target = 1000000;
+        if (const char* e = getenv("COMPACT_SAMPLE")) { long v = atol(e); if (v > 0) s_target = (uint64_t)v; }
+        uint64_t actual_sample = std::min(num_records, s_target);
+        printf("[CompactDetect] %d/%d key bytes vary (stratified random sample %luK of %luM records, %.0f ms)\n",
+               g_compact_count, KEY_SIZE, actual_sample / 1000, num_records / 1000000, det_ms);
+        if (g_compact_count > 0) {
+            printf("[CompactDetect] Varying byte positions:");
+            for (int i = 0; i < g_compact_count && i < 32; i++) printf(" %d", g_compact_map[i]);
+            if (g_compact_count > 32) printf(" ...");
+            printf("\n");
+        }
+        // Decision: which sort path benefits most?
+        double compactness = (double)g_compact_count / KEY_SIZE;
+        const char* decision;
+        if (g_compact_count == 0) decision = "ALL CONSTANT — degenerate (sort is identity)";
+        else if (g_compact_count <= 16)
+            decision = "≤16 varying bytes — compact prefix is full sort key (no ties possible)";
+        else if (g_compact_count <= COMPACT_KEY_SIZE)
+            decision = "compact upload WINS (≤32 varying bytes, fits in 32B compact buffer)";
+        else if (g_compact_count <= 64)
+            decision = "compact UPLOAD still wins, but compact PREFIX may have ties (CPU fixup)";
+        else
+            decision = "too many varying bytes — no compression benefit, use full upload";
+        printf("[CompactDetect] Compactness: %d/%d = %.0f%% varying. Decision: %s\n",
+               g_compact_count, KEY_SIZE, compactness * 100.0, decision);
+        // Upload to device constant memory
+        CUDA_CHECK(cudaMemcpyToSymbol(d_compact_map, g_compact_map,
+                                       sizeof(int) * std::min(g_compact_count, 64)));
+        CUDA_CHECK(cudaMemcpyToSymbol(d_compact_count, &g_compact_count, sizeof(int)));
+    }
+#endif
 
     // Lazy-allocate GPU buffers if needed
     if (!d_buf[0]) {
@@ -1808,18 +1917,15 @@ run_generation:
         double fixup_ms = 0;
 
 #ifdef USE_COMPACT_KEY
-        // Compact key byte map (host copy of d_compact_map)
-        static const int h_compact_map[26] = {
-            0, 1, 4, 5, 8, 9, 12, 13, 19, 20, 21, 29, 37, 44, 45, 51, 52, 53,
-            54, 55, 56, 57, 59, 60, 61, 65
-        };
+        // Use runtime-detected compact map (filled by detect_compact_map at sort start)
+        const int* h_compact_map = g_compact_map;
 #endif
 
         // Determine effective prefix bytes the GPU sorted by
         int effective_prefix_bytes;
 #ifdef USE_COMPACT_KEY
         if (used_compact_prefix) {
-            effective_prefix_bytes = std::min(16, (int)COMPACT_KEY_SIZE);
+            effective_prefix_bytes = std::min(16, g_compact_count);
         } else
 #endif
         {
@@ -1829,7 +1935,8 @@ run_generation:
         // Skip fixup if: (a) no pfx1 ties detected on GPU, or (b) prefix covers full key
         bool need_fixup = h_has_ties;
 #ifdef USE_COMPACT_KEY
-        if (used_compact_prefix && COMPACT_KEY_SIZE <= 16) need_fixup = false;
+        // If compact has ≤16 varying bytes total, the 16B prefix IS the full sort key
+        if (used_compact_prefix && g_compact_count <= 16) need_fixup = false;
 #endif
         if (KEY_SIZE <= 16) need_fixup = false;
 
