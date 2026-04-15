@@ -1,0 +1,280 @@
+════════════════════════════════════════════════════
+  GPU External Merge Sort — Streaming Benchmark
+════════════════════════════════════════════════════
+GPU: Quadro RTX 6000 (25.4 GB HBM, 72 SMs, 672 GB/s BW)
+Data: 36.00 GB (300005811 records × 120 bytes) (from file)
+
+Allocating 36.00 GB pinned host memory...
+Loading from /tmp/lineitem_sf50_normalized.bin...
+  Loaded 36.00 GB in 10123 ms (3.56 GB/s)
+
+
+══════════ Experiment run 1/6 ══════════
+[ExternalSort] GPU: 25.15 GB free, budget: 16.35 GB
+[ExternalSort] Triple-buffer: 3 × 5.45 GB (45 M records each)
+[ExternalSort] Sorting 300005811 records (36.00 GB)
+
+[CompactDetect] 61/66 key bytes vary (stratified random sample 1000K of 300M records, 37 ms)
+[CompactDetect] Varying byte positions: 0 1 5 7 8 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 ...
+[CompactDetect] Compactness: 61/66 = 92% varying. Decision: compact UPLOAD still wins, but compact PREFIX may have ties (CPU fixup)
+== Step 1+2: Key Upload ==
+  Keys too large for single-pass (19.8 GB > 22.6 GB)
+  Using OVC ARCHITECTURE: run-gen + GPU OVC merge + CPU gather
+  OVC buffers: 6.0 GB (4B OVC + 8B prefix + 4B perm per record)
+  32B OVC extension: ENABLED (pfx3+pfx4 allocated, 4.8 GB extra)
+  COMPACT UPLOAD: 170M rec/chunk, 2 chunks, PCIe 9.6 GB (vs 36.0 GB full), CUB scratch 145 MB
+
+== Phase 1: Run Generation (chunked LSD sort) ==
+  Run 1/2: 19484.9 MB (compact upload 5196.0 MB)      Run 2/2: 14848.1 MB (compact upload 3959.5 MB)    
+  2 runs in 2221 ms (16.21 GB/s)
+
+== Phase 2: GPU 32B Prefix Merge (4 CUB LSD passes) ==
+  GPU free before merge alloc: 14.30 GB
+  GPU free after merge alloc: 9.40 GB
+  Pass 1 (sort by pfx4 + gather): 179 ms
+  Pass 2 (sort by pfx3 + gather): 158 ms
+  Pass 3 (sort by pfx2 + gather): 157 ms
+  GPU 32B tie check: TIES FOUND — CPU fixup needed
+  Pass 4 (sort by pfx1 + gather + boundaries): 174 ms
+  GPU 32B prefix merge total: 667 ms
+  Downloaded perm in 117 ms
+== Phase 3: CPU Gather ==
+  Gathered 36.00 GB in 2602 ms (13.84 GB/s)
+== Phase 4: CPU Prefix Fixup (32B prefix, ties detected) ==
+  3153346 groups with ties (avg 95 records, scan 61 + stitch 85 ms, GPU boundary bitmap)
+  Groups stats: min=2 max=693 sum=299761123 (distribution: 1k=0 10k=0 100k=0 1m=0 10m=0)
+  Fixup: active bytes are contiguous run [37..65] (8B key + 21B tail, fast path enabled)
+  Fixup: 1312 ms [group-detect 146 + parallel 1156] (per-thread: pack 557.6 + sort 449.0 + reorder 124.1 ms, 84636 skipped)
+  Total merge+gather+fixup: 4698 ms
+[Correctness] Sample map verified against all 300005811 records — compact sort is FULL-KEY-EQUIVALENT.
+
+Verifying...
+  PASS sortedness: 300005811 records in non-decreasing order (591 ms)
+  PASS multiset:   output is a permutation of input (hash=0x89c28ecae7c4b777, 2290 ms)
+
+CSV,Quadro RTX 6000,36.00,300005811,2,2,2220.98,4698.44,6919.42,5.2029,9.60,1.20,10.80,0.3
+
+══════════ Experiment run 2/6 ══════════
+[ExternalSort] GPU: 25.14 GB free, budget: 16.34 GB
+[ExternalSort] Triple-buffer: 3 × 5.45 GB (45 M records each)
+[ExternalSort] Sorting 300005811 records (36.00 GB)
+
+[CompactDetect] 61/66 key bytes vary (stratified random sample 1000K of 300M records, 0 ms)
+[CompactDetect] Varying byte positions: 0 1 5 7 8 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 ...
+[CompactDetect] Compactness: 61/66 = 92% varying. Decision: compact UPLOAD still wins, but compact PREFIX may have ties (CPU fixup)
+== Step 1+2: Key Upload ==
+  Keys too large for single-pass (19.8 GB > 22.6 GB)
+  Using OVC ARCHITECTURE: run-gen + GPU OVC merge + CPU gather
+  OVC buffers: 6.0 GB (4B OVC + 8B prefix + 4B perm per record)
+  32B OVC extension: ENABLED (pfx3+pfx4 allocated, 4.8 GB extra)
+  COMPACT UPLOAD: 170M rec/chunk, 2 chunks, PCIe 9.6 GB (vs 36.0 GB full), CUB scratch 145 MB
+
+== Phase 1: Run Generation (chunked LSD sort) ==
+  Run 1/2: 19476.7 MB (compact upload 5193.8 MB)      Run 2/2: 14856.2 MB (compact upload 3961.7 MB)    
+  2 runs in 2225 ms (16.18 GB/s)
+
+== Phase 2: GPU 32B Prefix Merge (4 CUB LSD passes) ==
+  GPU free before merge alloc: 14.30 GB
+  GPU free after merge alloc: 9.39 GB
+  Pass 1 (sort by pfx4 + gather): 176 ms
+  Pass 2 (sort by pfx3 + gather): 158 ms
+  Pass 3 (sort by pfx2 + gather): 157 ms
+  GPU 32B tie check: TIES FOUND — CPU fixup needed
+  Pass 4 (sort by pfx1 + gather + boundaries): 174 ms
+  GPU 32B prefix merge total: 664 ms
+  Downloaded perm in 117 ms
+== Phase 3: CPU Gather ==
+  Gathered 36.00 GB in 2510 ms (14.34 GB/s)
+== Phase 4: CPU Prefix Fixup (32B prefix, ties detected) ==
+  3153346 groups with ties (avg 95 records, scan 55 + stitch 81 ms, GPU boundary bitmap)
+  Groups stats: min=2 max=693 sum=299761123 (distribution: 1k=0 10k=0 100k=0 1m=0 10m=0)
+  Fixup: active bytes are contiguous run [37..65] (8B key + 21B tail, fast path enabled)
+  Fixup: 1307 ms [group-detect 136 + parallel 1161] (per-thread: pack 555.5 + sort 450.3 + reorder 127.4 ms, 84636 skipped)
+  Total merge+gather+fixup: 4599 ms
+[Correctness] Sample map verified against all 300005811 records — compact sort is FULL-KEY-EQUIVALENT.
+
+Verifying...
+  PASS sortedness: 300005811 records in non-decreasing order (616 ms)
+  PASS multiset:   output is a permutation of input (hash=0x89c28ecae7c4b777, 2281 ms)
+
+CSV,Quadro RTX 6000,36.00,300005811,2,2,2225.00,4599.23,6824.23,5.2754,9.60,1.20,10.80,0.3
+
+══════════ Experiment run 3/6 ══════════
+[ExternalSort] GPU: 25.13 GB free, budget: 16.34 GB
+[ExternalSort] Triple-buffer: 3 × 5.45 GB (45 M records each)
+[ExternalSort] Sorting 300005811 records (36.00 GB)
+
+[CompactDetect] 61/66 key bytes vary (stratified random sample 1000K of 300M records, 0 ms)
+[CompactDetect] Varying byte positions: 0 1 5 7 8 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 ...
+[CompactDetect] Compactness: 61/66 = 92% varying. Decision: compact UPLOAD still wins, but compact PREFIX may have ties (CPU fixup)
+== Step 1+2: Key Upload ==
+  Keys too large for single-pass (19.8 GB > 22.6 GB)
+  Using OVC ARCHITECTURE: run-gen + GPU OVC merge + CPU gather
+  OVC buffers: 6.0 GB (4B OVC + 8B prefix + 4B perm per record)
+  32B OVC extension: ENABLED (pfx3+pfx4 allocated, 4.8 GB extra)
+  COMPACT UPLOAD: 170M rec/chunk, 2 chunks, PCIe 9.6 GB (vs 36.0 GB full), CUB scratch 145 MB
+
+== Phase 1: Run Generation (chunked LSD sort) ==
+  Run 1/2: 19473.5 MB (compact upload 5192.9 MB)      Run 2/2: 14859.4 MB (compact upload 3962.5 MB)    
+  2 runs in 2224 ms (16.18 GB/s)
+
+== Phase 2: GPU 32B Prefix Merge (4 CUB LSD passes) ==
+  GPU free before merge alloc: 14.29 GB
+  GPU free after merge alloc: 9.39 GB
+  Pass 1 (sort by pfx4 + gather): 176 ms
+  Pass 2 (sort by pfx3 + gather): 158 ms
+  Pass 3 (sort by pfx2 + gather): 157 ms
+  GPU 32B tie check: TIES FOUND — CPU fixup needed
+  Pass 4 (sort by pfx1 + gather + boundaries): 174 ms
+  GPU 32B prefix merge total: 664 ms
+  Downloaded perm in 117 ms
+== Phase 3: CPU Gather ==
+  Gathered 36.00 GB in 2537 ms (14.19 GB/s)
+== Phase 4: CPU Prefix Fixup (32B prefix, ties detected) ==
+  3153346 groups with ties (avg 95 records, scan 39 + stitch 79 ms, GPU boundary bitmap)
+  Groups stats: min=2 max=693 sum=299761123 (distribution: 1k=0 10k=0 100k=0 1m=0 10m=0)
+  Fixup: active bytes are contiguous run [37..65] (8B key + 21B tail, fast path enabled)
+  Fixup: 1288 ms [group-detect 118 + parallel 1159] (per-thread: pack 544.9 + sort 462.4 + reorder 128.1 ms, 84636 skipped)
+  Total merge+gather+fixup: 4607 ms
+[Correctness] Sample map verified against all 300005811 records — compact sort is FULL-KEY-EQUIVALENT.
+
+Verifying...
+  PASS sortedness: 300005811 records in non-decreasing order (615 ms)
+  PASS multiset:   output is a permutation of input (hash=0x89c28ecae7c4b777, 2235 ms)
+
+CSV,Quadro RTX 6000,36.00,300005811,2,2,2224.48,4606.53,6831.01,5.2702,9.60,1.20,10.80,0.3
+
+══════════ Experiment run 4/6 ══════════
+[ExternalSort] GPU: 25.12 GB free, budget: 16.33 GB
+[ExternalSort] Triple-buffer: 3 × 5.44 GB (45 M records each)
+[ExternalSort] Sorting 300005811 records (36.00 GB)
+
+[CompactDetect] 61/66 key bytes vary (stratified random sample 1000K of 300M records, 0 ms)
+[CompactDetect] Varying byte positions: 0 1 5 7 8 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 ...
+[CompactDetect] Compactness: 61/66 = 92% varying. Decision: compact UPLOAD still wins, but compact PREFIX may have ties (CPU fixup)
+== Step 1+2: Key Upload ==
+  Keys too large for single-pass (19.8 GB > 22.6 GB)
+  Using OVC ARCHITECTURE: run-gen + GPU OVC merge + CPU gather
+  OVC buffers: 6.0 GB (4B OVC + 8B prefix + 4B perm per record)
+  32B OVC extension: ENABLED (pfx3+pfx4 allocated, 4.8 GB extra)
+  COMPACT UPLOAD: 170M rec/chunk, 2 chunks, PCIe 9.6 GB (vs 36.0 GB full), CUB scratch 145 MB
+
+== Phase 1: Run Generation (chunked LSD sort) ==
+  Run 1/2: 19467.0 MB (compact upload 5191.2 MB)      Run 2/2: 14865.9 MB (compact upload 3964.3 MB)    
+  2 runs in 2267 ms (15.88 GB/s)
+
+== Phase 2: GPU 32B Prefix Merge (4 CUB LSD passes) ==
+  GPU free before merge alloc: 14.29 GB
+  GPU free after merge alloc: 9.39 GB
+  Pass 1 (sort by pfx4 + gather): 175 ms
+  Pass 2 (sort by pfx3 + gather): 158 ms
+  Pass 3 (sort by pfx2 + gather): 157 ms
+  GPU 32B tie check: TIES FOUND — CPU fixup needed
+  Pass 4 (sort by pfx1 + gather + boundaries): 174 ms
+  GPU 32B prefix merge total: 664 ms
+  Downloaded perm in 117 ms
+== Phase 3: CPU Gather ==
+  Gathered 36.00 GB in 2514 ms (14.32 GB/s)
+== Phase 4: CPU Prefix Fixup (32B prefix, ties detected) ==
+  3153346 groups with ties (avg 95 records, scan 45 + stitch 82 ms, GPU boundary bitmap)
+  Groups stats: min=2 max=693 sum=299761123 (distribution: 1k=0 10k=0 100k=0 1m=0 10m=0)
+  Fixup: active bytes are contiguous run [37..65] (8B key + 21B tail, fast path enabled)
+  Fixup: 1294 ms [group-detect 127 + parallel 1157] (per-thread: pack 552.6 + sort 452.9 + reorder 128.4 ms, 84636 skipped)
+  Total merge+gather+fixup: 4589 ms
+[Correctness] Sample map verified against all 300005811 records — compact sort is FULL-KEY-EQUIVALENT.
+
+Verifying...
+  PASS sortedness: 300005811 records in non-decreasing order (604 ms)
+  PASS multiset:   output is a permutation of input (hash=0x89c28ecae7c4b777, 2110 ms)
+
+CSV,Quadro RTX 6000,36.00,300005811,2,2,2267.15,4589.02,6856.16,5.2509,9.60,1.20,10.80,0.3
+
+══════════ Experiment run 5/6 ══════════
+[ExternalSort] GPU: 25.12 GB free, budget: 16.33 GB
+[ExternalSort] Triple-buffer: 3 × 5.44 GB (45 M records each)
+[ExternalSort] Sorting 300005811 records (36.00 GB)
+
+[CompactDetect] 61/66 key bytes vary (stratified random sample 1000K of 300M records, 0 ms)
+[CompactDetect] Varying byte positions: 0 1 5 7 8 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 ...
+[CompactDetect] Compactness: 61/66 = 92% varying. Decision: compact UPLOAD still wins, but compact PREFIX may have ties (CPU fixup)
+== Step 1+2: Key Upload ==
+  Keys too large for single-pass (19.8 GB > 22.6 GB)
+  Using OVC ARCHITECTURE: run-gen + GPU OVC merge + CPU gather
+  OVC buffers: 6.0 GB (4B OVC + 8B prefix + 4B perm per record)
+  32B OVC extension: ENABLED (pfx3+pfx4 allocated, 4.8 GB extra)
+  COMPACT UPLOAD: 170M rec/chunk, 2 chunks, PCIe 9.6 GB (vs 36.0 GB full), CUB scratch 145 MB
+
+== Phase 1: Run Generation (chunked LSD sort) ==
+  Run 1/2: 19463.7 MB (compact upload 5190.3 MB)      Run 2/2: 14869.2 MB (compact upload 3965.1 MB)    
+  2 runs in 2249 ms (16.01 GB/s)
+
+== Phase 2: GPU 32B Prefix Merge (4 CUB LSD passes) ==
+  GPU free before merge alloc: 14.29 GB
+  GPU free after merge alloc: 9.39 GB
+  Pass 1 (sort by pfx4 + gather): 176 ms
+  Pass 2 (sort by pfx3 + gather): 158 ms
+  Pass 3 (sort by pfx2 + gather): 157 ms
+  GPU 32B tie check: TIES FOUND — CPU fixup needed
+  Pass 4 (sort by pfx1 + gather + boundaries): 174 ms
+  GPU 32B prefix merge total: 664 ms
+  Downloaded perm in 117 ms
+== Phase 3: CPU Gather ==
+  Gathered 36.00 GB in 2510 ms (14.34 GB/s)
+== Phase 4: CPU Prefix Fixup (32B prefix, ties detected) ==
+  3153346 groups with ties (avg 95 records, scan 51 + stitch 81 ms, GPU boundary bitmap)
+  Groups stats: min=2 max=693 sum=299761123 (distribution: 1k=0 10k=0 100k=0 1m=0 10m=0)
+  Fixup: active bytes are contiguous run [37..65] (8B key + 21B tail, fast path enabled)
+  Fixup: 1300 ms [group-detect 132 + parallel 1157] (per-thread: pack 554.3 + sort 452.1 + reorder 128.9 ms, 84636 skipped)
+  Total merge+gather+fixup: 4592 ms
+[Correctness] Sample map verified against all 300005811 records — compact sort is FULL-KEY-EQUIVALENT.
+
+Verifying...
+  PASS sortedness: 300005811 records in non-decreasing order (608 ms)
+  PASS multiset:   output is a permutation of input (hash=0x89c28ecae7c4b777, 2091 ms)
+
+CSV,Quadro RTX 6000,36.00,300005811,2,2,2248.56,4591.72,6840.29,5.2630,9.60,1.20,10.80,0.3
+
+══════════ Experiment run 6/6 ══════════
+[ExternalSort] GPU: 25.11 GB free, budget: 16.32 GB
+[ExternalSort] Triple-buffer: 3 × 5.44 GB (45 M records each)
+[ExternalSort] Sorting 300005811 records (36.00 GB)
+
+[CompactDetect] 61/66 key bytes vary (stratified random sample 1000K of 300M records, 0 ms)
+[CompactDetect] Varying byte positions: 0 1 5 7 8 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 ...
+[CompactDetect] Compactness: 61/66 = 92% varying. Decision: compact UPLOAD still wins, but compact PREFIX may have ties (CPU fixup)
+== Step 1+2: Key Upload ==
+  Keys too large for single-pass (19.8 GB > 22.6 GB)
+  Using OVC ARCHITECTURE: run-gen + GPU OVC merge + CPU gather
+  OVC buffers: 6.0 GB (4B OVC + 8B prefix + 4B perm per record)
+  32B OVC extension: ENABLED (pfx3+pfx4 allocated, 4.8 GB extra)
+  COMPACT UPLOAD: 170M rec/chunk, 2 chunks, PCIe 9.6 GB (vs 36.0 GB full), CUB scratch 145 MB
+
+== Phase 1: Run Generation (chunked LSD sort) ==
+  Run 1/2: 19458.9 MB (compact upload 5189.0 MB)      Run 2/2: 14874.1 MB (compact upload 3966.4 MB)    
+  2 runs in 2239 ms (16.08 GB/s)
+
+== Phase 2: GPU 32B Prefix Merge (4 CUB LSD passes) ==
+  GPU free before merge alloc: 14.29 GB
+  GPU free after merge alloc: 9.38 GB
+  Pass 1 (sort by pfx4 + gather): 175 ms
+  Pass 2 (sort by pfx3 + gather): 158 ms
+  Pass 3 (sort by pfx2 + gather): 157 ms
+  GPU 32B tie check: TIES FOUND — CPU fixup needed
+  Pass 4 (sort by pfx1 + gather + boundaries): 174 ms
+  GPU 32B prefix merge total: 664 ms
+  Downloaded perm in 117 ms
+== Phase 3: CPU Gather ==
+  Gathered 36.00 GB in 2516 ms (14.31 GB/s)
+== Phase 4: CPU Prefix Fixup (32B prefix, ties detected) ==
+  3153346 groups with ties (avg 95 records, scan 49 + stitch 81 ms, GPU boundary bitmap)
+  Groups stats: min=2 max=693 sum=299761123 (distribution: 1k=0 10k=0 100k=0 1m=0 10m=0)
+  Fixup: active bytes are contiguous run [37..65] (8B key + 21B tail, fast path enabled)
+  Fixup: 1301 ms [group-detect 130 + parallel 1161] (per-thread: pack 548.0 + sort 455.8 + reorder 129.9 ms, 84636 skipped)
+  Total merge+gather+fixup: 4598 ms
+[Correctness] Sample map verified against all 300005811 records — compact sort is FULL-KEY-EQUIVALENT.
+
+Verifying...
+  PASS sortedness: 300005811 records in non-decreasing order (628 ms)
+  PASS multiset:   output is a permutation of input (hash=0x89c28ecae7c4b777, 2238 ms)
+
+CSV,Quadro RTX 6000,36.00,300005811,2,2,2238.94,4597.87,6836.80,5.2657,9.60,1.20,10.80,0.3
