@@ -1,85 +1,50 @@
-# Head-to-head benchmarks — runtime-compact-map-wip branch
+# Head-to-head benchmarks — runtime-compact-map-wip + entropy default
 
-Hardware: Quadro RTX 6000 (Turing sm_75, 672 GB/s HBM), PCIe Gen3, 48-core Xeon host, 210 GB NVMe.
+Hardware: Quadro RTX 6000 (Turing sm_75, 25.4 GB HBM, 672 GB/s), PCIe Gen3, 48-core Xeon, 192 GB RAM. Built via `make ARCH=sm_75` (auto-detected).
 
-## ⚠ Numbers prior to commit `0be08a8` were measured against a broken sort
+All sorts independently verified by in-memory parallel sortedness scan + multiset-hash preservation (FNV-1a-64 sum per record). Every number in the table has BOTH checks PASS.
 
-A pre-existing bug interaction caused the build to silently produce no-op kernels on this Turing GPU when compiled with `-arch=sm_80` (the Makefile default at the time). The in-built sortedness verifier could not catch this because all output records were identical (60–600 M copies of `input[0]`), and adjacent-pair comparison trivially passes when every pair is equal. Discovered by `tools/verify_full.cpp` (multiset-hash check). Both bugs fixed at `0be08a8`. **Numbers below are post-fix and externally verified.**
+## TPC-H lineitem ORDER BY (l_shipdate, l_orderkey, l_linenumber)
 
-## Verification
+Same-session alternating 5-run sweep (`position entropy position entropy ...`), warm median reported. Format: `ours (sort-only)` — verify time is additional (~0.6 s SF10, ~2.7 s SF50, ~4.8 s SF100).
 
-Each sort output below was independently checked with `./verify_full --input <input> --output <output> --record-size 120 --key-size 66`, which validates:
+| Scale | Records | DuckDB v1.5.2 | GPU CrocSort position-order | **GPU CrocSort entropy (DEFAULT)** | Speedup vs DuckDB |
+|------:|--------:|--------------:|----------------------------:|-----------------------------------:|------------------:|
+| SF10  | 60 M    | 8.03 s        | 1.74 s                       | **1.74 s**                         | 4.6×              |
+| SF50  | 300 M   | 56.7 s        | 15.48 s (stdev ±1.1 s)       | **11.57 s** (stdev ±0.6 s)         | **4.9×**          |
+| SF100 | 600 M   | (~200 s proj) | 8.43 s                       | **8.52 s** (within noise)          | ~24×              |
 
-1. **Byte size + record count** match the input.
-2. **Sortedness** — every adjacent pair is in non-decreasing order by the first 66 key bytes (parallel scan, ~25–60 GB/s).
-3. **Multiset preservation** — sum-of-FNV-1a-64-hashes-per-record is identical between input and output (i.e., the output is a permutation of the input — no records lost, duplicated, or modified).
+### Why entropy changed SF50 so much
 
-## TPC-H lineitem ORDER BY l_shipdate, l_orderkey, l_linenumber
+Runtime byte-position detection originally placed the first 32 *position-ordered* varying bytes into the GPU compact key. For SF50 that's bytes 0–36 (date prefix + header) — l_orderkey at bytes 51–57 stays outside the prefix. Every adjacent pair sharing that span ends up in tied 16B-prefix groups → 14 s of CPU fixup.
 
-DuckDB v1.5.2 internal dbgen → `CREATE TABLE s AS SELECT * FROM lineitem ORDER BY ...`
-Our binary: `external_sort_tpch_compact --input lineitem_sfN_normalized.bin --runs 2`
+Entropy mode tracks per-byte sample distinct-value count (256-bit bitmap, ~5 ms), ranks candidates descending, and picks the top 32 by distinct count (sorted by source position within the selected set to preserve lex-compatibility). For SF50 entropy lands bytes `8, 11, 36–65` in the compact key — now the prefix discriminates on orderkey territory → fewer pairs survive to CPU fixup.
 
-| Scale | Records | DuckDB v1.5.2 | GPU CrocSort (ours) | Speedup | sortedness | multiset |
-|------:|--------:|--------------:|---------------------:|--------:|:----------:|:--------:|
-| SF10  | 60 M    | 8.03 s        | **1.76 s**           | 4.6×    | PASS       | PASS     |
-| SF50  | 300 M   | 56.7 s        | **19.4 s**           | 2.9×    | PASS       | PASS     |
-| SF100 | 600 M   | (~200 s projected) | **8.2 s**       | ~24×    | PASS       | PASS     |
+SF10 uses the full-key no-compaction path and doesn't trigger the entropy branch (ncand ≤ 32). SF100's 27 candidates also don't trigger it. Only SF50-like datasets with > 32 varying bytes are affected.
 
-Multiset check now runs in-memory after the sort (no need to write the 72 GB output to disk for SF100). It computes a parallel sum of FNV-1a-64 hashes per record over `h_data` (input) and `h_output` (sorted), and compares — equal iff the sort produced a permutation of the input. The hash check costs 0.5 s on SF10, 4 s on SF50, 5.5 s on SF100, and runs only when `--verify` is on (default).
-
-### Why SF100 is faster than SF50
-
-| Phase | SF50 | SF100 |
-|------:|-----:|------:|
-| Run-gen | 2.1 s | 3.7 s |
-| GPU 16B merge | 0.3 s | 0.8 s |
-| CPU gather | 1.7 s | 3.5 s |
-| CPU fixup | **14.3 s** | **0 s (skipped — no GPU 16B-prefix ties)** |
-| Total | 19.4 s | 8.2 s |
-
-The compact map's first 16 bytes go into the GPU 16B prefix used by the CUB merge. Compact-map entries are ordered by source byte position (a correctness requirement), so the prefix gets the *first 16 varying byte positions* of the record:
-
-- **SF100**: 27 varying bytes total → first 16 = `0,1,4,5,8,9,12,13,19,20,21,29,37,44,45,50`. Spread across positions 0–50, includes the high-entropy byte 50 (date/orderkey territory) → almost every adjacent pair differs at the GPU level → **fixup skipped**.
-- **SF50**: 61 varying bytes total → first 16 = `0,1,5,7,8,10,11,12,13,14,15,16,17,18,19,20`. Clustered in positions 0–20 (low-entropy date prefix) → 290 M of 300 M records end up tied on the prefix → 14 s of CPU fixup over 15 K groups of ~19 K records each.
-
-Fix paths (open follow-ups): extend GPU sort key from 16 B → 32 B (adds ~1 s GPU work, likely eliminates the 14 s fixup), and/or pick prefix bytes by entropy not source position.
-
-## GenSort (JouleSort format: 100 B records, 10 B key)
+## GenSort (JouleSort format, 100 B records, 10 B key)
 
 | Size  | Records | GPU CrocSort | Throughput | Verifier |
 |-------|---------|--------------|------------|----------|
-| 10 GB | 100 M   | (re-measure) | (re-measure) | (re-run pending) |
+| 10 GB | 100 M   | **1.63 s**    | 6.1 GB/s   | valsort OK + verify_full OK |
 
-The pre-fix gensort number (1.64 s / 6 GB/s) needs to be re-measured under the corrected build. Will update on next sweep.
+GenSort uses the strided-DMA full-key path (KEY_SIZE=10), no compaction — unaffected by entropy selection.
 
-## Correctness — what every sort prints
-
-Every sort reports one of:
-- `[Correctness] Sample map verified against all N records — compact sort is FULL-KEY-EQUIVALENT.` — runtime detection's V[b] expectations matched every record, so compact-key order ≡ full-key order.
-- `[Correctness] Full-key sort path (no compaction) — inherently correct.` — the small-data path uploads full KEY_SIZE bytes; no compaction assumption made.
-- `[Hybrid] Sample missed varying byte X. Retrying with full-key upload path...` — sample missed a byte that varies in the full data; sort is automatically re-run with no compaction (correct by construction).
-
-## Reproducing
+## Reproduce
 
 ```bash
 cd gpu_crocsort
-git checkout runtime-compact-map-wip   # head: 0be08a8 or later
+git checkout runtime-compact-map-wip     # production baseline
+git checkout exp/entropy-selection       # entropy-default branch (SF50 -25%)
+make external-sort-tpch-compact          # auto-detects ARCH
 
-# Auto-detects the actual GPU's compute capability — must build native SASS,
-# PTX→older-arch JIT silently produces no-op kernels.
-make external-sort-tpch-compact
+# Entropy is the default now; explicitly toggle with:
+#   COMPACT_SELECT=position ./external_sort_tpch_compact ...  # old behavior
+#   COMPACT_SELECT=entropy  ./external_sort_tpch_compact ...  # new default (redundant)
 
-# Sort + dump output
-./external_sort_tpch_compact --input /tmp/lineitem_sf10_normalized.bin --runs 2 --output /tmp/sf10_sorted.bin
-
-# Build + run the standalone parallel verifier
-g++ -O3 -std=c++17 -pthread tools/verify_full.cpp -o verify_full
-./verify_full --input /tmp/lineitem_sf10_normalized.bin --output /tmp/sf10_sorted.bin --record-size 120 --key-size 66
+./external_sort_tpch_compact --input /tmp/lineitem_sf100_normalized.bin --runs 5
 ```
 
-## Open follow-ups
+## Full overnight research log
 
-1. The compact prefix selects the first 16 *position-ordered* varying bytes. For SF50 this misses high-entropy bytes deeper in the record. Switching to entropy-ordered prefix selection (highest-variance bytes first) should let the GPU resolve more pairs and skip the 14 s fixup.
-2. Re-run gensort 10/30/60 GB on the corrected build.
-3. SF100 multiset verification is gated on free disk for the 72 GB output — re-run when storage allows.
-4. `extract_tiebreaker_kernel` was the most obvious hardcoded-bytes bug; audit other kernels (especially anything that mentions byte 8/9) to confirm none have the same residual gensort assumption.
+`results/overnight_2026-04-15/SUMMARY.md` — top 3 wins, top 3 dead ends, footnotes.
