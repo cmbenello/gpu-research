@@ -1,0 +1,10 @@
+[load] /tmp/lineitem_sf50_normalized.bin
+[load] 300,005,811 records in 0 ms (mmap)
+[arrow] building fixed-size-binary table
+[arrow] built in 102273 ms
+
+[duckdb] warm runs...
+  run 1: 169287 ms
+  run 2: 129136 ms
+  run 3: 126662 ms
+[duckdb] median=129136 ms  min=126662  max=169287

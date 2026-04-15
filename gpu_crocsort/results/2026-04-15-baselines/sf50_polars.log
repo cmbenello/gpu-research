@@ -1,0 +1,9 @@
+[load] /tmp/lineitem_sf50_normalized.bin
+[load] 300,005,811 records in 0 ms (mmap)
+[arrow] building fixed-size-binary table
+[arrow] built in 98837 ms
+
+[polars] warm runs...
+  run 1: 218093 ms
+  run 2: 221560 ms
+[polars] median=221560 ms  min=218093  max=221560
