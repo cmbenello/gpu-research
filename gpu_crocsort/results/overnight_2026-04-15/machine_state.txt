@@ -1,0 +1,43 @@
+=== Machine state snapshot ===
+## Wed Apr 15 05:54:09 UTC 2026
+
+### nvidia-smi
+name, driver_version, compute_cap, memory.total [MiB], memory.free [MiB], clocks.current.graphics [MHz], clocks.current.memory [MHz], power.draw [W], temperature.gpu
+Quadro RTX 6000, 535.230.02, 7.5, 24576 MiB, 24212 MiB, 1440 MHz, 7000 MHz, 31.17 W, 26
+
+### CPU governor
+powersave
+
+### free -h
+              total        used        free      shared  buff/cache   available
+Mem:          187Gi       2.0Gi       151Gi       2.0Mi        34Gi       184Gi
+Swap:            0B          0B          0B
+
+### df -h /tmp
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/sda3       210G  138G   64G  69% /
+
+### Datasets in /tmp
+-rwxrwxr-x 1 cc cc 10000000000 Apr 15 01:42 /tmp/gensort_10gb.bin
+-rw-rw-r-- 1 cc cc 72004548240 Apr 13 19:30 /tmp/lineitem_sf100_normalized.bin
+-rw-rw-r-- 1 cc cc  7198326240 Apr 13 05:44 /tmp/lineitem_sf10_normalized.bin
+-rw-rw-r-- 1 cc cc 36000697320 Apr 13 06:29 /tmp/lineitem_sf50_normalized.bin
+
+### Page cache state (residency check via vmtouch if available)
+vmtouch not installed
+
+### Git baseline
+ff244d8 CPU fixup: cache-resident packed-buffer sort
+?? .claude/
+?? cpu_sort_bench
+?? external_sort
+?? external_sort_tpch
+?? external_sort_tpch66
+?? external_sort_tpch_compact
+?? gpu_crocsort
+?? node_modules/
+?? package-lock.json
+?? results/overnight_2026-04-15/
+?? t
+?? verify_full
+?? verify_sorted

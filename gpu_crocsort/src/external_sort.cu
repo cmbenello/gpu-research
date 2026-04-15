@@ -398,9 +398,13 @@ static int detect_compact_map(const uint8_t* h_data, uint64_t num_records,
     //   "position" (default for backward compat): take first 64 candidates by source position.
     //   "entropy"  (env COMPACT_SELECT=entropy): rank candidates by distinct count desc,
     //              take top min(64, ncand), then sort those by source position.
-    bool entropy_select = false;
+    // Default: entropy selection (overnight experiment exp/entropy-selection
+    // showed -13% on SF50 with no impact on SF10/SF100). Override with
+    // COMPACT_SELECT=position to force the old source-position-order behavior.
+    bool entropy_select = true;
     if (const char* e = getenv("COMPACT_SELECT")) {
-        if (std::string(e) == "entropy") entropy_select = true;
+        if (std::string(e) == "position") entropy_select = false;
+        else if (std::string(e) == "entropy") entropy_select = true;
     }
 
     // Entropy selection rule: when there are more candidates than the compact

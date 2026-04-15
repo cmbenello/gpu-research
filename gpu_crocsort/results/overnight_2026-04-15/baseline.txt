@@ -1,0 +1,54 @@
+=== Baseline runtime-compact-map-wip @ ff244d8 ===
+Captured: Wed Apr 15 05:54:30 UTC 2026
+
+--- sf10 (5 runs) ---
+  PASS sortedness: 59986052 records in non-decreasing order (136 ms)
+  PASS multiset:   output is a permutation of input (hash=0x02adf169d10af720, 479 ms)
+CSV,Quadro RTX 6000,7.20,59986052,1,1,1315.29,415.04,1730.33,4.1601,3.96,0.24,4.20,0.6
+  PASS sortedness: 59986052 records in non-decreasing order (139 ms)
+  PASS multiset:   output is a permutation of input (hash=0x02adf169d10af720, 513 ms)
+CSV,Quadro RTX 6000,7.20,59986052,1,1,1306.17,425.33,1731.50,4.1573,3.96,0.24,4.20,0.6
+  PASS sortedness: 59986052 records in non-decreasing order (146 ms)
+  PASS multiset:   output is a permutation of input (hash=0x02adf169d10af720, 514 ms)
+CSV,Quadro RTX 6000,7.20,59986052,1,1,1350.45,430.08,1780.53,4.0428,3.96,0.24,4.20,0.6
+  PASS sortedness: 59986052 records in non-decreasing order (132 ms)
+  PASS multiset:   output is a permutation of input (hash=0x02adf169d10af720, 514 ms)
+CSV,Quadro RTX 6000,7.20,59986052,1,1,1318.42,436.87,1755.29,4.1009,3.96,0.24,4.20,0.6
+  PASS sortedness: 59986052 records in non-decreasing order (135 ms)
+  PASS multiset:   output is a permutation of input (hash=0x02adf169d10af720, 539 ms)
+CSV,Quadro RTX 6000,7.20,59986052,1,1,1350.85,433.14,1783.99,4.0350,3.96,0.24,4.20,0.6
+
+--- sf50 (5 runs) ---
+  PASS sortedness: 300005811 records in non-decreasing order (1465 ms)
+  PASS multiset:   output is a permutation of input (hash=0x89c28ecae7c4b777, 3882 ms)
+CSV,Quadro RTX 6000,36.00,300005811,2,2,2146.03,15526.00,17672.03,2.0372,9.60,1.20,10.80,0.3
+  PASS sortedness: 300005811 records in non-decreasing order (612 ms)
+  PASS multiset:   output is a permutation of input (hash=0x89c28ecae7c4b777, 2268 ms)
+CSV,Quadro RTX 6000,36.00,300005811,2,2,2119.16,9922.93,12042.09,2.9896,9.60,1.20,10.80,0.3
+  PASS sortedness: 300005811 records in non-decreasing order (602 ms)
+  PASS multiset:   output is a permutation of input (hash=0x89c28ecae7c4b777, 2242 ms)
+CSV,Quadro RTX 6000,36.00,300005811,2,2,2073.45,9808.43,11881.88,3.0299,9.60,1.20,10.80,0.3
+  PASS sortedness: 300005811 records in non-decreasing order (587 ms)
+  PASS multiset:   output is a permutation of input (hash=0x89c28ecae7c4b777, 2175 ms)
+CSV,Quadro RTX 6000,36.00,300005811,2,2,2084.52,9801.12,11885.64,3.0289,9.60,1.20,10.80,0.3
+  PASS sortedness: 300005811 records in non-decreasing order (661 ms)
+  PASS multiset:   output is a permutation of input (hash=0x89c28ecae7c4b777, 2350 ms)
+CSV,Quadro RTX 6000,36.00,300005811,2,2,2081.17,9883.46,11964.64,3.0089,9.60,1.20,10.80,0.3
+
+--- sf100 (5 runs) ---
+  PASS sortedness: 600037902 records in non-decreasing order (3315 ms)
+  PASS multiset:   output is a permutation of input (hash=0xc78dc6f8e6779043, 7831 ms)
+CSV,Quadro RTX 6000,72.00,600037902,4,2,3722.97,7898.75,11621.71,6.1957,19.20,2.40,21.60,0.3
+  PASS sortedness: 600037902 records in non-decreasing order (757 ms)
+  PASS multiset:   output is a permutation of input (hash=0xc78dc6f8e6779043, 4519 ms)
+CSV,Quadro RTX 6000,72.00,600037902,4,2,3714.06,4238.10,7952.16,9.0547,19.20,2.40,21.60,0.3
+  PASS sortedness: 600037902 records in non-decreasing order (785 ms)
+  PASS multiset:   output is a permutation of input (hash=0xc78dc6f8e6779043, 4388 ms)
+CSV,Quadro RTX 6000,72.00,600037902,4,2,3719.04,4292.67,8011.71,8.9874,19.20,2.40,21.60,0.3
+  PASS sortedness: 600037902 records in non-decreasing order (892 ms)
+  PASS multiset:   output is a permutation of input (hash=0xc78dc6f8e6779043, 4294 ms)
+CSV,Quadro RTX 6000,72.00,600037902,4,2,3695.51,4196.31,7891.82,9.1239,19.20,2.40,21.60,0.3
+  PASS sortedness: 600037902 records in non-decreasing order (982 ms)
+  PASS multiset:   output is a permutation of input (hash=0xc78dc6f8e6779043, 4408 ms)
+CSV,Quadro RTX 6000,72.00,600037902,4,2,3777.27,4268.98,8046.25,8.9488,19.20,2.40,21.60,0.3
+
