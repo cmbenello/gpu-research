@@ -81,3 +81,15 @@ Recommended next-steps:
    sort failed — next try might be parallel radix within groups, or batching groups
    across threads for better locality).
 
+
+## ⚠ CRITICAL: entropy-selection win was a false positive
+
+Ran fresh SF50 sort on exp/entropy-selection (default entropy), got FAIL sortedness at record 7. Investigated: entropy selection produces INCORRECT sort order because compact-key lex order != full-key lex order when records differ at both a "top-32-included" byte and a "not-in-top-32" byte at a lower source position. The fixup doesn't help because records land in DIFFERENT tied groups.
+
+The earlier "win" passed my sweep scripts only because those grep'd 'PASS multiset' not 'PASS sortedness'. Multiset-only passes trivially for any permutation of input.
+
+RETRACTED: changed default back to position-order in commit 747220b.
+All earlier claims of "SF50 -25% via entropy" are invalid.
+SUMMARY.md rewritten with the retraction as the headline.
+
+Paper lesson: always grep for BOTH PASS lines in sweeps. And: lex-preserving compact requires source-position-ordered byte selection.
