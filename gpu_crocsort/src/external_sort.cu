@@ -327,17 +327,26 @@ static int detect_compact_map(const uint8_t* h_data, uint64_t num_records,
     if ((uint64_t)nthreads > n_buckets) nthreads = (int)n_buckets;
     if (nthreads < 1) nthreads = 1;
 
-    // Per-thread min/max then reduce.
+    // Per-thread min/max + per-byte distinct-value bitmap (256 bits = 32 bytes
+    // per byte position). Distinct count = popcount, used as an entropy proxy
+    // for byte selection when the candidate count exceeds the compact map
+    // capacity (COMPACT_KEY_SIZE = 32). High-distinct-count bytes are
+    // discriminating; low-count bytes (constants or near-constants) are not.
     std::vector<std::array<uint8_t, KEY_SIZE>> tmn(nthreads), tmx(nthreads);
+    // 32 B per byte position per thread = ~2 KB per thread for KEY_SIZE=66.
+    std::vector<std::array<std::array<uint32_t, 8>, KEY_SIZE>> tdistinct(nthreads);
     for (int t = 0; t < nthreads; t++) {
-        for (int b = 0; b < KEY_SIZE; b++) { tmn[t][b] = 0xff; tmx[t][b] = 0; }
+        for (int b = 0; b < KEY_SIZE; b++) {
+            tmn[t][b] = 0xff; tmx[t][b] = 0;
+            for (int w = 0; w < 8; w++) tdistinct[t][b][w] = 0;
+        }
     }
 
     auto worker = [&](int tid, uint64_t bucket_lo, uint64_t bucket_hi) {
-        // Distinct LCG seed per thread for statistical independence.
         uint64_t seed = seed0 ^ (0x9e3779b97f4a7c15ULL * (uint64_t)(tid + 1));
         uint8_t* mn = tmn[tid].data();
         uint8_t* mx = tmx[tid].data();
+        auto& dis = tdistinct[tid];
         for (uint64_t bucket = bucket_lo; bucket < bucket_hi; bucket++) {
             seed = seed * 1664525ULL + 1013904223ULL;
             uint64_t b_lo = bucket * stride;
@@ -349,6 +358,7 @@ static int detect_compact_map(const uint8_t* h_data, uint64_t num_records,
                 uint8_t v = rec[b];
                 if (v < mn[b]) mn[b] = v;
                 if (v > mx[b]) mx[b] = v;
+                dis[b][v >> 5] |= (1u << (v & 31));
             }
         }
     };
@@ -363,14 +373,74 @@ static int detect_compact_map(const uint8_t* h_data, uint64_t num_records,
     for (auto& th : threads) th.join();
 
     uint8_t mn[KEY_SIZE], mx[KEY_SIZE];
+    uint32_t merged_distinct[KEY_SIZE][8] = {{0}};
     for (int b = 0; b < KEY_SIZE; b++) { mn[b] = 0xff; mx[b] = 0; }
     for (int t = 0; t < nthreads; t++) {
         for (int b = 0; b < KEY_SIZE; b++) {
             if (tmn[t][b] < mn[b]) mn[b] = tmn[t][b];
             if (tmx[t][b] > mx[b]) mx[b] = tmx[t][b];
+            for (int w = 0; w < 8; w++) merged_distinct[b][w] |= tdistinct[t][b][w];
         }
     }
+    // Compute per-byte distinct count via popcount.
+    int dc[KEY_SIZE];
+    for (int b = 0; b < KEY_SIZE; b++) {
+        int cnt = 0;
+        for (int w = 0; w < 8; w++) cnt += __builtin_popcount(merged_distinct[b][w]);
+        dc[b] = cnt;
+    }
 
+    // Build candidate list (bytes where min != max).
+    int candidates[KEY_SIZE]; int ncand = 0;
+    for (int b = 0; b < KEY_SIZE; b++) if (mn[b] != mx[b]) candidates[ncand++] = b;
+
+    // SELECTION POLICY:
+    //   "position" (default for backward compat): take first 64 candidates by source position.
+    //   "entropy"  (env COMPACT_SELECT=entropy): rank candidates by distinct count desc,
+    //              take top min(64, ncand), then sort those by source position.
+    bool entropy_select = false;
+    if (const char* e = getenv("COMPACT_SELECT")) {
+        if (std::string(e) == "entropy") entropy_select = true;
+    }
+
+    // Entropy selection rule: when there are more candidates than the compact
+    // KEY can hold (COMPACT_KEY_SIZE=32), pick the top 32 by distinct-value
+    // count (entropy proxy). Sort those 32 by source byte position so the
+    // compact-key lex order still matches a sub-projection of the full-key
+    // lex order. The REMAINING candidates go into map[32..63] (also sorted by
+    // position) so verification + fixup logic still knows about every varying
+    // byte. The compact KEY is built from map[0..32] (caller caps at
+    // COMPACT_KEY_SIZE), so high-entropy bytes land in the GPU prefix.
+    if (entropy_select && ncand > COMPACT_KEY_SIZE) {
+        std::vector<std::pair<int, int>> pairs(ncand);   // (-distinct, byte_pos)
+        for (int i = 0; i < ncand; i++) pairs[i] = {-dc[candidates[i]], candidates[i]};
+        std::sort(pairs.begin(), pairs.end());
+        // Top 32 by entropy → mark as "in compact key".
+        std::vector<int> top32; top32.reserve(COMPACT_KEY_SIZE);
+        std::vector<int> rest;  rest.reserve(ncand - COMPACT_KEY_SIZE);
+        for (int i = 0; i < ncand; i++) {
+            if (i < COMPACT_KEY_SIZE) top32.push_back(pairs[i].second);
+            else                       rest.push_back(pairs[i].second);
+        }
+        std::sort(top32.begin(), top32.end());
+        std::sort(rest.begin(), rest.end());
+        // Place top32 first (these will be the compact key bytes), then rest.
+        int n_total = std::min(64, ncand);
+        for (int i = 0; i < (int)top32.size() && i < 64; i++) h_map_out[i] = top32[i];
+        int off = (int)top32.size();
+        for (int i = 0; i < (int)rest.size() && off + i < 64; i++) h_map_out[off + i] = rest[i];
+
+        if (mn_out) memcpy(mn_out, mn, KEY_SIZE);
+        if (mx_out) memcpy(mx_out, mx, KEY_SIZE);
+
+        printf("[CompactDetect] ENTROPY selection: %d candidates, top %zu by distinct count "
+               "go in compact KEY (positions:", ncand, top32.size());
+        for (int p : top32) printf(" %d", p);
+        printf(")\n");
+        return n_total;
+    }
+
+    // Default: position-order selection (existing behavior).
     int count = 0;
     for (int b = 0; b < KEY_SIZE; b++) {
         if (mn[b] != mx[b]) {
