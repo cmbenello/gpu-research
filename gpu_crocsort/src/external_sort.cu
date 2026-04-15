@@ -30,6 +30,7 @@
 #include <chrono>
 #include <thread>
 #include <array>
+#include <atomic>
 #include <cub/cub.cuh>
 #include <sys/mman.h>  // madvise for huge pages
 #include <fcntl.h>     // open
@@ -232,6 +233,28 @@ static constexpr int COMPACT_KEY_SIZE = 32;
 static int g_compact_map[64];
 static int g_compact_count = 0;
 static int* d_compact_map_ptr = nullptr;   // device buffer, size 64*sizeof(int)
+// Per-byte observed min/max from detection (full KEY_SIZE indexed).
+// For bytes NOT in the compact map, g_sample_min[b] == g_sample_max[b] is the
+// "expected constant value" V[b] that extraction verifies against every record.
+static uint8_t g_sample_min[KEY_SIZE];
+static uint8_t g_sample_max[KEY_SIZE];
+// Set to the first (lowest) byte position where extraction found variation the
+// sample missed, or -1 if none. Drives the correctness-guarantee fallback.
+//
+// TODO(hybrid-exceptions): today when g_violated_byte != -1 we error out.
+// The right solution is a hybrid: split records into CANONICAL (non-mapped
+// bytes match V[]) and EXCEPTION streams during extraction. Sort canonicals
+// by compact key on the GPU (fast, existing path, operates on N_c records).
+// Sort exceptions by full key on the CPU (std::sort over original indices,
+// small since exceptions are usually rare). Merge the two streams by
+// comparing reconstructed full keys from (compact + V[]) vs the exception's
+// full key. Final permutation has all N records in full-key order.
+// Cost: canonical GPU sort (fast) + CPU exception sort (small) + linear
+// CPU merge pass. No full re-sort required. ~200 lines in
+// generate_runs_pipelined + the 16B merge pipeline.
+static std::atomic<int> g_violated_byte{-1};
+// true if we have verified against full data (sample was confirmed complete)
+static bool g_map_full_scan_verified = false;
 
 // TODO: measure the contribution of each stage independently:
 //   (1) how much does compact-key compression alone shrink the key / speed up sort?
@@ -266,8 +289,14 @@ static int* d_compact_map_ptr = nullptr;   // device buffer, size 64*sizeof(int)
 //   - stratified random  (current default — balanced)
 //   - reservoir sampling (uniform but more compute)
 //   - full scan          (deterministic, ~1-2s for 72GB)
+// Also returns, for every KEY_SIZE byte position:
+//   mn_out[b], mx_out[b] — min/max observed in the sample.
+// For bytes NOT in the compact map, mn==mx==V[b] is the "expected constant value"
+// the caller will later verify against every record in a full scan.
 static int detect_compact_map(const uint8_t* h_data, uint64_t num_records,
-                               int* h_map_out) {
+                               int* h_map_out,
+                               uint8_t* mn_out = nullptr,
+                               uint8_t* mx_out = nullptr) {
     uint64_t sample_target = 1000000;
     if (const char* e = getenv("COMPACT_SAMPLE")) {
         long v = atol(e);
@@ -339,6 +368,8 @@ static int detect_compact_map(const uint8_t* h_data, uint64_t num_records,
             count++;
         }
     }
+    if (mn_out) memcpy(mn_out, mn, KEY_SIZE);
+    if (mx_out) memcpy(mx_out, mx, KEY_SIZE);
     return count;
 }
 
@@ -914,18 +945,53 @@ ExternalGpuSort::generate_runs_pipelined(
 
         int hw = std::max(1, (int)std::thread::hardware_concurrency());
 
-        // Helper lambda: multi-threaded compact key extraction for one chunk
+        // Build a dense list of non-mapped byte positions + expected values V[].
+        // Iterating only the positions we care about (not all 66) keeps the
+        // per-record inner loop tight and branch-free.
+        int nonmap[KEY_SIZE]; uint8_t V[KEY_SIZE]; int nonmap_n = 0;
+        {
+            bool mapped[KEY_SIZE]; for (int b = 0; b < (int)KEY_SIZE; b++) mapped[b] = false;
+            int stored = std::min(g_compact_count, 64);
+            for (int i = 0; i < stored; i++) if (g_compact_map[i] < (int)KEY_SIZE) mapped[g_compact_map[i]] = true;
+            for (int b = 0; b < (int)KEY_SIZE; b++) {
+                if (!mapped[b]) { nonmap[nonmap_n] = b; V[nonmap_n] = g_sample_min[b]; nonmap_n++; }
+            }
+        }
+
+        // Helper lambda: multi-threaded compact key extraction + per-record
+        // verification that every non-mapped byte matches V[b]. On violation,
+        // record the smallest byte position that differed (relaxed atomic min).
         auto do_extract = [&](uint64_t offset, uint64_t cur_n, int ping) {
             uint64_t per_t = (cur_n + hw - 1) / hw;
             std::vector<std::thread> threads;
             for (int t = 0; t < hw; t++) {
                 threads.emplace_back([&, t, offset, cur_n, ping]() {
                     uint64_t lo = t * per_t, hi = std::min(lo + per_t, cur_n);
+                    int local_violation = INT32_MAX;  // smallest byte position that differed locally
                     for (uint64_t j = lo; j < hi; j++) {
                         const uint8_t* rec = h_data + (offset + j) * RECORD_SIZE;
                         uint8_t* ck = h_compact[ping] + j * COMPACT_KEY_SIZE;
+                        // Copy mapped bytes → compact key
                         for (int b = 0; b < cmap_n; b++) ck[b] = rec[h_cmap[b]];
                         for (int b = cmap_n; b < COMPACT_KEY_SIZE; b++) ck[b] = 0;
+                        // Verify: every non-mapped byte must equal its expected V[].
+                        // Tight loop over only the non-mapped positions (e.g. 39 of 66).
+                        if (local_violation > 0) {
+                            for (int k = 0; k < nonmap_n; k++) {
+                                int b = nonmap[k];
+                                if (rec[b] != V[k]) {
+                                    if (b < local_violation) local_violation = b;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if (local_violation != INT32_MAX) {
+                        // Relaxed CAS-min into the global violation byte.
+                        int cur = g_violated_byte.load(std::memory_order_relaxed);
+                        while ((cur == -1 || local_violation < cur) &&
+                               !g_violated_byte.compare_exchange_weak(cur, local_violation,
+                                                                     std::memory_order_relaxed)) {}
                     }
                 });
             }
@@ -1368,9 +1434,12 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
         if (h_data == s_cached_data && num_records == s_cached_n && g_compact_count > 0) {
             det_ms = 0;  // cache hit
         } else {
-            g_compact_count = detect_compact_map(h_data, num_records, g_compact_map);
+            g_compact_count = detect_compact_map(h_data, num_records, g_compact_map,
+                                                 g_sample_min, g_sample_max);
             s_cached_data = h_data;
             s_cached_n = num_records;
+            g_map_full_scan_verified = false;  // will be set true after extraction verifies
+            g_violated_byte.store(-1);
             det_ms = dt.end_ms();
         }
         uint64_t s_target = 1000000;
@@ -2078,6 +2147,31 @@ run_generation:
         r.sorted_output_is_mmap = h_output_is_mmap;
         r.total_ms = r.run_gen_ms + r.merge_ms;
         printf("  Total merge+gather+fixup: %.0f ms\n", r.merge_ms);
+#ifdef USE_COMPACT_KEY
+        // Correctness guard: the CPU extraction pass verified every record's
+        // non-mapped bytes against the sample's expected constants V[b].
+        // If any record differed, g_violated_byte is the smallest violating
+        // position. In that case the compact sort is NOT guaranteed correct.
+        {
+            int v = g_violated_byte.load();
+            if (v == -1) {
+                printf("[Correctness] Sample map verified against all %lu records — "
+                       "compact sort is FULL-KEY-EQUIVALENT.\n", num_records);
+                g_map_full_scan_verified = true;
+            } else {
+                fprintf(stderr,
+                    "\n[CORRECTNESS ERROR] Sample missed varying byte %d — the sort\n"
+                    "may NOT be in full-key order for records that differ at byte %d.\n"
+                    "Re-run with COMPACT_SAMPLE=%lu (full scan) for a guaranteed-correct\n"
+                    "result, or increase COMPACT_SAMPLE. See TODO(hybrid-exceptions)\n"
+                    "at src/external_sort.cu for a future implementation that handles\n"
+                    "this case without a full re-sort.\n\n", v, v, num_records);
+                // Fail the TimingResult explicitly (caller should check).
+                r.sorted_output = nullptr;
+                r.sorted_output_size = 0;
+            }
+        }
+#endif
         return r;
     }
 
@@ -2232,6 +2326,10 @@ run_generation:
     r.sorted_output_size = total_bytes;
     r.sorted_output_is_mmap = h_output_is_mmap;
     r.total_ms = r.run_gen_ms + r.merge_ms;
+    // This path uses the FULL KEY_SIZE bytes on the GPU (no compaction), so
+    // the sort is full-key-equivalent by construction — the compact-map
+    // verification is not applicable here.
+    printf("[Correctness] Full-key sort path (no compaction) — inherently correct.\n");
 
     printf("\n[ExternalSort] ═══════════════════════════════════════\n");
     printf("  DONE: %.0f ms (gen: %.0f + merge: %.0f)\n",
@@ -2264,13 +2362,15 @@ int main(int argc, char** argv) {
     double total_gb = 0.5;
     bool verify = true;
     const char* input_file = nullptr;
+    const char* output_file = nullptr;
     int num_experiment_runs = 1;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i],"--total-gb") && i+1<argc) total_gb = atof(argv[++i]);
         else if (!strcmp(argv[i],"--input") && i+1<argc) input_file = argv[++i];
+        else if (!strcmp(argv[i],"--output") && i+1<argc) output_file = argv[++i];
         else if (!strcmp(argv[i],"--no-verify")) verify = false;
         else if (!strcmp(argv[i],"--runs") && i+1<argc) num_experiment_runs = atoi(argv[++i]);
-        else { printf("Usage: %s [--total-gb N] [--input FILE] [--no-verify] [--runs N]\n",argv[0]); return 0; }
+        else { printf("Usage: %s [--total-gb N] [--input FILE] [--output FILE] [--no-verify] [--runs N]\n",argv[0]); return 0; }
     }
 
     // Determine data size from file or --total-gb
@@ -2346,6 +2446,20 @@ int main(int argc, char** argv) {
                     { if (bad<5) printf("  VIOLATION at %lu\n",i); bad++; }
             printf(bad==0 ? "  PASS: %lu records sorted\n" : "  FAIL: %lu violations\n",
                    bad==0 ? num_records : bad);
+        }
+
+        // Dump sorted output for independent external verification (tools/verify_sorted).
+        // Only on the last experiment run to avoid repeated writes.
+        if (output_file && run == num_experiment_runs - 1) {
+            printf("Writing sorted output to %s...\n", output_file);
+            FILE* of = fopen(output_file, "wb");
+            if (!of) { fprintf(stderr, "  cannot open output file\n"); }
+            else {
+                WallTimer wt; wt.begin();
+                size_t w = fwrite(sorted, 1, total_bytes, of);
+                fclose(of);
+                printf("  Wrote %.2f GB in %.0f ms\n", w/1e9, wt.end_ms());
+            }
         }
         if (result.sorted_output) {
             if (result.sorted_output_is_mmap) munmap(result.sorted_output, result.sorted_output_size);
