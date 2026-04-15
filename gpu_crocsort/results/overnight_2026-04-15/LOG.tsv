@@ -7,6 +7,6 @@ timestamp	branch	slug	SF	median_s	verified	outcome
 2026-04-15T08:48:44Z	exp/prefetch-sweep	threads-sweep-t32	sf100	8.612	true	ok
 2026-04-15T08:59:28Z	exp/prefetch-sweep	threads-sweep-t48	sf100	8.348	true	ok
 2026-04-15T09:10:10Z	exp/prefetch-sweep	threads-sweep-t64	sf100	8.387	true	ok
+2026-04-15T12:29:38Z	exp/entropy-selection	gensort-30gb	gensort_30gb	3.873	true	ok
 2026-04-15T12:29:38Z	exp/entropy-selection	gensort-30gb	gensort_30gb	4.056	true	ok
 2026-04-15T12:29:38Z	exp/entropy-selection	gensort-30gb	gensort_30gb	4.304	true	ok
-2026-04-15T12:29:38Z	exp/entropy-selection	gensort-30gb	gensort_30gb	3.873	true	ok
