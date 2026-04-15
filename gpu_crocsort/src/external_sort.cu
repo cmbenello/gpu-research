@@ -895,12 +895,13 @@ ExternalGpuSort::generate_runs_pipelined(
     // Instead of uploading 120B records (72GB for SF100), extract 32B compact
     // keys on CPU and upload only those. 3.75× less PCIe traffic.
     // Pipeline: CPU extract → H2D compact keys → GPU sort (from d_compact)
-    // Compact upload only valid if sample detected ≤ COMPACT_KEY_SIZE varying bytes.
-    bool use_compact_upload = (d_ovc_buffer && sort_ws.d_compact &&
-                                g_compact_count > 0 && g_compact_count <= COMPACT_KEY_SIZE);
+    // Compact upload: pack the first min(count, COMPACT_KEY_SIZE) varying bytes
+    // into the compact buffer. If count > 32 the compact prefix won't cover the
+    // full key, so CPU fixup will resolve prefix ties afterwards.
+    bool use_compact_upload = (d_ovc_buffer && sort_ws.d_compact && g_compact_count > 0);
     if (use_compact_upload) {
         const int* h_cmap = g_compact_map;
-        const int cmap_n = g_compact_count;
+        const int cmap_n = std::min(g_compact_count, (int)COMPACT_KEY_SIZE);
 
         // Use h_pin[0] and h_pin[1] as double-buffered staging for compact keys.
         // They're allocated at buf_bytes (3.7GB each), plenty for compact keys (1GB).
