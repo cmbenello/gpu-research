@@ -2561,12 +2561,15 @@ int main(int argc, char** argv) {
         // Hybrid correctness: try the compact path first. If it detects
         // exception records (non-mapped bytes that the sample missed), retry
         // with the full-key upload path which has no sampling assumption.
+#ifdef USE_COMPACT_KEY
         g_force_no_compact = false;
+#endif
         ExternalGpuSort::TimingResult result;
         {
             ExternalGpuSort sorter;
             result = sorter.sort(h_data, num_records);
         }
+#ifdef USE_COMPACT_KEY
         if (result.needs_hybrid_retry) {
             printf("[Hybrid] Retrying with full-key upload path...\n");
             g_force_no_compact = true;
@@ -2574,6 +2577,7 @@ int main(int argc, char** argv) {
             result = sorter.sort(h_data, num_records);
             g_force_no_compact = false;
         }
+#endif
 
         const uint8_t* sorted = result.sorted_output ? result.sorted_output : h_data;
 
