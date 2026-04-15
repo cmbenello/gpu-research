@@ -8,9 +8,16 @@ NVCC = nvcc
 NVCC_FLAGS = -O3 -std=c++17 --expt-relaxed-constexpr --extended-lambda -lineinfo
 INCLUDES = -Iinclude
 
-# Auto-detect GPU architecture (default to sm_80 for A100)
+# Auto-detect the actual GPU's compute capability. Cross-arch JIT (e.g. sm_80
+# PTX → sm_75 SASS) silently produces no-op kernels on Turing in our config,
+# corrupting sort output without raising an error. Always build native SASS.
 # Override with: make ARCH=sm_86
+DETECTED_CC := $(shell nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -1 | tr -d '.')
+ifneq ($(DETECTED_CC),)
+ARCH ?= sm_$(DETECTED_CC)
+else
 ARCH ?= sm_80
+endif
 NVCC_FLAGS += -arch=$(ARCH)
 
 # Source files

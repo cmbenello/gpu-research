@@ -597,13 +597,14 @@ __global__ void extract_tiebreaker_kernel(
     const uint8_t* __restrict__ key_buffer,
     const uint32_t* __restrict__ perm,
     uint16_t* __restrict__ tiebreakers,
-    uint64_t num_records
+    uint64_t num_records,
+    int byte_offset
 ) {
     uint64_t i = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= num_records) return;
     uint32_t orig_idx = perm[i];
-    const uint8_t* k = key_buffer + (uint64_t)orig_idx * KEY_SIZE;
-    tiebreakers[i] = ((uint16_t)k[8] << 8) | k[9];
+    const uint8_t* k = key_buffer + (uint64_t)orig_idx * KEY_SIZE + byte_offset;
+    tiebreakers[i] = ((uint16_t)k[0] << 8) | k[1];
 }
 
 // ── GPU key extraction kernel ────────────────────────────────────────
@@ -2360,7 +2361,7 @@ run_generation:
             uint16_t* d_tie = reinterpret_cast<uint16_t*>(d_sort_keys);
             uint16_t* d_tie_alt = reinterpret_cast<uint16_t*>(d_sort_keys_alt);
             extract_tiebreaker_kernel<<<nblks, nthreads, 0, streams[0]>>>(
-                d_keys_10byte, d_perm_in, d_tie, num_records);
+                d_keys_10byte, d_perm_in, d_tie, num_records, byte_offset);
             cub::DoubleBuffer<uint16_t> tie_buf(d_tie, d_tie_alt);
             cub::DoubleBuffer<uint32_t> perm_buf(d_perm_in, d_perm_out);
             size_t t = cub_temp_bytes;
