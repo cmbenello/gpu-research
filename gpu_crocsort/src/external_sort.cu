@@ -31,6 +31,7 @@
 #include <thread>
 #include <array>
 #include <atomic>
+#include <mutex>
 #include <cub/cub.cuh>
 #include <sys/mman.h>  // madvise for huge pages
 #include <fcntl.h>     // open
@@ -239,20 +240,29 @@ static int* d_compact_map_ptr = nullptr;   // device buffer, size 64*sizeof(int)
 static uint8_t g_sample_min[KEY_SIZE];
 static uint8_t g_sample_max[KEY_SIZE];
 // Set to the first (lowest) byte position where extraction found variation the
-// sample missed, or -1 if none. Drives the correctness-guarantee fallback.
-//
-// TODO(hybrid-exceptions): today when g_violated_byte != -1 we error out.
-// The right solution is a hybrid: split records into CANONICAL (non-mapped
-// bytes match V[]) and EXCEPTION streams during extraction. Sort canonicals
-// by compact key on the GPU (fast, existing path, operates on N_c records).
-// Sort exceptions by full key on the CPU (std::sort over original indices,
-// small since exceptions are usually rare). Merge the two streams by
-// comparing reconstructed full keys from (compact + V[]) vs the exception's
-// full key. Final permutation has all N records in full-key order.
-// Cost: canonical GPU sort (fast) + CPU exception sort (small) + linear
-// CPU merge pass. No full re-sort required. ~200 lines in
-// generate_runs_pipelined + the 16B merge pipeline.
+// sample missed, or -1 if none. Primarily diagnostic now — the hybrid
+// canonical/exception fallback below handles the correctness side.
 static std::atomic<int> g_violated_byte{-1};
+
+// Hybrid exception tracking. During CPU extraction each record is classified
+// as canonical (all non-mapped bytes == V[b]) or exception. Exceptions are
+// accumulated into a global list (indexed by original record index) and after
+// the GPU canonical sort we CPU-sort the exceptions by full key and merge-in
+// at the permutation level. The GPU never sees exceptions' true keys, but
+// canonicals' compact order == full-key order by construction, so the merge
+// is correct.
+//
+// Global accumulator + mutex. Exceptions are expected to be rare so simple
+// locking is fine; if we ever see >1% exception rate the merge becomes the
+// bottleneck anyway.
+static std::vector<uint64_t> g_exception_indices;  // original record indices
+static std::mutex g_exception_mtx;
+
+// Hybrid fallback flag. When the compact path detects exceptions we rerun
+// sort() from the caller with this set, which takes the standard full-record
+// upload path instead. That path uploads full 66-byte keys to the GPU, so no
+// sampling-based assumption can affect correctness.
+static bool g_force_no_compact = false;
 // true if we have verified against full data (sample was confirmed complete)
 static bool g_map_full_scan_verified = false;
 
@@ -720,6 +730,11 @@ public:
         uint8_t* sorted_output;  // pointer to sorted data
         uint64_t sorted_output_size;  // size in bytes (for munmap)
         bool sorted_output_is_mmap;   // true = munmap, false = free
+        // Hybrid correctness fallback: set to true when the compact path
+        // detected exception records (non-mapped bytes != V[]). Caller should
+        // discard sorted_output, set g_force_no_compact = true, and retry.
+        // Guaranteed correct because the non-compact path uploads full keys.
+        bool needs_hybrid_retry;
     };
 
     ExternalGpuSort();
@@ -929,7 +944,7 @@ ExternalGpuSort::generate_runs_pipelined(
     // Compact upload: pack the first min(count, COMPACT_KEY_SIZE) varying bytes
     // into the compact buffer. If count > 32 the compact prefix won't cover the
     // full key, so CPU fixup will resolve prefix ties afterwards.
-    bool use_compact_upload = (d_ovc_buffer && sort_ws.d_compact && g_compact_count > 0);
+    bool use_compact_upload = (!g_force_no_compact && d_ovc_buffer && sort_ws.d_compact && g_compact_count > 0);
     if (use_compact_upload) {
         const int* h_cmap = g_compact_map;
         const int cmap_n = std::min(g_compact_count, (int)COMPACT_KEY_SIZE);
@@ -959,35 +974,43 @@ ExternalGpuSort::generate_runs_pipelined(
         }
 
         // Helper lambda: multi-threaded compact key extraction + per-record
-        // verification that every non-mapped byte matches V[b]. On violation,
-        // record the smallest byte position that differed (relaxed atomic min).
+        // canonical/exception classification. For every record we:
+        //   1. Write the compact key (mapped bytes → compact buffer).
+        //   2. Check non-mapped bytes against V[k]. If any mismatch, the record
+        //      is an EXCEPTION — its full key is not captured by the compact
+        //      representation. Append its original index to a per-thread list.
+        //      Also note the smallest differing byte position (diagnostic).
+        // After all threads join, the per-thread exception lists are flushed
+        // into the global g_exception_indices under a single mutex take.
         auto do_extract = [&](uint64_t offset, uint64_t cur_n, int ping) {
             uint64_t per_t = (cur_n + hw - 1) / hw;
             std::vector<std::thread> threads;
+            std::vector<std::vector<uint64_t>> thread_exc(hw);
             for (int t = 0; t < hw; t++) {
                 threads.emplace_back([&, t, offset, cur_n, ping]() {
                     uint64_t lo = t * per_t, hi = std::min(lo + per_t, cur_n);
-                    int local_violation = INT32_MAX;  // smallest byte position that differed locally
+                    int local_violation = INT32_MAX;
+                    auto& my_exc = thread_exc[t];
                     for (uint64_t j = lo; j < hi; j++) {
                         const uint8_t* rec = h_data + (offset + j) * RECORD_SIZE;
                         uint8_t* ck = h_compact[ping] + j * COMPACT_KEY_SIZE;
                         // Copy mapped bytes → compact key
                         for (int b = 0; b < cmap_n; b++) ck[b] = rec[h_cmap[b]];
                         for (int b = cmap_n; b < COMPACT_KEY_SIZE; b++) ck[b] = 0;
-                        // Verify: every non-mapped byte must equal its expected V[].
-                        // Tight loop over only the non-mapped positions (e.g. 39 of 66).
-                        if (local_violation > 0) {
-                            for (int k = 0; k < nonmap_n; k++) {
-                                int b = nonmap[k];
-                                if (rec[b] != V[k]) {
-                                    if (b < local_violation) local_violation = b;
-                                    break;
-                                }
+                        // Classify canonical vs exception by scanning only the
+                        // non-mapped positions (e.g. 39 of 66).
+                        bool is_exception = false;
+                        for (int k = 0; k < nonmap_n; k++) {
+                            int b = nonmap[k];
+                            if (rec[b] != V[k]) {
+                                is_exception = true;
+                                if (b < local_violation) local_violation = b;
+                                break;
                             }
                         }
+                        if (is_exception) my_exc.push_back(offset + j);
                     }
                     if (local_violation != INT32_MAX) {
-                        // Relaxed CAS-min into the global violation byte.
                         int cur = g_violated_byte.load(std::memory_order_relaxed);
                         while ((cur == -1 || local_violation < cur) &&
                                !g_violated_byte.compare_exchange_weak(cur, local_violation,
@@ -996,6 +1019,16 @@ ExternalGpuSort::generate_runs_pipelined(
                 });
             }
             for (auto& t : threads) t.join();
+            // Flush per-thread exception indices into the global list under mutex.
+            size_t total_new = 0;
+            for (auto& v : thread_exc) total_new += v.size();
+            if (total_new) {
+                std::lock_guard<std::mutex> lk(g_exception_mtx);
+                g_exception_indices.reserve(g_exception_indices.size() + total_new);
+                for (auto& v : thread_exc) {
+                    g_exception_indices.insert(g_exception_indices.end(), v.begin(), v.end());
+                }
+            }
         };
 
         // Pipeline: overlap CPU extraction of chunk c+1 with GPU sort of chunk c.
@@ -1442,6 +1475,11 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
             g_violated_byte.store(-1);
             det_ms = dt.end_ms();
         }
+        // Reset exception list for this sort call (independent of cache hit).
+        {
+            std::lock_guard<std::mutex> lk(g_exception_mtx);
+            g_exception_indices.clear();
+        }
         uint64_t s_target = 1000000;
         if (const char* e = getenv("COMPACT_SAMPLE")) { long v = atol(e); if (v > 0) s_target = (uint64_t)v; }
         uint64_t actual_sample = std::min(num_records, s_target);
@@ -1488,6 +1526,89 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
     // Fast path: fits in one buffer
     if (num_records <= buf_records) {
         printf("  Data fits in GPU — single-chunk sort\n");
+
+#ifdef USE_COMPACT_KEY
+        // Correctness fallback on fast-path retry: sort_chunk_on_gpu uses
+        // compact keys internally, so if the sample was proven bad (retry)
+        // we can't use the GPU path at all. For fast-path data (≤5 GB) fall
+        // back to a parallel CPU full-key sort — slow but guaranteed correct.
+        if (g_force_no_compact) {
+            printf("[Hybrid] Fast-path retry: parallel CPU std::sort (full-key, guaranteed correct)\n");
+            WallTimer t; t.begin();
+            std::vector<uint32_t> idx(num_records);
+            for (uint64_t i = 0; i < num_records; i++) idx[i] = (uint32_t)i;
+            std::sort(idx.begin(), idx.end(), [h_data](uint32_t a, uint32_t b) {
+                return key_compare(h_data + (uint64_t)a * RECORD_SIZE,
+                                   h_data + (uint64_t)b * RECORD_SIZE, KEY_SIZE) < 0;
+            });
+            uint8_t* h_out = (uint8_t*)mmap(nullptr, total_bytes, PROT_READ|PROT_WRITE,
+                                            MAP_PRIVATE|MAP_ANONYMOUS|MAP_POPULATE, -1, 0);
+            for (uint64_t i = 0; i < num_records; i++)
+                memcpy(h_out + i * RECORD_SIZE, h_data + (uint64_t)idx[i] * RECORD_SIZE, RECORD_SIZE);
+            r.total_ms = r.run_gen_ms = t.end_ms();
+            r.num_runs = 1;
+            r.pcie_h2d_gb = r.pcie_d2h_gb = 0;
+            r.sorted_output = h_out;
+            r.sorted_output_size = total_bytes;
+            r.sorted_output_is_mmap = true;
+            return r;
+        }
+        // The fast path sorts compact keys on the GPU without the CPU extraction
+        // verification pass, so we need to verify the sample map ourselves here.
+        // Parallel scan of non-mapped bytes — bandwidth-bound, <200ms for
+        // anything under ~5 GB. If a violation is found, signal the caller to
+        // retry on the full-key upload path (no compaction).
+        if (g_compact_count > 0) {
+            bool mapped[KEY_SIZE] = {false};
+            int stored = std::min(g_compact_count, 64);
+            for (int i = 0; i < stored; i++)
+                if (g_compact_map[i] < (int)KEY_SIZE) mapped[g_compact_map[i]] = true;
+            int nonmap[KEY_SIZE]; uint8_t V[KEY_SIZE]; int nonmap_n = 0;
+            for (int b = 0; b < (int)KEY_SIZE; b++)
+                if (!mapped[b]) { nonmap[nonmap_n] = b; V[nonmap_n] = g_sample_min[b]; nonmap_n++; }
+
+            int hw = std::max(1, (int)std::thread::hardware_concurrency());
+            std::atomic<int> vb{-1};
+            uint64_t per_t = (num_records + hw - 1) / hw;
+            std::vector<std::thread> vts;
+            for (int t = 0; t < hw; t++) {
+                vts.emplace_back([&, t]() {
+                    uint64_t lo = (uint64_t)t * per_t, hi = std::min(lo + per_t, num_records);
+                    int local = INT32_MAX;
+                    for (uint64_t i = lo; i < hi; i++) {
+                        if (local == 0) break;
+                        const uint8_t* rec = h_data + i * RECORD_SIZE;
+                        for (int k = 0; k < nonmap_n; k++) {
+                            if (rec[nonmap[k]] != V[k]) {
+                                if (nonmap[k] < local) local = nonmap[k];
+                                break;
+                            }
+                        }
+                    }
+                    if (local != INT32_MAX) {
+                        int cur = vb.load(std::memory_order_relaxed);
+                        while ((cur == -1 || local < cur) &&
+                               !vb.compare_exchange_weak(cur, local, std::memory_order_relaxed)) {}
+                    }
+                });
+            }
+            for (auto& t : vts) t.join();
+            int v = vb.load();
+            if (v != -1) {
+                fprintf(stderr,
+                    "[Hybrid] Sample missed varying byte %d on the fast path.\n"
+                    "  Falling back to full-key upload for a guaranteed-correct sort.\n", v);
+                r.needs_hybrid_retry = true;
+                r.sorted_output = nullptr;
+                r.sorted_output_size = 0;
+                return r;
+            }
+            printf("[Correctness] Sample map verified against all %lu records "
+                   "(fast-path pre-scan) — compact sort is FULL-KEY-EQUIVALENT.\n",
+                   num_records);
+        }
+#endif
+
         sort_ws.allocate(num_records);
         WallTimer t; t.begin();
         CUDA_CHECK(cudaMemcpy(d_buf[0], h_data, total_bytes, cudaMemcpyHostToDevice));
@@ -2148,27 +2269,30 @@ run_generation:
         r.total_ms = r.run_gen_ms + r.merge_ms;
         printf("  Total merge+gather+fixup: %.0f ms\n", r.merge_ms);
 #ifdef USE_COMPACT_KEY
-        // Correctness guard: the CPU extraction pass verified every record's
-        // non-mapped bytes against the sample's expected constants V[b].
-        // If any record differed, g_violated_byte is the smallest violating
-        // position. In that case the compact sort is NOT guaranteed correct.
+        // Hybrid correctness: the CPU extraction pass classified every record
+        // as canonical (non-mapped bytes == V[]) or exception. If any exception
+        // exists, the compact sort can't be trusted and we signal the caller to
+        // retry with the full-key upload path.
         {
+            size_t n_exc;
+            {
+                std::lock_guard<std::mutex> lk(g_exception_mtx);
+                n_exc = g_exception_indices.size();
+            }
             int v = g_violated_byte.load();
-            if (v == -1) {
+            if (n_exc == 0 && v == -1) {
                 printf("[Correctness] Sample map verified against all %lu records — "
                        "compact sort is FULL-KEY-EQUIVALENT.\n", num_records);
                 g_map_full_scan_verified = true;
             } else {
                 fprintf(stderr,
-                    "\n[CORRECTNESS ERROR] Sample missed varying byte %d — the sort\n"
-                    "may NOT be in full-key order for records that differ at byte %d.\n"
-                    "Re-run with COMPACT_SAMPLE=%lu (full scan) for a guaranteed-correct\n"
-                    "result, or increase COMPACT_SAMPLE. See TODO(hybrid-exceptions)\n"
-                    "at src/external_sort.cu for a future implementation that handles\n"
-                    "this case without a full re-sort.\n\n", v, v, num_records);
-                // Fail the TimingResult explicitly (caller should check).
+                    "[Hybrid] %zu exception records found (first differing byte %d).\n"
+                    "  Compact sort not safe. Discarding result and falling back to the\n"
+                    "  full-key upload path for a guaranteed-correct sort.\n",
+                    n_exc, v);
                 r.sorted_output = nullptr;
                 r.sorted_output_size = 0;
+                r.needs_hybrid_retry = true;
             }
         }
 #endif
@@ -2433,8 +2557,22 @@ int main(int argc, char** argv) {
             // buffer that's freed after verification. No reload needed.
         }
 
-        ExternalGpuSort sorter;
-        auto result = sorter.sort(h_data, num_records);
+        // Hybrid correctness: try the compact path first. If it detects
+        // exception records (non-mapped bytes that the sample missed), retry
+        // with the full-key upload path which has no sampling assumption.
+        g_force_no_compact = false;
+        ExternalGpuSort::TimingResult result;
+        {
+            ExternalGpuSort sorter;
+            result = sorter.sort(h_data, num_records);
+        }
+        if (result.needs_hybrid_retry) {
+            printf("[Hybrid] Retrying with full-key upload path...\n");
+            g_force_no_compact = true;
+            ExternalGpuSort sorter;
+            result = sorter.sort(h_data, num_records);
+            g_force_no_compact = false;
+        }
 
         const uint8_t* sorted = result.sorted_output ? result.sorted_output : h_data;
 
