@@ -1,4 +1,6 @@
-# Comprehensive benchmark — runtime-compact-map-wip @ aee7bd0
+# Comprehensive benchmark — runtime-compact-map-wip
+
+(Updated post fixup-skip-known-equal-bytes optimization)
 
 Hardware: Quadro RTX 6000 (Turing sm_75, 25.4 GB HBM, 672 GB/s), PCIe Gen3, 48-core Xeon, 192 GB RAM. Built with `make ARCH=sm_75` (auto-detected). Each workload run 3 times after warm-up; numbers below are the best of 3.
 
@@ -13,13 +15,13 @@ All sorts independently verified by `verify_full`-equivalent in-memory checks: p
 | Compact-map detect (sample 1 M, multi-thread) | 25 ms first / 0 ms cached | 26 ms / 0 ms | 25 ms / 0 ms |
 | Varying bytes detected | 61 / 66 (92 %) | 61 / 66 (92 %) | 27 / 66 (41 %) |
 | Sort path | strided-DMA full-key | OVC compact-upload | OVC compact-upload |
-| Run-gen / extract+upload | 1314 ms | 2070 ms | 3680 ms |
+| Run-gen / extract+upload | 1314 ms | 2095 ms | 3700 ms |
 | GPU LSD pass 1 | (9 passes total → 370 ms) | 155 ms | 608 ms |
 | GPU LSD pass 2 | — | 122 ms | 239 ms |
 | 16 B tie check | n/a | TIES FOUND | NO TIES |
-| CPU gather | 419 ms | 1814 ms | 3067 ms |
-| CPU fixup (full 66 B compare per group) | n/a (no compaction) | **14 253 ms** | **0 ms (skipped)** |
-| **Sort total** (`result.total_ms`) | **1.74 s** | **18.5 s** | **7.75 s** |
+| CPU gather | 398 ms | 1786 ms | 3010 ms |
+| CPU fixup (active-bytes-only compare) | n/a (no compaction) | **10 821 ms** | **0 ms (skipped)** |
+| **Sort total** (`result.total_ms`) | **1.71 s** | **13.0 s** | **7.73 s** |
 | Verify: parallel sortedness | 134 ms | 568 ms | 603 ms |
 | Verify: parallel multiset hash (FNV-1a 64) | 507 ms | 2153 ms | 4185 ms |
 | Throughput (sort only, GB/s) | 4.1 | 1.95 | 9.3 |
@@ -42,9 +44,9 @@ All sorts independently verified by `verify_full`-equivalent in-memory checks: p
 
 | Workload | DuckDB | Ours (sort) | Ours (sort + verify) | Speedup (sort) |
 |----------|-------:|------------:|---------------------:|---------------:|
-| SF10 | 8.03 s | 1.74 s | 2.38 s | 4.6× |
-| SF50 | 56.7 s | 18.5 s | 21.2 s | 3.1× |
-| SF100 | ~200 s (projected) | 7.75 s | 12.5 s | ~26× |
+| SF10 | 8.03 s | 1.71 s | 2.36 s | 4.7× |
+| SF50 | 56.7 s | 13.0 s | 15.8 s | **4.4×** (was 3.1×) |
+| SF100 | ~200 s (projected) | 7.73 s | 12.5 s | ~26× |
 
 DuckDB numbers from earlier (commit `27194d7` notes). DuckDB doesn't ship a separate verifier — its sort is trusted because it's been hammered for years; our `verify_full` cost is for the prototype's correctness story and is opt-in via `--verify` (default on).
 

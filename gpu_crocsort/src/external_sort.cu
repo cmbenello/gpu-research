@@ -383,6 +383,13 @@ static int detect_compact_map(const uint8_t* h_data, uint64_t num_records,
     return count;
 }
 
+// Extract compact-key bytes [base..base+8) and [base+8..base+16) from records
+// in current perm order. Used for the 32B-extension fast path: after the 16B
+// merge, we need pfx3 (compact bytes 16..23) and pfx4 (compact bytes 24..31)
+// already in 16B-sorted order so we can do segmented sort within tied groups.
+//
+// out_lo[i] = uint64 from compact bytes [base..base+8) of records[perm[i]]
+// out_hi[i] = uint64 from compact bytes [base+8..base+16)
 __global__ void build_compact_keys_kernel(
     const uint8_t* __restrict__ records,
     uint8_t* __restrict__ compact_keys,
@@ -2228,6 +2235,27 @@ run_generation:
                    groups.size(),
                    groups.empty() ? 0.0 : (double)num_records / groups.size());
 
+            // Build a list of "active" byte positions to compare during fixup —
+            // skip the positions covered by the GPU's tied prefix (compact_map[0..15])
+            // since those bytes are equal-by-construction within every tied group.
+            // For SF50 this drops 16 of 66 bytes from the comparator → ~24% less
+            // work in the per-group std::sort (the bottleneck).
+            int active_bytes[KEY_SIZE]; int n_active = 0;
+            {
+                bool skip[KEY_SIZE] = {false};
+#ifdef USE_COMPACT_KEY
+                if (used_compact_prefix) {
+                    int n_prefix = std::min(effective_prefix_bytes, g_compact_count);
+                    for (int c = 0; c < n_prefix; c++) {
+                        int pos = h_compact_map[c];
+                        if (pos >= 0 && pos < (int)KEY_SIZE) skip[pos] = true;
+                    }
+                }
+#endif
+                for (int b = 0; b < (int)KEY_SIZE; b++)
+                    if (!skip[b]) active_bytes[n_active++] = b;
+            }
+
             if (!groups.empty()) {
                 uint64_t gpt = (groups.size() + hw - 1) / hw;
                 std::vector<std::thread> fix_threads;
@@ -2239,9 +2267,18 @@ run_generation:
                             uint8_t* base = h_output + start * RECORD_SIZE;
                             std::vector<uint32_t> idx(count);
                             for (uint32_t j = 0; j < (uint32_t)count; j++) idx[j] = j;
-                            std::sort(idx.begin(), idx.end(), [base](uint32_t a, uint32_t b) {
-                                return key_compare(base + (uint64_t)a*RECORD_SIZE,
-                                                   base + (uint64_t)b*RECORD_SIZE, KEY_SIZE) < 0;
+                            // Custom comparator: walk only the active byte positions
+                            // (those NOT in the GPU-tied prefix). For SF50 this is
+                            // 50 of 66 bytes — about 24% less compare work per pair.
+                            std::sort(idx.begin(), idx.end(), [base, &active_bytes, n_active](uint32_t a, uint32_t b) {
+                                const uint8_t* ra = base + (uint64_t)a*RECORD_SIZE;
+                                const uint8_t* rb = base + (uint64_t)b*RECORD_SIZE;
+                                for (int k = 0; k < n_active; k++) {
+                                    int p = active_bytes[k];
+                                    int diff = (int)ra[p] - (int)rb[p];
+                                    if (diff != 0) return diff < 0;
+                                }
+                                return false;  // equal (true duplicates)
                             });
                             bool sorted = true;
                             for (uint64_t j = 0; j < count; j++) {
