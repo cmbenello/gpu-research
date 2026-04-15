@@ -2750,7 +2750,12 @@ run_generation:
                         std::vector<std::pair<uint64_t, uint32_t>> keys(global_max_count);
                         std::vector<uint8_t> reorder_buf((size_t)global_max_count * RECORD_SIZE);
                         PhaseTimes& myp = pt[t];
-                        const uint64_t batch = 64;   // pull N groups at a time to amortize atomic
+                        // Batch size scales with total group count so every thread gets
+                        // work even when #groups is small (e.g. adversarial inputs with
+                        // ~1000 huge groups). 64 was fine for typical 3.15M-group SF50
+                        // but capped parallelism at ~16 threads for low-count inputs.
+                        const uint64_t batch = std::max<uint64_t>(1,
+                            std::min<uint64_t>(64, (groups.size() + hw * 4 - 1) / (hw * 4)));
                         uint64_t gs_local;
                         while ((gs_local = next_group.fetch_add(batch, std::memory_order_relaxed)) < groups.size()) {
                             uint64_t ge_local = std::min(gs_local + batch, (uint64_t)groups.size());
