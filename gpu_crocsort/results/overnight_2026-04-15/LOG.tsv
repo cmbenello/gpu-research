@@ -14,3 +14,5 @@ timestamp	branch	slug	SF	median_s	verified	outcome
 2026-04-15T17:46:05Z	exp/native-gpu-32b-ovc	native-32b-ovc	sf100	7.906	true	unchanged
 2026-04-15T19:48:00Z	exp/fixup-fast-comparator	fixup-parallel-group-detect	sf50	6.562	true	win_sf50_beats_sf100
 2026-04-15T19:48:00Z	exp/fixup-fast-comparator	fixup-parallel-group-detect	sf100	7.821	true	unchanged
+2026-04-15T20:30:00Z	exp/fixup-fast-comparator	fixup-8b-key-sort	sf50	6213	true	win_~350ms_over_parallel_group_detect
+2026-04-15T20:30:00Z	exp/fixup-fast-comparator	fixup-8b-key-sort	sf100	7821	true	unchanged

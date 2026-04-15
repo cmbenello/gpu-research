@@ -2666,23 +2666,27 @@ run_generation:
                    groups.empty() ? 0.0 : (double)num_records / groups.size(),
                    scan_ms, stitch_ms);
 
-            // Build list of "active" byte positions to compare during fixup —
-            // skip positions covered by the GPU's tied prefix (equal-by-construction
-            // within every tied group).
+            // Build list of "active" byte positions to compare during fixup.
+            // In the compact path, invariant bytes are identical across all canonical
+            // records (by the definition of "invariant" + verification that all records
+            // conform). So within any tied group we only need to compare compact-map
+            // positions NOT covered by the prefix — everything else is equal.
+            // compact_map is position-ordered (ascending) ⇒ lex order preserved.
             int active_bytes[KEY_SIZE]; int n_active = 0;
-            {
-                bool skip[KEY_SIZE] = {false};
 #ifdef USE_COMPACT_KEY
-                if (used_compact_prefix) {
-                    int n_prefix = std::min(effective_prefix_bytes, g_compact_count);
-                    for (int c = 0; c < n_prefix; c++) {
-                        int pos = h_compact_map[c];
-                        if (pos >= 0 && pos < (int)KEY_SIZE) skip[pos] = true;
-                    }
+            if (used_compact_prefix) {
+                int start = std::min(effective_prefix_bytes, g_compact_count);
+                for (int c = start; c < g_compact_count; c++) {
+                    int pos = h_compact_map[c];
+                    if (pos >= 0 && pos < (int)KEY_SIZE) active_bytes[n_active++] = pos;
                 }
+            } else
 #endif
-                for (int b = 0; b < (int)KEY_SIZE; b++)
-                    if (!skip[b]) active_bytes[n_active++] = b;
+            {
+                // Non-compact path: skip the first effective_prefix_bytes (they're
+                // equal within a tied group by construction).
+                for (int b = effective_prefix_bytes; b < (int)KEY_SIZE; b++)
+                    active_bytes[n_active++] = b;
             }
 
             // Group-size distribution stats (to inform parallelism strategy).
@@ -2714,16 +2718,36 @@ run_generation:
             std::vector<PhaseTimes> pt(hw);
 
             auto par_t0 = std::chrono::high_resolution_clock::now();
-            // Atomic work-queue dispatch: each thread pulls one group at a time.
-            // Eliminates load imbalance from fixed chunks (max group can be 7× avg).
+            // Atomic work-queue dispatch: each thread pulls a batch of groups at a
+            // time. Eliminates load imbalance from fixed chunks (max group can be 7×
+            // avg). Within each group we do: build 8B BE key from first ≤8 active
+            // bytes, sort std::pair<key,orig_idx>, sub-sort runs of tied keys over
+            // remaining active bytes, then reorder records.
+            //
+            // Fast path: when active_bytes form a contiguous run in the record (the
+            // common case on compact-key TPC-H after the prefix has consumed all
+            // sparse varying positions), we can do the 8B key via a single unaligned
+            // 64-bit load + bswap, and the tail compare via memcmp — ~4-5× faster
+            // than per-byte shift/load.
             std::atomic<uint64_t> next_group{0};
+            const int kbytes = std::min(n_active, 8);
+            const bool has_tail = (n_active > 8);
+            bool ab_contig = (n_active > 0);
+            for (int i = 1; i < n_active; i++) {
+                if (active_bytes[i] != active_bytes[0] + i) { ab_contig = false; break; }
+            }
+            const int ab_base = ab_contig && n_active > 0 ? active_bytes[0] : 0;
+            const int ab_tail_off = ab_base + kbytes;     // record byte offset for tail
+            const int ab_tail_len = ab_contig ? (n_active - kbytes) : 0;
+            if (ab_contig) {
+                printf("  Fixup: active bytes are contiguous run [%d..%d] (8B key + %dB tail, fast path enabled)\n",
+                       ab_base, ab_base + n_active - 1, ab_tail_len);
+            }
             if (!groups.empty()) {
                 std::vector<std::thread> fix_threads;
                 for (int t = 0; t < hw; t++) {
                     fix_threads.emplace_back([&, t]() {
-                        std::vector<uint8_t> packed((size_t)global_max_count * (size_t)n_active);
-                        std::vector<uint32_t> idx(global_max_count);
-                        std::vector<uint32_t> idx_tmp(global_max_count);
+                        std::vector<std::pair<uint64_t, uint32_t>> keys(global_max_count);
                         std::vector<uint8_t> reorder_buf((size_t)global_max_count * RECORD_SIZE);
                         PhaseTimes& myp = pt[t];
                         const uint64_t batch = 64;   // pull N groups at a time to amortize atomic
@@ -2735,73 +2759,72 @@ run_generation:
                             uint8_t* base = h_output + start * RECORD_SIZE;
 
                             auto t0 = std::chrono::high_resolution_clock::now();
-                            // Pack active bytes of each record into contiguous row.
-                            for (uint64_t j = 0; j < count; j++) {
-                                const uint8_t* src = base + j * RECORD_SIZE;
-                                uint8_t* dst = packed.data() + j * (size_t)n_active;
-                                for (int k = 0; k < n_active; k++) dst[k] = src[active_bytes[k]];
+                            // Build 8-byte BE keys directly from record bytes.
+                            if (ab_contig) {
+                                // Fast path: one unaligned 8B load + bswap per record.
+                                for (uint64_t j = 0; j < count; j++) {
+                                    const uint8_t* src = base + j * RECORD_SIZE;
+                                    uint64_t k;
+                                    memcpy(&k, src + ab_base, 8);
+                                    k = __builtin_bswap64(k);
+                                    if (kbytes < 8) k &= (~(uint64_t)0) << ((8 - kbytes) * 8);
+                                    keys[j].first = k;
+                                    keys[j].second = (uint32_t)j;
+                                }
+                            } else {
+                                // Scatter path: per-byte load + shift.
+                                for (uint64_t j = 0; j < count; j++) {
+                                    const uint8_t* src = base + j * RECORD_SIZE;
+                                    uint64_t k = 0;
+                                    for (int b = 0; b < kbytes; b++) {
+                                        k = (k << 8) | (uint64_t)src[active_bytes[b]];
+                                    }
+                                    if (kbytes < 8) k <<= (size_t)(8 - kbytes) * 8;
+                                    keys[j].first = k;
+                                    keys[j].second = (uint32_t)j;
+                                }
                             }
                             auto t1 = std::chrono::high_resolution_clock::now();
                             myp.pack_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
 
-                            // Sort strategy: MSD radix on byte 0 (256 buckets) to split
-                            // the group into sub-buckets, then std::sort each sub-bucket
-                            // over the remaining active bytes. When count ≤ 256 the
-                            // radix overhead outweighs the benefit → go straight to sort.
-                            const uint8_t* pk = packed.data();
-                            const int klen = n_active;
-                            for (uint32_t j = 0; j < (uint32_t)count; j++) idx[j] = j;
+                            // Primary sort on 8B key (fast uint64 compare).
+                            std::sort(keys.begin(), keys.begin() + count);
 
-                            // Recursive MSD radix sort on packed bytes.
-                            // Base case: insertion sort when N ≤ RADIX_BASE.
-                            // Otherwise: 1-byte radix, recurse into non-trivial buckets.
-                            // Early-terminates when all bytes consumed (byte_pos = klen).
-                            if (klen > 0) {
-                                constexpr uint32_t RADIX_BASE = 24;
-                                // Iterative work stack (avoids deep recursion on pathological data).
-                                struct Frame { uint32_t* idx; uint32_t* tmp; uint32_t n; int byte_pos; };
-                                std::vector<Frame> stack;
-                                stack.reserve(64);
-                                stack.push_back({idx.data(), idx_tmp.data(), (uint32_t)count, 0});
-                                while (!stack.empty()) {
-                                    Frame f = stack.back(); stack.pop_back();
-                                    if (f.n <= 1 || f.byte_pos == klen) continue;
-                                    if (f.n <= RADIX_BASE) {
-                                        // Insertion sort over remaining bytes [byte_pos, klen).
-                                        const int cmp_len = klen - f.byte_pos;
-                                        for (uint32_t i = 1; i < f.n; i++) {
-                                            uint32_t x = f.idx[i];
-                                            const uint8_t* xb = pk + (size_t)x * klen + f.byte_pos;
-                                            int j = (int)i - 1;
-                                            while (j >= 0) {
-                                                const uint8_t* jb = pk + (size_t)f.idx[j] * klen + f.byte_pos;
-                                                if (memcmp(jb, xb, cmp_len) <= 0) break;
-                                                f.idx[j+1] = f.idx[j]; j--;
-                                            }
-                                            f.idx[j+1] = x;
-                                        }
-                                        continue;
-                                    }
-                                    // 1-byte MSD radix on f.byte_pos.
-                                    uint32_t counts[257] = {0};
-                                    for (uint32_t j = 0; j < f.n; j++)
-                                        counts[pk[(size_t)f.idx[j] * klen + f.byte_pos] + 1]++;
-                                    for (int b = 0; b < 256; b++) counts[b+1] += counts[b];
-                                    uint32_t pos[256];
-                                    for (int b = 0; b < 256; b++) pos[b] = counts[b];
-                                    for (uint32_t j = 0; j < f.n; j++) {
-                                        uint8_t byte = pk[(size_t)f.idx[j] * klen + f.byte_pos];
-                                        f.tmp[pos[byte]++] = f.idx[j];
-                                    }
-                                    memcpy(f.idx, f.tmp, (size_t)f.n * 4);
-                                    // Push sub-buckets (reverse order so small buckets pop first).
-                                    for (int b = 255; b >= 0; b--) {
-                                        uint32_t bsz = counts[b+1] - counts[b];
-                                        if (bsz > 1) {
-                                            stack.push_back({f.idx + counts[b], f.tmp + counts[b],
-                                                             bsz, f.byte_pos + 1});
+                            // Sub-sort: find runs of equal keys and break ties over
+                            // remaining active bytes [kbytes..n_active). For data with
+                            // high entropy in the first 8 active bytes, most runs are
+                            // size 1 and this loop exits almost immediately.
+                            if (has_tail) {
+                                uint64_t i = 0;
+                                while (i < count) {
+                                    uint64_t j = i + 1;
+                                    while (j < count && keys[j].first == keys[i].first) j++;
+                                    if (j > i + 1) {
+                                        if (ab_contig) {
+                                            // Fast path: memcmp on contiguous tail bytes.
+                                            std::sort(keys.begin() + i, keys.begin() + j,
+                                                [&](const std::pair<uint64_t,uint32_t>& a,
+                                                    const std::pair<uint64_t,uint32_t>& b) {
+                                                    const uint8_t* ra = base + (uint64_t)a.second * RECORD_SIZE + ab_tail_off;
+                                                    const uint8_t* rb = base + (uint64_t)b.second * RECORD_SIZE + ab_tail_off;
+                                                    return memcmp(ra, rb, ab_tail_len) < 0;
+                                                });
+                                        } else {
+                                            std::sort(keys.begin() + i, keys.begin() + j,
+                                                [&](const std::pair<uint64_t,uint32_t>& a,
+                                                    const std::pair<uint64_t,uint32_t>& b) {
+                                                    const uint8_t* ra = base + (uint64_t)a.second * RECORD_SIZE;
+                                                    const uint8_t* rb = base + (uint64_t)b.second * RECORD_SIZE;
+                                                    for (int k = kbytes; k < n_active; k++) {
+                                                        uint8_t ba = ra[active_bytes[k]];
+                                                        uint8_t bb = rb[active_bytes[k]];
+                                                        if (ba != bb) return ba < bb;
+                                                    }
+                                                    return false;
+                                                });
                                         }
                                     }
+                                    i = j;
                                 }
                             }
                             auto t2 = std::chrono::high_resolution_clock::now();
@@ -2809,12 +2832,12 @@ run_generation:
 
                             bool already_sorted = true;
                             for (uint64_t j = 0; j < count; j++) {
-                                if (idx[j] != (uint32_t)j) { already_sorted = false; break; }
+                                if (keys[j].second != (uint32_t)j) { already_sorted = false; break; }
                             }
                             if (already_sorted) { myp.skipped++; continue; }
                             for (uint64_t j = 0; j < count; j++)
                                 memcpy(reorder_buf.data() + j*RECORD_SIZE,
-                                       base + (uint64_t)idx[j]*RECORD_SIZE, RECORD_SIZE);
+                                       base + (uint64_t)keys[j].second*RECORD_SIZE, RECORD_SIZE);
                             memcpy(base, reorder_buf.data(), count * RECORD_SIZE);
                             auto t3 = std::chrono::high_resolution_clock::now();
                             myp.reorder_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(t3 - t2).count();
