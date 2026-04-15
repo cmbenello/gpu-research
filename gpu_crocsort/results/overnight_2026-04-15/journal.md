@@ -93,3 +93,20 @@ All earlier claims of "SF50 -25% via entropy" are invalid.
 SUMMARY.md rewritten with the retraction as the headline.
 
 Paper lesson: always grep for BOTH PASS lines in sweeps. And: lex-preserving compact requires source-position-ordered byte selection.
+
+## Attempted: FORCE_SINGLE_PASS on SF50 (doesn't fit)
+
+Tried FORCE_SINGLE_PASS=1 to skip OVC+fixup on SF50 by using the full-key
+LSD path. Result: OOM on GPU. SF50 keys = 19.8 GB + CUB arena 7.7 GB =
+27.5 GB > 25 GB Quadro RTX 6000 HBM, even after freeing the triple buffers
+(16.35 GB). The single-pass full-key path only fits for SF10 (3.96 GB keys).
+
+So the memory architecture forces SF50 down the OVC+compact path, which
+is where the adversarial-byte-layout vulnerability lives. For SF50 on this
+hardware, the only correctness-preserving+fast option is to extend the
+GPU sort's effective prefix within OVC — i.e., the native 32B OVC refactor
+(extract pfx3+pfx4 during run-gen on GPU, 4-pass LSD), which I still
+haven't tackled.
+
+Branch reverted; deleted exp/force-single-pass.
+
