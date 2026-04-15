@@ -395,16 +395,21 @@ static int detect_compact_map(const uint8_t* h_data, uint64_t num_records,
     for (int b = 0; b < KEY_SIZE; b++) if (mn[b] != mx[b]) candidates[ncand++] = b;
 
     // SELECTION POLICY:
-    //   "position" (default for backward compat): take first 64 candidates by source position.
-    //   "entropy"  (env COMPACT_SELECT=entropy): rank candidates by distinct count desc,
-    //              take top min(64, ncand), then sort those by source position.
-    // Default: entropy selection (overnight experiment exp/entropy-selection
-    // showed -13% on SF50 with no impact on SF10/SF100). Override with
-    // COMPACT_SELECT=position to force the old source-position-order behavior.
-    bool entropy_select = true;
+    //   "position" (DEFAULT, correctness-correct): take first 64 candidates by source position.
+    //   "entropy"  (COMPACT_SELECT=entropy): rank candidates by distinct count desc, top N.
+    //
+    // ⚠ BUG (overnight 2026-04-15): entropy selection produces INCORRECT sort
+    // order. If two records differ at byte B (NOT in top-32) AND byte P > B
+    // (IN top-32), compact compares at P first and disagrees with full-key lex
+    // which compares at B first. The only way compact-key order matches
+    // full-key lex order on canonicals is if compact bytes form a SOURCE-
+    // POSITION-ORDERED PREFIX of the varying bytes. Entropy mode violates this
+    // and should NOT be used for correctness-sensitive sort. Retained as
+    // COMPACT_SELECT=entropy for the paper's negative-result section only.
+    bool entropy_select = false;
     if (const char* e = getenv("COMPACT_SELECT")) {
-        if (std::string(e) == "position") entropy_select = false;
-        else if (std::string(e) == "entropy") entropy_select = true;
+        if (std::string(e) == "entropy") entropy_select = true;
+        else if (std::string(e) == "position") entropy_select = false;
     }
 
     // Entropy selection rule: when there are more candidates than the compact
