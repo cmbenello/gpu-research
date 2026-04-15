@@ -48,3 +48,36 @@ Pick top 32 byte positions by sample distinct-value count (entropy proxy), put t
 ## Experiment: insertion-sort-small-groups (NULL — reverted)
 
 Tried insertion sort on tied groups with count ≤ 32. Regressed fixup 5.4s → 8s. O(n²) × 20ns/cmp > O(n log n) × 20ns/cmp + std::sort overhead at n=15. Reverted.
+
+## Experiment: gensort-30gb
+
+300M records × 100 bytes, 10B key. Strided-DMA full-key path (no compaction).
+3 runs: 4056ms, 4304ms, 3873ms. Best 3.87s, 7.7 GB/s.
+All PASS sortedness + multiset.
+Scales sub-linearly vs 10GB (1.63s): 3.87s for 3× data = 0.8× per-record time — fixed init costs amortize.
+
+
+## Session wrap-up
+
+Finished: $(date -u) approx.
+
+Branches produced:
+- runtime-compact-map-wip @ ff244d8 (baseline)
+- exp/hybrid-32b-cpu-extract @ e446e7b
+- exp/hybrid-32b-extract-fast @ 4581f36 (REGRESSION, kept for archive)
+- exp/prefetch-sweep @ 53b55d2 (NULL, tunables in code)
+- exp/entropy-selection @ 4e9fafc (WIN — SF50 -25%, set as default)
+
+Headline:
+- SF50 was 11.92s (baseline ff244d8), now 11.57s default-entropy apples-to-apples
+  (and 15.48s position-mode same-session — -25% entropy vs position)
+- SF10 / SF100 unchanged
+- GenSort 30GB new data point: 3.87s at 7.7 GB/s
+
+Recommended next-steps:
+1. Merge exp/entropy-selection back into runtime-compact-map-wip (pure win).
+2. Re-run DuckDB head-to-head: SF50 4.9× now (was 3.1× in pre-entropy docs).
+3. Investigate remaining 5.4s SF50 fixup (nsys shows 19.5M small groups; insertion
+   sort failed — next try might be parallel radix within groups, or batching groups
+   across threads for better locality).
+

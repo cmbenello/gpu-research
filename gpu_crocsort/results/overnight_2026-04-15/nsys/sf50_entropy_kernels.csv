@@ -1,0 +1,14 @@
+Generating SQLite file results/overnight_2026-04-15/nsys/sf50_entropy.sqlite from results/overnight_2026-04-15/nsys/sf50_entropy.nsys-rep
+Processing [results/overnight_2026-04-15/nsys/sf50_entropy.sqlite] with [/opt/nvidia/nsight-systems/2023.4.4/host-linux-x64/reports/cuda_gpu_kern_sum.py]... 
+Time (%),Total Time (ns),Instances,Avg (ns),Med (ns),Min (ns),Max (ns),StdDev (ns),Name
+54.7,655227196,96,6825283.3,6636939.0,1396945,13215671,3386073.7,"void cub::CUB_200302_750_NS::DeviceRadixSortOnesweepKernel<cub::CUB_200302_750_NS::DeviceRadixSortPolicy<unsigned long, unsigned int, unsigned int>::Policy900, (bool)0, unsigned long, unsigned int, unsigned int, int, int, cub::CUB_200302_750_NS::detail::identity_decomposer_t>(T7 *, T7 *, T5 *, const T5 *, T3 *, const T3 *, T4 *, const T4 *, T6, int, int, T8)"
+23.3,278813792,8,34851724.0,39397540.5,9962872,54537126,16064876.0,"extract_uint64_from_compact_kernel(const unsigned char *, const unsigned int *, unsigned long *, unsigned long, int, int)"
+8.7,104766492,2,52383246.0,52383246.0,45382632,59383860,9900363.3,"extract_prefix_from_compact_buffer_kernel(const unsigned char *, const unsigned int *, unsigned long *, unsigned long *, unsigned long)"
+6.8,81586960,1,81586960.0,81586960.0,81586960,81586960,0.0,"check_full_16B_ties_kernel(const unsigned long *, const unsigned long *, unsigned long, unsigned int *)"
+3.6,42821728,10,4282172.8,3706793.0,2800290,8041420,1994530.6,"void cub::CUB_200302_750_NS::DeviceRadixSortHistogramKernel<cub::CUB_200302_750_NS::DeviceRadixSortPolicy<unsigned long, unsigned int, unsigned int>::Policy900, (bool)0, unsigned long, unsigned int, cub::CUB_200302_750_NS::detail::identity_decomposer_t>(T4 *, const T3 *, T4, int, int, T5)"
+1.3,15852987,1,15852987.0,15852987.0,15852987,15852987,0.0,"gather_uint64_kernel(const unsigned long *, const unsigned int *, unsigned long *, unsigned long)"
+0.9,10877519,1,10877519.0,10877519.0,10877519,10877519,0.0,"gather_uint32_kernel(const unsigned int *, const unsigned int *, unsigned int *, unsigned long)"
+0.4,4301332,2,2150666.0,2150666.0,1860941,2440391,409733.0,"build_global_perm_kernel(const unsigned int *, unsigned int *, unsigned long, unsigned long, unsigned long)"
+0.3,4157620,3,1385873.3,1122612.0,855671,2179337,700002.0,"init_identity_kernel(unsigned int *, unsigned long)"
+0.0,17727,10,1772.7,1792.0,1568,1888,84.2,"void cub::CUB_200302_750_NS::DeviceRadixSortExclusiveSumKernel<cub::CUB_200302_750_NS::DeviceRadixSortPolicy<unsigned long, unsigned int, unsigned int>::Policy900, unsigned int>(T2 *)"
+

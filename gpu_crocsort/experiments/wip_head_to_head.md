@@ -27,6 +27,7 @@ SF10 uses the full-key no-compaction path and doesn't trigger the entropy branch
 | Size  | Records | GPU CrocSort | Throughput | Verifier |
 |-------|---------|--------------|------------|----------|
 | 10 GB | 100 M   | **1.63 s**    | 6.1 GB/s   | valsort OK + verify_full OK |
+| 30 GB | 300 M   | **3.87 s**    | 7.7 GB/s   | valsort OK + verify_full in-memory OK |
 
 GenSort uses the strided-DMA full-key path (KEY_SIZE=10), no compaction — unaffected by entropy selection.
 
