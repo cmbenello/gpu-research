@@ -2262,34 +2262,44 @@ run_generation:
                 for (int t = 0; t < hw; t++) {
                     fix_threads.emplace_back([&, t]() {
                         uint64_t g0 = t * gpt, g1 = std::min(g0 + gpt, (uint64_t)groups.size());
+                        // Per-thread reusable scratch: packed active bytes.
+                        // Each tied group ≤ ~25k records on TPC-H; n_active * 25k =
+                        // ≤ 1.5 MB → fits in this CPU's L2 (1 MB) for medium groups,
+                        // L3 for large. Comparing scattered bytes from h_output is
+                        // DRAM-bound (h_output is 36 GB on SF50, no L3 reuse). Packing
+                        // converts the inner sort to L2/L3-resident memcmp, which is
+                        // both bandwidth-friendlier and SIMD-vectorizable.
+                        std::vector<uint8_t> packed;
+                        std::vector<uint8_t> reorder_buf;
                         for (uint64_t g = g0; g < g1; g++) {
                             auto [start, count] = groups[g];
                             uint8_t* base = h_output + start * RECORD_SIZE;
+                            packed.resize(count * (size_t)n_active);
+                            // Pack: copy active bytes into a contiguous per-record stride.
+                            // Single linear pass over h_output for this group's slice.
+                            for (uint64_t j = 0; j < count; j++) {
+                                const uint8_t* src = base + j * RECORD_SIZE;
+                                uint8_t* dst = packed.data() + j * (size_t)n_active;
+                                for (int k = 0; k < n_active; k++) dst[k] = src[active_bytes[k]];
+                            }
                             std::vector<uint32_t> idx(count);
                             for (uint32_t j = 0; j < (uint32_t)count; j++) idx[j] = j;
-                            // Custom comparator: walk only the active byte positions
-                            // (those NOT in the GPU-tied prefix). For SF50 this is
-                            // 50 of 66 bytes — about 24% less compare work per pair.
-                            std::sort(idx.begin(), idx.end(), [base, &active_bytes, n_active](uint32_t a, uint32_t b) {
-                                const uint8_t* ra = base + (uint64_t)a*RECORD_SIZE;
-                                const uint8_t* rb = base + (uint64_t)b*RECORD_SIZE;
-                                for (int k = 0; k < n_active; k++) {
-                                    int p = active_bytes[k];
-                                    int diff = (int)ra[p] - (int)rb[p];
-                                    if (diff != 0) return diff < 0;
-                                }
-                                return false;  // equal (true duplicates)
+                            // Sort indices by memcmp on the packed buffer (cache-resident).
+                            const uint8_t* pk = packed.data();
+                            const int klen = n_active;
+                            std::sort(idx.begin(), idx.end(), [pk, klen](uint32_t a, uint32_t b) {
+                                return memcmp(pk + (size_t)a * klen, pk + (size_t)b * klen, klen) < 0;
                             });
-                            bool sorted = true;
+                            bool already_sorted = true;
                             for (uint64_t j = 0; j < count; j++) {
-                                if (idx[j] != (uint32_t)j) { sorted = false; break; }
+                                if (idx[j] != (uint32_t)j) { already_sorted = false; break; }
                             }
-                            if (sorted) continue;
-                            std::vector<uint8_t> buf(count * RECORD_SIZE);
+                            if (already_sorted) continue;
+                            reorder_buf.resize(count * RECORD_SIZE);
                             for (uint64_t j = 0; j < count; j++)
-                                memcpy(buf.data() + j*RECORD_SIZE,
+                                memcpy(reorder_buf.data() + j*RECORD_SIZE,
                                        base + (uint64_t)idx[j]*RECORD_SIZE, RECORD_SIZE);
-                            memcpy(base, buf.data(), count * RECORD_SIZE);
+                            memcpy(base, reorder_buf.data(), count * RECORD_SIZE);
                         }
                     });
                 }
