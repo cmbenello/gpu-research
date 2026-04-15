@@ -1,0 +1,256 @@
+════════════════════════════════════════════════════
+  GPU External Merge Sort — Streaming Benchmark
+════════════════════════════════════════════════════
+GPU: Quadro RTX 6000 (25.4 GB HBM, 72 SMs, 672 GB/s BW)
+Data: 7.20 GB (59986052 records × 120 bytes) (from file)
+
+Allocating 7.20 GB pinned host memory...
+Loading from /tmp/lineitem_sf10_normalized.bin...
+  Loaded 7.20 GB in 18527 ms (0.39 GB/s)
+
+
+══════════ Experiment run 1/6 ══════════
+[ExternalSort] GPU: 25.20 GB free, budget: 16.38 GB
+[ExternalSort] Triple-buffer: 3 × 5.46 GB (46 M records each)
+[ExternalSort] Sorting 59986052 records (7.20 GB)
+
+[CompactDetect] 61/66 key bytes vary (stratified random sample 1000K of 59M records, 38 ms)
+[CompactDetect] Varying byte positions: 0 1 5 7 8 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 ...
+[CompactDetect] Compactness: 61/66 = 92% varying. Decision: compact UPLOAD still wins, but compact PREFIX may have ties (CPU fixup)
+== Step 1+2: Key Upload ==
+  Uploaded 3.96 GB keys (strided, GPU-direct) in 954 ms (7.55 GB/s effective)
+== Step 3: GPU CUB Radix Sort ==
+  LSD sort: 9 passes for 66-byte key
+    Pass 1 (bytes 64-65): 12.4 ms
+    Pass 2 (bytes 56-63): 36.7 ms
+    Pass 3 (bytes 48-55): 39.8 ms
+    Pass 4 (bytes 40-47): 42.7 ms
+    Pass 5 (bytes 32-39): 43.6 ms
+    Pass 6 (bytes 24-31): 43.6 ms
+    Pass 7 (bytes 16-23): 43.8 ms
+    Pass 8 (bytes 8-15): 43.6 ms
+    Pass 9 (bytes 0-7): 43.7 ms
+  Sorted 59986052 keys in 355 ms
+== Step 4: Download Permutation ==
+  Downloaded 0.24 GB perm in 35 ms
+== Step 5: CPU Gather ==
+  Gathered 7.20 GB in 432 ms (16.65 GB/s)
+[Correctness] Full-key sort path (no compaction) — inherently correct.
+
+[ExternalSort] ═══════════════════════════════════════
+  DONE: 1776 ms (gen: 1344 + merge: 432)
+  Throughput: 4.05 GB/s
+  Runs: 1 | Merge passes: 1
+  PCIe: 4.0 GB H2D + 0.2 GB D2H = 4.2 GB total (0.6x amplification)
+═══════════════════════════════════════════════════════
+
+Verifying...
+  PASS sortedness: 59986052 records in non-decreasing order (136 ms)
+  PASS multiset:   output is a permutation of input (hash=0x02adf169d10af720, 497 ms)
+
+CSV,Quadro RTX 6000,7.20,59986052,1,1,1343.63,432.34,1775.97,4.0532,3.96,0.24,4.20,0.6
+
+══════════ Experiment run 2/6 ══════════
+[ExternalSort] GPU: 25.19 GB free, budget: 16.38 GB
+[ExternalSort] Triple-buffer: 3 × 5.46 GB (45 M records each)
+[ExternalSort] Sorting 59986052 records (7.20 GB)
+
+[CompactDetect] 61/66 key bytes vary (stratified random sample 1000K of 59M records, 0 ms)
+[CompactDetect] Varying byte positions: 0 1 5 7 8 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 ...
+[CompactDetect] Compactness: 61/66 = 92% varying. Decision: compact UPLOAD still wins, but compact PREFIX may have ties (CPU fixup)
+== Step 1+2: Key Upload ==
+  Uploaded 3.96 GB keys (strided, GPU-direct) in 14 ms (529.79 GB/s effective)
+== Step 3: GPU CUB Radix Sort ==
+  LSD sort: 9 passes for 66-byte key
+    Pass 1 (bytes 64-65): 12.3 ms
+    Pass 2 (bytes 56-63): 36.7 ms
+    Pass 3 (bytes 48-55): 39.8 ms
+    Pass 4 (bytes 40-47): 42.7 ms
+    Pass 5 (bytes 32-39): 43.7 ms
+    Pass 6 (bytes 24-31): 43.6 ms
+    Pass 7 (bytes 16-23): 43.8 ms
+    Pass 8 (bytes 8-15): 43.6 ms
+    Pass 9 (bytes 0-7): 43.7 ms
+  Sorted 59986052 keys in 1276 ms
+== Step 4: Download Permutation ==
+  Downloaded 0.24 GB perm in 21 ms
+== Step 5: CPU Gather ==
+  Gathered 7.20 GB in 428 ms (16.83 GB/s)
+[Correctness] Full-key sort path (no compaction) — inherently correct.
+
+[ExternalSort] ═══════════════════════════════════════
+  DONE: 1738 ms (gen: 1310 + merge: 428)
+  Throughput: 4.14 GB/s
+  Runs: 1 | Merge passes: 1
+  PCIe: 4.0 GB H2D + 0.2 GB D2H = 4.2 GB total (0.6x amplification)
+═══════════════════════════════════════════════════════
+
+Verifying...
+  PASS sortedness: 59986052 records in non-decreasing order (134 ms)
+  PASS multiset:   output is a permutation of input (hash=0x02adf169d10af720, 517 ms)
+
+CSV,Quadro RTX 6000,7.20,59986052,1,1,1310.41,427.73,1738.14,4.1414,3.96,0.24,4.20,0.6
+
+══════════ Experiment run 3/6 ══════════
+[ExternalSort] GPU: 25.19 GB free, budget: 16.38 GB
+[ExternalSort] Triple-buffer: 3 × 5.46 GB (45 M records each)
+[ExternalSort] Sorting 59986052 records (7.20 GB)
+
+[CompactDetect] 61/66 key bytes vary (stratified random sample 1000K of 59M records, 0 ms)
+[CompactDetect] Varying byte positions: 0 1 5 7 8 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 ...
+[CompactDetect] Compactness: 61/66 = 92% varying. Decision: compact UPLOAD still wins, but compact PREFIX may have ties (CPU fixup)
+== Step 1+2: Key Upload ==
+  Uploaded 3.96 GB keys (strided, GPU-direct) in 14 ms (530.45 GB/s effective)
+== Step 3: GPU CUB Radix Sort ==
+  LSD sort: 9 passes for 66-byte key
+    Pass 1 (bytes 64-65): 12.3 ms
+    Pass 2 (bytes 56-63): 36.8 ms
+    Pass 3 (bytes 48-55): 39.9 ms
+    Pass 4 (bytes 40-47): 42.8 ms
+    Pass 5 (bytes 32-39): 43.8 ms
+    Pass 6 (bytes 24-31): 43.6 ms
+    Pass 7 (bytes 16-23): 43.9 ms
+    Pass 8 (bytes 8-15): 43.6 ms
+    Pass 9 (bytes 0-7): 43.7 ms
+  Sorted 59986052 keys in 1316 ms
+== Step 4: Download Permutation ==
+  Downloaded 0.24 GB perm in 21 ms
+== Step 5: CPU Gather ==
+  Gathered 7.20 GB in 424 ms (16.99 GB/s)
+[Correctness] Full-key sort path (no compaction) — inherently correct.
+
+[ExternalSort] ═══════════════════════════════════════
+  DONE: 1774 ms (gen: 1351 + merge: 424)
+  Throughput: 4.06 GB/s
+  Runs: 1 | Merge passes: 1
+  PCIe: 4.0 GB H2D + 0.2 GB D2H = 4.2 GB total (0.6x amplification)
+═══════════════════════════════════════════════════════
+
+Verifying...
+  PASS sortedness: 59986052 records in non-decreasing order (134 ms)
+  PASS multiset:   output is a permutation of input (hash=0x02adf169d10af720, 496 ms)
+
+CSV,Quadro RTX 6000,7.20,59986052,1,1,1350.71,423.71,1774.42,4.0567,3.96,0.24,4.20,0.6
+
+══════════ Experiment run 4/6 ══════════
+[ExternalSort] GPU: 25.19 GB free, budget: 16.38 GB
+[ExternalSort] Triple-buffer: 3 × 5.46 GB (45 M records each)
+[ExternalSort] Sorting 59986052 records (7.20 GB)
+
+[CompactDetect] 61/66 key bytes vary (stratified random sample 1000K of 59M records, 0 ms)
+[CompactDetect] Varying byte positions: 0 1 5 7 8 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 ...
+[CompactDetect] Compactness: 61/66 = 92% varying. Decision: compact UPLOAD still wins, but compact PREFIX may have ties (CPU fixup)
+== Step 1+2: Key Upload ==
+  Uploaded 3.96 GB keys (strided, GPU-direct) in 14 ms (529.87 GB/s effective)
+== Step 3: GPU CUB Radix Sort ==
+  LSD sort: 9 passes for 66-byte key
+    Pass 1 (bytes 64-65): 12.3 ms
+    Pass 2 (bytes 56-63): 36.7 ms
+    Pass 3 (bytes 48-55): 39.8 ms
+    Pass 4 (bytes 40-47): 42.7 ms
+    Pass 5 (bytes 32-39): 43.7 ms
+    Pass 6 (bytes 24-31): 43.6 ms
+    Pass 7 (bytes 16-23): 43.8 ms
+    Pass 8 (bytes 8-15): 43.6 ms
+    Pass 9 (bytes 0-7): 43.7 ms
+  Sorted 59986052 keys in 1277 ms
+== Step 4: Download Permutation ==
+  Downloaded 0.24 GB perm in 21 ms
+== Step 5: CPU Gather ==
+  Gathered 7.20 GB in 421 ms (17.09 GB/s)
+[Correctness] Full-key sort path (no compaction) — inherently correct.
+
+[ExternalSort] ═══════════════════════════════════════
+  DONE: 1732 ms (gen: 1311 + merge: 421)
+  Throughput: 4.16 GB/s
+  Runs: 1 | Merge passes: 1
+  PCIe: 4.0 GB H2D + 0.2 GB D2H = 4.2 GB total (0.6x amplification)
+═══════════════════════════════════════════════════════
+
+Verifying...
+  PASS sortedness: 59986052 records in non-decreasing order (143 ms)
+  PASS multiset:   output is a permutation of input (hash=0x02adf169d10af720, 516 ms)
+
+CSV,Quadro RTX 6000,7.20,59986052,1,1,1311.02,421.24,1732.26,4.1555,3.96,0.24,4.20,0.6
+
+══════════ Experiment run 5/6 ══════════
+[ExternalSort] GPU: 25.19 GB free, budget: 16.38 GB
+[ExternalSort] Triple-buffer: 3 × 5.46 GB (45 M records each)
+[ExternalSort] Sorting 59986052 records (7.20 GB)
+
+[CompactDetect] 61/66 key bytes vary (stratified random sample 1000K of 59M records, 0 ms)
+[CompactDetect] Varying byte positions: 0 1 5 7 8 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 ...
+[CompactDetect] Compactness: 61/66 = 92% varying. Decision: compact UPLOAD still wins, but compact PREFIX may have ties (CPU fixup)
+== Step 1+2: Key Upload ==
+  Uploaded 3.96 GB keys (strided, GPU-direct) in 14 ms (525.43 GB/s effective)
+== Step 3: GPU CUB Radix Sort ==
+  LSD sort: 9 passes for 66-byte key
+    Pass 1 (bytes 64-65): 12.3 ms
+    Pass 2 (bytes 56-63): 36.8 ms
+    Pass 3 (bytes 48-55): 39.9 ms
+    Pass 4 (bytes 40-47): 42.8 ms
+    Pass 5 (bytes 32-39): 43.8 ms
+    Pass 6 (bytes 24-31): 43.7 ms
+    Pass 7 (bytes 16-23): 43.9 ms
+    Pass 8 (bytes 8-15): 43.7 ms
+    Pass 9 (bytes 0-7): 43.8 ms
+  Sorted 59986052 keys in 1317 ms
+== Step 4: Download Permutation ==
+  Downloaded 0.24 GB perm in 21 ms
+== Step 5: CPU Gather ==
+  Gathered 7.20 GB in 434 ms (16.58 GB/s)
+[Correctness] Full-key sort path (no compaction) — inherently correct.
+
+[ExternalSort] ═══════════════════════════════════════
+  DONE: 1786 ms (gen: 1352 + merge: 434)
+  Throughput: 4.03 GB/s
+  Runs: 1 | Merge passes: 1
+  PCIe: 4.0 GB H2D + 0.2 GB D2H = 4.2 GB total (0.6x amplification)
+═══════════════════════════════════════════════════════
+
+Verifying...
+  PASS sortedness: 59986052 records in non-decreasing order (132 ms)
+  PASS multiset:   output is a permutation of input (hash=0x02adf169d10af720, 488 ms)
+
+CSV,Quadro RTX 6000,7.20,59986052,1,1,1351.52,434.15,1785.67,4.0312,3.96,0.24,4.20,0.6
+
+══════════ Experiment run 6/6 ══════════
+[ExternalSort] GPU: 25.19 GB free, budget: 16.38 GB
+[ExternalSort] Triple-buffer: 3 × 5.46 GB (45 M records each)
+[ExternalSort] Sorting 59986052 records (7.20 GB)
+
+[CompactDetect] 61/66 key bytes vary (stratified random sample 1000K of 59M records, 0 ms)
+[CompactDetect] Varying byte positions: 0 1 5 7 8 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 ...
+[CompactDetect] Compactness: 61/66 = 92% varying. Decision: compact UPLOAD still wins, but compact PREFIX may have ties (CPU fixup)
+== Step 1+2: Key Upload ==
+  Uploaded 3.96 GB keys (strided, GPU-direct) in 14 ms (532.10 GB/s effective)
+== Step 3: GPU CUB Radix Sort ==
+  LSD sort: 9 passes for 66-byte key
+    Pass 1 (bytes 64-65): 12.3 ms
+    Pass 2 (bytes 56-63): 36.7 ms
+    Pass 3 (bytes 48-55): 39.8 ms
+    Pass 4 (bytes 40-47): 42.7 ms
+    Pass 5 (bytes 32-39): 43.7 ms
+    Pass 6 (bytes 24-31): 43.6 ms
+    Pass 7 (bytes 16-23): 43.8 ms
+    Pass 8 (bytes 8-15): 43.5 ms
+    Pass 9 (bytes 0-7): 43.7 ms
+  Sorted 59986052 keys in 1282 ms
+== Step 4: Download Permutation ==
+  Downloaded 0.24 GB perm in 21 ms
+== Step 5: CPU Gather ==
+  Gathered 7.20 GB in 427 ms (16.87 GB/s)
+[Correctness] Full-key sort path (no compaction) — inherently correct.
+
+[ExternalSort] ═══════════════════════════════════════
+  DONE: 1742 ms (gen: 1316 + merge: 427)
+  Throughput: 4.13 GB/s
+  Runs: 1 | Merge passes: 1
+  PCIe: 4.0 GB H2D + 0.2 GB D2H = 4.2 GB total (0.6x amplification)
+═══════════════════════════════════════════════════════
+
+Verifying...
+  PASS sortedness: 59986052 records in non-decreasing order (144 ms)
+  PASS multiset:   output is a permutation of input (hash=0x02adf169d10af720, 516 ms)
+
+CSV,Quadro RTX 6000,7.20,59986052,1,1,1315.85,426.61,1742.46,4.1311,3.96,0.24,4.20,0.6
