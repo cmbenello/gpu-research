@@ -19,13 +19,30 @@ Each sort output below was independently checked with `./verify_full --input <in
 DuckDB v1.5.2 internal dbgen → `CREATE TABLE s AS SELECT * FROM lineitem ORDER BY ...`
 Our binary: `external_sort_tpch_compact --input lineitem_sfN_normalized.bin --runs 2`
 
-| Scale | Records | DuckDB v1.5.2 | GPU CrocSort (ours) | Speedup | verify_full |
-|------:|--------:|--------------:|---------------------:|--------:|:-----------:|
-| SF10  | 60 M    | 8.03 s        | **1.76 s**           | 4.6×    | ALL PASS    |
-| SF50  | 300 M   | 56.7 s        | **19.4 s**           | 2.9×    | ALL PASS    |
-| SF100 | 600 M   | (~200 s projected) | **8.2 s**       | ~24×    | sortedness PASS, multiset not run (output too large for free disk) |
+| Scale | Records | DuckDB v1.5.2 | GPU CrocSort (ours) | Speedup | sortedness | multiset |
+|------:|--------:|--------------:|---------------------:|--------:|:----------:|:--------:|
+| SF10  | 60 M    | 8.03 s        | **1.76 s**           | 4.6×    | PASS       | PASS     |
+| SF50  | 300 M   | 56.7 s        | **19.4 s**           | 2.9×    | PASS       | PASS     |
+| SF100 | 600 M   | (~200 s projected) | **8.2 s**       | ~24×    | PASS       | PASS     |
 
-SF50 is dominated by CPU fixup (14 s out of 19 s) because the runtime-detected compact prefix only captures 16 of 61 varying bytes for the SF50 dataset, producing many ties on the GPU 16B prefix that need full-key resolution on CPU. SF100 has a more discriminating prefix (16 of 27 varying bytes including unique date/orderkey positions) so most pairs resolve at the GPU level — fixup is skipped.
+Multiset check now runs in-memory after the sort (no need to write the 72 GB output to disk for SF100). It computes a parallel sum of FNV-1a-64 hashes per record over `h_data` (input) and `h_output` (sorted), and compares — equal iff the sort produced a permutation of the input. The hash check costs 0.5 s on SF10, 4 s on SF50, 5.5 s on SF100, and runs only when `--verify` is on (default).
+
+### Why SF100 is faster than SF50
+
+| Phase | SF50 | SF100 |
+|------:|-----:|------:|
+| Run-gen | 2.1 s | 3.7 s |
+| GPU 16B merge | 0.3 s | 0.8 s |
+| CPU gather | 1.7 s | 3.5 s |
+| CPU fixup | **14.3 s** | **0 s (skipped — no GPU 16B-prefix ties)** |
+| Total | 19.4 s | 8.2 s |
+
+The compact map's first 16 bytes go into the GPU 16B prefix used by the CUB merge. Compact-map entries are ordered by source byte position (a correctness requirement), so the prefix gets the *first 16 varying byte positions* of the record:
+
+- **SF100**: 27 varying bytes total → first 16 = `0,1,4,5,8,9,12,13,19,20,21,29,37,44,45,50`. Spread across positions 0–50, includes the high-entropy byte 50 (date/orderkey territory) → almost every adjacent pair differs at the GPU level → **fixup skipped**.
+- **SF50**: 61 varying bytes total → first 16 = `0,1,5,7,8,10,11,12,13,14,15,16,17,18,19,20`. Clustered in positions 0–20 (low-entropy date prefix) → 290 M of 300 M records end up tied on the prefix → 14 s of CPU fixup over 15 K groups of ~19 K records each.
+
+Fix paths (open follow-ups): extend GPU sort key from 16 B → 32 B (adds ~1 s GPU work, likely eliminates the 14 s fixup), and/or pick prefix bytes by entropy not source position.
 
 ## GenSort (JouleSort format: 100 B records, 10 B key)
 

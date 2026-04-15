@@ -2579,12 +2579,81 @@ int main(int argc, char** argv) {
 
         if (verify) {
             printf("\nVerifying...\n");
-            uint64_t bad = 0;
-            for (uint64_t i = 1; i < num_records && bad < 10; i++)
-                if (key_compare(sorted+(i-1)*RECORD_SIZE, sorted+i*RECORD_SIZE, KEY_SIZE)>0)
-                    { if (bad<5) printf("  VIOLATION at %lu\n",i); bad++; }
-            printf(bad==0 ? "  PASS: %lu records sorted\n" : "  FAIL: %lu violations\n",
-                   bad==0 ? num_records : bad);
+            // Check 1: parallel sortedness — adjacent pairs in non-decreasing order.
+            int hw = std::max(1u, std::thread::hardware_concurrency());
+            std::atomic<uint64_t> first_bad{UINT64_MAX};
+            uint64_t per_t = (num_records + hw - 1) / hw;
+            std::vector<std::thread> sthreads;
+            WallTimer st; st.begin();
+            for (int t = 0; t < hw; t++) {
+                sthreads.emplace_back([&, t]() {
+                    uint64_t lo = (uint64_t)t * per_t;
+                    uint64_t hi = std::min(lo + per_t, num_records);
+                    if (lo == 0) lo = 1;
+                    for (uint64_t i = lo; i < hi; i++) {
+                        if (first_bad.load(std::memory_order_relaxed) != UINT64_MAX) break;
+                        if (key_compare(sorted + (i-1)*RECORD_SIZE,
+                                        sorted + i*RECORD_SIZE, KEY_SIZE) > 0) {
+                            uint64_t cur = first_bad.load();
+                            while (i < cur && !first_bad.compare_exchange_weak(cur, i)) {}
+                            break;
+                        }
+                    }
+                });
+            }
+            for (auto& t : sthreads) t.join();
+            double sort_ms = st.end_ms();
+            uint64_t fb = first_bad.load();
+            if (fb == UINT64_MAX) {
+                printf("  PASS sortedness: %lu records in non-decreasing order (%.0f ms)\n",
+                       num_records, sort_ms);
+            } else {
+                printf("  FAIL sortedness: first violation at record %lu (%.0f ms)\n",
+                       fb, sort_ms);
+            }
+
+            // Check 2: multiset preservation — sum of FNV-1a 64 hashes per record,
+            // computed over BOTH the input buffer (h_data) and the sorted output.
+            // Order-independent: equal iff output is a permutation of input.
+            // Catches the "all-zero permutation" failure mode where every output
+            // record is a copy of input[0] (which trivially passes sortedness).
+            auto multiset_hash = [&](const uint8_t* data) {
+                std::vector<std::atomic<uint64_t>> partials(hw);
+                for (int t = 0; t < hw; t++) partials[t].store(0);
+                std::vector<std::thread> hthreads;
+                for (int t = 0; t < hw; t++) {
+                    hthreads.emplace_back([&, t]() {
+                        uint64_t lo = (uint64_t)t * per_t;
+                        uint64_t hi = std::min(lo + per_t, num_records);
+                        uint64_t local = 0;
+                        for (uint64_t i = lo; i < hi; i++) {
+                            uint64_t h = 0xcbf29ce484222325ULL;
+                            const uint8_t* r = data + i * RECORD_SIZE;
+                            for (int b = 0; b < (int)RECORD_SIZE; b++) {
+                                h ^= r[b]; h *= 0x100000001b3ULL;
+                            }
+                            local += h;
+                        }
+                        partials[t].store(local);
+                    });
+                }
+                for (auto& t : hthreads) t.join();
+                uint64_t sum = 0;
+                for (int t = 0; t < hw; t++) sum += partials[t].load();
+                return sum;
+            };
+            WallTimer ht; ht.begin();
+            uint64_t in_sum = multiset_hash(h_data);
+            uint64_t out_sum = multiset_hash(sorted);
+            double hash_ms = ht.end_ms();
+            if (in_sum == out_sum) {
+                printf("  PASS multiset:   output is a permutation of input "
+                       "(hash=0x%016lx, %.0f ms)\n", in_sum, hash_ms);
+            } else {
+                printf("  FAIL multiset:   in=0x%016lx out=0x%016lx — output IS NOT "
+                       "a permutation of input (records lost/duplicated/modified, %.0f ms)\n",
+                       in_sum, out_sum, hash_ms);
+            }
         }
 
         // Dump sorted output for independent external verification (tools/verify_sorted).
