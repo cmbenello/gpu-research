@@ -44,3 +44,7 @@ Lesson: extending the prefix to more BYTES doesn't help when the discriminating 
 ## Experiment: entropy-selection (WIN!)
 
 Pick top 32 byte positions by sample distinct-value count (entropy proxy), put them in compact KEY (sorted by position). Remaining varying bytes go in map[32+] for verification. SF50: 12.16s → 10.55s (-1.6s, -13%) with fixup 7.05s → 5.39s. SF10/SF100 unaffected. Mark COMPACT_SELECT=entropy as default-recommended.
+
+## Experiment: insertion-sort-small-groups (NULL — reverted)
+
+Tried insertion sort on tied groups with count ≤ 32. Regressed fixup 5.4s → 8s. O(n²) × 20ns/cmp > O(n log n) × 20ns/cmp + std::sort overhead at n=15. Reverted.
