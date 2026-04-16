@@ -1660,6 +1660,35 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
             decision = "too many varying bytes — no compression benefit, use full upload";
         printf("[CompactDetect] Compactness: %d/%d = %.0f%% varying. Decision: %s\n",
                g_compact_count, KEY_SIZE, compactness * 100.0, decision);
+        if (g_compact_count > 0) {
+            int bits1 = 0, bits2 = 0, bits4 = 0, bits8 = 0;
+            int packed_bits = 0;
+            for (int i = 0; i < g_compact_count; i++) {
+                int pos = g_compact_map[i];
+                int range = (int)g_sample_max[pos] - (int)g_sample_min[pos] + 1;
+                int bits = (range <= 2) ? 1 : (range <= 4) ? 2 : (range <= 16) ? 4 : 8;
+                packed_bits += bits;
+                if (bits == 1) bits1++;
+                else if (bits == 2) bits2++;
+                else if (bits == 4) bits4++;
+                else bits8++;
+            }
+            int packed_bytes = (packed_bits + 7) / 8;
+            printf("[CompactDetect] Per-position bit-widths: %d×1b  %d×2b  %d×4b  %d×8b"
+                   " → %d bits = %d packed bytes (vs %d current)\n",
+                   bits1, bits2, bits4, bits8, packed_bits, packed_bytes, g_compact_count);
+            int covered_by_32B = 0, cum_bits = 0;
+            for (int i = 0; i < g_compact_count && cum_bits < 256; i++) {
+                int pos = g_compact_map[i];
+                int range = (int)g_sample_max[pos] - (int)g_sample_min[pos] + 1;
+                int bits = (range <= 2) ? 1 : (range <= 4) ? 2 : (range <= 16) ? 4 : 8;
+                cum_bits += bits;
+                if (cum_bits <= 256) covered_by_32B = i + 1;
+            }
+            printf("[CompactDetect] 32B prefix would cover %d/%d positions if nibble-packed"
+                   " (vs %d currently)\n", covered_by_32B, g_compact_count,
+                   std::min(g_compact_count, (int)COMPACT_KEY_SIZE));
+        }
         // Allocate + upload the runtime compact map to a plain device buffer.
         // Using cudaMalloc + cudaMemcpy (not cudaMemcpyToSymbol on a __constant__
         // symbol) keeps CUDA module loading lazy — the buggy PTX-JIT path on
@@ -3152,6 +3181,18 @@ int main(int argc, char** argv) {
         WallTimer gt; gt.begin();
         gen_data(h_data, num_records);
         printf("  Generated in %.0f ms\n\n", gt.end_ms());
+    }
+
+    if (const char* e = getenv("ADV_ZERO_BYTES")) {
+        int z = atoi(e);
+        if (z > 0 && z <= KEY_SIZE) {
+            printf("[ADVERSARIAL] Zeroing first %d bytes of each record (%lu records)...\n", z, num_records);
+            WallTimer zt; zt.begin();
+            #pragma omp parallel for schedule(static)
+            for (uint64_t i = 0; i < num_records; i++)
+                memset(h_data + i * RECORD_SIZE, 0, z);
+            printf("[ADVERSARIAL] Done in %.0f ms\n\n", zt.end_ms());
+        }
     }
 
     for (int run = 0; run < num_experiment_runs; run++) {

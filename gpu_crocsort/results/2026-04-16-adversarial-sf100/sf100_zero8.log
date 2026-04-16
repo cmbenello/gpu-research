@@ -1,0 +1,136 @@
+════════════════════════════════════════════════════
+  GPU External Merge Sort — Streaming Benchmark
+════════════════════════════════════════════════════
+GPU: Quadro RTX 6000 (25.4 GB HBM, 72 SMs, 672 GB/s BW)
+Data: 72.00 GB (600037902 records × 120 bytes) (from file)
+
+Allocating 72.00 GB pinned host memory...
+Loading from /tmp/lineitem_sf100_normalized.bin...
+  Loaded 72.00 GB in 183173 ms (0.39 GB/s)
+
+[ADVERSARIAL] Zeroing first 8 bytes of each record (600037902 records)...
+[ADVERSARIAL] Done in 8685 ms
+
+
+══════════ Experiment run 1/3 ══════════
+[ExternalSort] GPU: 25.07 GB free, budget: 16.30 GB
+[ExternalSort] Triple-buffer: 3 × 5.43 GB (45 M records each)
+[ExternalSort] Sorting 600037902 records (72.00 GB)
+
+[CompactDetect] 23/66 key bytes vary (stratified random sample 1000K of 600M records, 35 ms)
+[CompactDetect] Varying byte positions: 8 9 12 13 19 20 21 29 37 44 45 50 51 52 53 54 55 56 57 59 60 61 65
+[CompactDetect] Compactness: 23/66 = 35% varying. Decision: compact upload WINS (≤32 varying bytes, fits in 32B compact buffer)
+[CompactDetect] Per-position bit-widths: 1×1b  0×2b  6×4b  16×8b → 153 bits = 20 packed bytes (vs 23 current)
+[CompactDetect] 32B prefix would cover 23/23 positions if nibble-packed (vs 23 currently)
+== Step 1+2: Key Upload ==
+  Keys too large for single-pass (39.6 GB > 22.5 GB)
+  Using OVC ARCHITECTURE: run-gen + GPU OVC merge + CPU gather
+  OVC buffers: 12.0 GB (4B OVC + 8B prefix + 4B perm per record)
+  32B OVC extension: SKIPPED (would need 32.3 GB, have 11.7 GB usable)
+  COMPACT UPLOAD: 170M rec/chunk, 4 chunks, PCIe 19.2 GB (vs 72.0 GB full), CUB scratch 145 MB
+
+== Phase 1: Run Generation (chunked LSD sort) ==
+  Run 1/4: 19429.6 MB (compact upload 5181.2 MB)      Run 2/4: 19429.6 MB (compact upload 5181.2 MB)      Run 3/4: 19429.6 MB (compact upload 5181.2 MB)      Run 4/4: 10380.0 MB (compact upload 2768.0 MB)    
+  4 runs in 3787 ms (19.02 GB/s)
+
+== Phase 2: GPU 16B Prefix Merge (2 CUB LSD passes) ==
+  GPU free before merge alloc: 13.03 GB
+  GPU free after merge alloc: 3.33 GB
+  Pass 1 (sort by pfx2 + gather): 603 ms
+  GPU 16B tie check: NO TIES — fixup skipped
+  Pass 2 (sort by pfx1): 225 ms
+  GPU 16B prefix merge total: 828 ms
+  Downloaded perm in 183 ms
+== Phase 3: CPU Gather ==
+  Gathered 72.00 GB in 6473 ms (11.12 GB/s)
+== Phase 4: CPU Fixup (skipped — no pfx1 ties) ==
+  Total merge+gather+fixup: 7483 ms
+[Correctness] Sample map verified against all 600037902 records — compact sort is FULL-KEY-EQUIVALENT.
+
+Verifying...
+  PASS sortedness: 600037902 records in non-decreasing order (3680 ms)
+  PASS multiset:   output is a permutation of input (hash=0xe5a8ce6ee017ca90, 7739 ms)
+
+CSV,Quadro RTX 6000,72.00,600037902,4,2,3786.66,7483.43,11270.09,6.3890,19.20,2.40,21.60,0.3
+
+══════════ Experiment run 2/3 ══════════
+[ExternalSort] GPU: 25.06 GB free, budget: 16.29 GB
+[ExternalSort] Triple-buffer: 3 × 5.43 GB (45 M records each)
+[ExternalSort] Sorting 600037902 records (72.00 GB)
+
+[CompactDetect] 23/66 key bytes vary (stratified random sample 1000K of 600M records, 0 ms)
+[CompactDetect] Varying byte positions: 8 9 12 13 19 20 21 29 37 44 45 50 51 52 53 54 55 56 57 59 60 61 65
+[CompactDetect] Compactness: 23/66 = 35% varying. Decision: compact upload WINS (≤32 varying bytes, fits in 32B compact buffer)
+[CompactDetect] Per-position bit-widths: 1×1b  0×2b  6×4b  16×8b → 153 bits = 20 packed bytes (vs 23 current)
+[CompactDetect] 32B prefix would cover 23/23 positions if nibble-packed (vs 23 currently)
+== Step 1+2: Key Upload ==
+  Keys too large for single-pass (39.6 GB > 22.5 GB)
+  Using OVC ARCHITECTURE: run-gen + GPU OVC merge + CPU gather
+  OVC buffers: 12.0 GB (4B OVC + 8B prefix + 4B perm per record)
+  32B OVC extension: SKIPPED (would need 32.3 GB, have 11.7 GB usable)
+  COMPACT UPLOAD: 170M rec/chunk, 4 chunks, PCIe 19.2 GB (vs 72.0 GB full), CUB scratch 145 MB
+
+== Phase 1: Run Generation (chunked LSD sort) ==
+  Run 1/4: 19419.9 MB (compact upload 5178.6 MB)      Run 2/4: 19419.9 MB (compact upload 5178.6 MB)      Run 3/4: 19419.9 MB (compact upload 5178.6 MB)      Run 4/4: 10409.3 MB (compact upload 2775.8 MB)    
+  4 runs in 3690 ms (19.51 GB/s)
+
+== Phase 2: GPU 16B Prefix Merge (2 CUB LSD passes) ==
+  GPU free before merge alloc: 13.03 GB
+  GPU free after merge alloc: 3.33 GB
+  Pass 1 (sort by pfx2 + gather): 603 ms
+  GPU 16B tie check: NO TIES — fixup skipped
+  Pass 2 (sort by pfx1): 225 ms
+  GPU 16B prefix merge total: 828 ms
+  Downloaded perm in 187 ms
+== Phase 3: CPU Gather ==
+  Gathered 72.00 GB in 3195 ms (22.54 GB/s)
+== Phase 4: CPU Fixup (skipped — no pfx1 ties) ==
+  Total merge+gather+fixup: 4209 ms
+[Correctness] Sample map verified against all 600037902 records — compact sort is FULL-KEY-EQUIVALENT.
+
+Verifying...
+  PASS sortedness: 600037902 records in non-decreasing order (669 ms)
+  PASS multiset:   output is a permutation of input (hash=0xe5a8ce6ee017ca90, 4479 ms)
+
+CSV,Quadro RTX 6000,72.00,600037902,4,2,3690.15,4209.19,7899.34,9.1153,19.20,2.40,21.60,0.3
+
+══════════ Experiment run 3/3 ══════════
+[ExternalSort] GPU: 25.05 GB free, budget: 16.29 GB
+[ExternalSort] Triple-buffer: 3 × 5.43 GB (45 M records each)
+[ExternalSort] Sorting 600037902 records (72.00 GB)
+
+[CompactDetect] 23/66 key bytes vary (stratified random sample 1000K of 600M records, 0 ms)
+[CompactDetect] Varying byte positions: 8 9 12 13 19 20 21 29 37 44 45 50 51 52 53 54 55 56 57 59 60 61 65
+[CompactDetect] Compactness: 23/66 = 35% varying. Decision: compact upload WINS (≤32 varying bytes, fits in 32B compact buffer)
+[CompactDetect] Per-position bit-widths: 1×1b  0×2b  6×4b  16×8b → 153 bits = 20 packed bytes (vs 23 current)
+[CompactDetect] 32B prefix would cover 23/23 positions if nibble-packed (vs 23 currently)
+== Step 1+2: Key Upload ==
+  Keys too large for single-pass (39.6 GB > 22.5 GB)
+  Using OVC ARCHITECTURE: run-gen + GPU OVC merge + CPU gather
+  OVC buffers: 12.0 GB (4B OVC + 8B prefix + 4B perm per record)
+  32B OVC extension: SKIPPED (would need 32.3 GB, have 11.7 GB usable)
+  COMPACT UPLOAD: 170M rec/chunk, 4 chunks, PCIe 19.2 GB (vs 72.0 GB full), CUB scratch 145 MB
+
+== Phase 1: Run Generation (chunked LSD sort) ==
+  Run 1/4: 19413.4 MB (compact upload 5176.9 MB)      Run 2/4: 19413.4 MB (compact upload 5176.9 MB)      Run 3/4: 19413.4 MB (compact upload 5176.9 MB)      Run 4/4: 10428.8 MB (compact upload 2781.0 MB)    
+  4 runs in 3679 ms (19.57 GB/s)
+
+== Phase 2: GPU 16B Prefix Merge (2 CUB LSD passes) ==
+  GPU free before merge alloc: 13.02 GB
+  GPU free after merge alloc: 3.32 GB
+  Pass 1 (sort by pfx2 + gather): 603 ms
+  GPU 16B tie check: NO TIES — fixup skipped
+  Pass 2 (sort by pfx1): 225 ms
+  GPU 16B prefix merge total: 828 ms
+  Downloaded perm in 187 ms
+== Phase 3: CPU Gather ==
+  Gathered 72.00 GB in 3186 ms (22.60 GB/s)
+== Phase 4: CPU Fixup (skipped — no pfx1 ties) ==
+  Total merge+gather+fixup: 4200 ms
+[Correctness] Sample map verified against all 600037902 records — compact sort is FULL-KEY-EQUIVALENT.
+
+Verifying...
+  PASS sortedness: 600037902 records in non-decreasing order (696 ms)
+  PASS multiset:   output is a permutation of input (hash=0xe5a8ce6ee017ca90, 4266 ms)
+
+CSV,Quadro RTX 6000,72.00,600037902,4,2,3678.52,4200.30,7878.82,9.1390,19.20,2.40,21.60,0.3
