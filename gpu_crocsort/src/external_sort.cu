@@ -1798,7 +1798,104 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
         CUDA_CHECK(cudaMemcpy(d_buf[0], h_data, total_bytes, cudaMemcpyHostToDevice));
         sort_chunk_on_gpu(d_buf[0], d_buf[1], num_records, streams[0]);
         CUDA_CHECK(cudaMemcpy(h_data, d_buf[0], total_bytes, cudaMemcpyDeviceToHost));
-        r.total_ms = r.run_gen_ms = t.end_ms();
+        double gpu_ms = t.end_ms();
+
+#ifdef USE_COMPACT_KEY
+        int sc_prefix = std::min(g_compact_count, (int)COMPACT_KEY_SIZE);
+        if (g_compact_count > (int)COMPACT_KEY_SIZE) {
+            WallTimer ft; ft.begin();
+            int hw = std::max(1, (int)std::thread::hardware_concurrency());
+            if (const char* e = getenv("FIXUP_THREADS")) { int v = atoi(e); if (v > 0) hw = v; }
+
+            // Group detection: find runs of identical compact-key prefix
+            std::vector<std::vector<uint64_t>> bnd_per_t(hw);
+            uint64_t rpt = (num_records + hw - 1) / hw;
+            std::vector<std::thread> gd_t;
+            for (int ti = 0; ti < hw; ti++) {
+                gd_t.emplace_back([&, ti]() {
+                    uint64_t lo = (uint64_t)ti * rpt, hi = std::min(lo + rpt, num_records);
+                    if (lo == 0) lo = 1;
+                    auto& my = bnd_per_t[ti];
+                    my.reserve(512);
+                    for (uint64_t i = lo; i < hi; i++) {
+                        const uint8_t* ra = h_data + (i-1) * RECORD_SIZE;
+                        const uint8_t* rb = h_data + i * RECORD_SIZE;
+                        bool diff = false;
+                        for (int c = 0; c < sc_prefix; c++) {
+                            if (ra[g_compact_map[c]] != rb[g_compact_map[c]]) { diff = true; break; }
+                        }
+                        if (diff) my.push_back(i);
+                    }
+                });
+            }
+            for (auto& th : gd_t) th.join();
+
+            std::vector<uint64_t> all_bnd;
+            all_bnd.push_back(0);
+            for (int ti = 0; ti < hw; ti++)
+                all_bnd.insert(all_bnd.end(), bnd_per_t[ti].begin(), bnd_per_t[ti].end());
+            all_bnd.push_back(num_records);
+
+            std::vector<std::pair<uint64_t, uint64_t>> groups;
+            for (size_t i = 0; i + 1 < all_bnd.size(); i++) {
+                uint64_t cnt = all_bnd[i+1] - all_bnd[i];
+                if (cnt > 1) groups.push_back({all_bnd[i], cnt});
+            }
+
+            int active[KEY_SIZE]; int n_active = 0;
+            for (int c = sc_prefix; c < g_compact_count; c++) {
+                int pos = g_compact_map[c];
+                if (pos >= 0 && pos < (int)KEY_SIZE) active[n_active++] = pos;
+            }
+
+            // Parallel per-group sort
+            std::atomic<uint64_t> q{0};
+            uint64_t ng = groups.size();
+            std::vector<std::thread> fix_t;
+            std::vector<std::vector<std::pair<std::vector<uint8_t>, uint32_t>>> tbufs(hw);
+            for (int ti = 0; ti < hw; ti++) {
+                fix_t.emplace_back([&, ti]() {
+                    auto& tbuf = tbufs[ti];
+                    while (true) {
+                        uint64_t gi = q.fetch_add(1, std::memory_order_relaxed);
+                        if (gi >= ng) break;
+                        auto [start, count] = groups[gi];
+                        tbuf.resize(count);
+                        for (uint64_t j = 0; j < count; j++) {
+                            tbuf[j].first.assign(
+                                h_data + (start+j)*RECORD_SIZE,
+                                h_data + (start+j)*RECORD_SIZE + KEY_SIZE);
+                            tbuf[j].second = (uint32_t)j;
+                        }
+                        std::sort(tbuf.begin(), tbuf.end(),
+                            [&](const auto& a, const auto& b) {
+                                for (int k = 0; k < n_active; k++) {
+                                    int p = active[k];
+                                    if (a.first[p] != b.first[p])
+                                        return a.first[p] < b.first[p];
+                                }
+                                return false;
+                            });
+                        // Reorder records in-place using a temp buffer
+                        std::vector<uint8_t> tmp(count * RECORD_SIZE);
+                        for (uint64_t j = 0; j < count; j++)
+                            memcpy(tmp.data() + j * RECORD_SIZE,
+                                   h_data + (start + tbuf[j].second) * RECORD_SIZE, RECORD_SIZE);
+                        memcpy(h_data + start * RECORD_SIZE, tmp.data(), count * RECORD_SIZE);
+                    }
+                });
+            }
+            for (auto& th : fix_t) th.join();
+            double fix_ms = ft.end_ms();
+            printf("  Single-chunk fixup: %lu groups, %d active bytes, %.0f ms\n",
+                   groups.size(), n_active, fix_ms);
+            gpu_ms += fix_ms;
+        } else {
+            printf("  Single-chunk fixup: skipped (all %d varying bytes fit in %dB compact)\n",
+                   g_compact_count, (int)COMPACT_KEY_SIZE);
+        }
+#endif
+        r.total_ms = r.run_gen_ms = gpu_ms;
         r.num_runs = 1;
         r.pcie_h2d_gb = r.pcie_d2h_gb = total_bytes / 1e9;
         r.sorted_output = nullptr; // sorted in-place in h_data
