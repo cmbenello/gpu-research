@@ -313,6 +313,10 @@ static int detect_compact_map(const uint8_t* h_data, uint64_t num_records,
         long v = atol(e);
         if (v > 0) sample_target = (uint64_t)v;
     }
+    // Full scan for datasets under 50M records (~6 GB). Sampling 1M from 19M
+    // can miss rare byte variations (e.g. timestamp high bytes that barely
+    // change over a few months). Full scan adds ~30-50ms — negligible.
+    if (num_records <= 50000000) sample_target = num_records;
     uint64_t sample_n = std::min(num_records, sample_target);
     uint64_t stride = std::max((uint64_t)1, num_records / sample_n);
     uint64_t n_buckets = (num_records + stride - 1) / stride;
@@ -1637,9 +1641,13 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
         }
         uint64_t s_target = 1000000;
         if (const char* e = getenv("COMPACT_SAMPLE")) { long v = atol(e); if (v > 0) s_target = (uint64_t)v; }
+        if (num_records <= 50000000) s_target = num_records;
         uint64_t actual_sample = std::min(num_records, s_target);
-        printf("[CompactDetect] %d/%d key bytes vary (stratified random sample %luK of %luM records, %.0f ms)\n",
-               g_compact_count, KEY_SIZE, actual_sample / 1000, num_records / 1000000, det_ms);
+        bool full_scan = (actual_sample == num_records);
+        printf("[CompactDetect] %d/%d key bytes vary (%s %luK of %luM records, %.0f ms)\n",
+               g_compact_count, KEY_SIZE,
+               full_scan ? "full scan" : "stratified random sample",
+               actual_sample / 1000, num_records / 1000000, det_ms);
         if (g_compact_count > 0) {
             printf("[CompactDetect] Varying byte positions:");
             for (int i = 0; i < g_compact_count && i < 32; i++) printf(" %d", g_compact_map[i]);
@@ -1656,8 +1664,10 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
             decision = "compact upload WINS (≤32 varying bytes, fits in 32B compact buffer)";
         else if (g_compact_count <= 64)
             decision = "compact UPLOAD still wins, but compact PREFIX may have ties (CPU fixup)";
-        else
+        else {
             decision = "too many varying bytes — no compression benefit, use full upload";
+            g_disable_compact = true;
+        }
         printf("[CompactDetect] Compactness: %d/%d = %.0f%% varying. Decision: %s\n",
                g_compact_count, KEY_SIZE, compactness * 100.0, decision);
         if (g_compact_count > 0) {

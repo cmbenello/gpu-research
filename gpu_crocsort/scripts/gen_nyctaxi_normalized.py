@@ -98,8 +98,22 @@ def main():
     urls = MONTHS_2023[:months]
     print(f"Loading {months} month(s) of NYC Yellow Taxi 2023 data...")
 
-    # DuckDB can read parquet directly from URLs
-    url_list = ", ".join(f"'{u}'" for u in urls)
+    # Download parquet files locally first to avoid HTTP 403 rate limits
+    local_dir = "/dev/shm/nyctaxi_parquet"
+    os.makedirs(local_dir, exist_ok=True)
+    local_paths = []
+    for url in urls:
+        fname = url.split("/")[-1]
+        local_path = os.path.join(local_dir, fname)
+        if not os.path.exists(local_path):
+            print(f"  Downloading {fname}...")
+            import subprocess
+            subprocess.run(["curl", "-sL", "-o", local_path, url], check=True)
+        else:
+            print(f"  Using cached {fname}")
+        local_paths.append(local_path)
+
+    url_list = ", ".join(f"'{p}'" for p in local_paths)
     query = f"""
         SELECT
             COALESCE(VendorID, 0)::INT AS VendorID,
