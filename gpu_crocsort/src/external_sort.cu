@@ -263,6 +263,7 @@ static std::mutex g_exception_mtx;
 // upload path instead. That path uploads full 66-byte keys to the GPU, so no
 // sampling-based assumption can affect correctness.
 static bool g_force_no_compact = false;
+static bool g_disable_compact = false;
 // true if we have verified against full data (sample was confirmed complete)
 static bool g_map_full_scan_verified = false;
 
@@ -1098,7 +1099,7 @@ ExternalGpuSort::generate_runs_pipelined(
     // Compact upload: pack the first min(count, COMPACT_KEY_SIZE) varying bytes
     // into the compact buffer. If count > 32 the compact prefix won't cover the
     // full key, so CPU fixup will resolve prefix ties afterwards.
-    bool use_compact_upload = (!g_force_no_compact && d_ovc_buffer && sort_ws.d_compact && g_compact_count > 0);
+    bool use_compact_upload = (!g_force_no_compact && !g_disable_compact && d_ovc_buffer && sort_ws.d_compact && g_compact_count > 0);
     if (use_compact_upload) {
         const int* h_cmap = g_compact_map;
         const int cmap_n = std::min(g_compact_count, (int)COMPACT_KEY_SIZE);
@@ -2115,7 +2116,7 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
         // Estimate chunk size for compact upload mode: only need sort_ws (no d_buf[0/1])
         // sort_ws per record: keys(8) + keys_alt(8) + indices(4) + indices_alt(4) + compact(32) = 56B
         // Plus 1 CUB scratch buffer
-        {
+        if (!g_disable_compact) {
             size_t compact_budget = (size_t)(ovc_used * 0.92);
             // Query CUB for actual scratch needed (then pad generously)
             size_t cub_temp_query = 0;
@@ -3165,6 +3166,13 @@ int main(int argc, char** argv) {
         // with the full-key upload path which has no sampling assumption.
 #ifdef USE_COMPACT_KEY
         g_force_no_compact = false;
+        g_disable_compact = false;
+        if (const char* e = getenv("DISABLE_COMPACT")) {
+            if (std::string(e) != "0") {
+                g_disable_compact = true;
+                printf("[CONFIG] Compact key compression DISABLED via DISABLE_COMPACT\n");
+            }
+        }
 #endif
         ExternalGpuSort::TimingResult result;
         {
