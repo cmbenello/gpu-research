@@ -1,6 +1,7 @@
 # DuckDB Baseline Comparisons
 
-**DuckDB mode:** COPY ... TO Parquet (UNCOMPRESSED) — sort + materialized output
+**DuckDB mode:** SF10 = COPY TO Parquet; SF50 = CREATE TABLE AS SELECT ... ORDER BY
+**DuckDB version:** v1.2.2 (via Python duckdb package)
 **GPU binary:** `external_sort_tpch_compact` on branch `exp/fixup-fast-comparator`
 **CPU:** 2x Xeon Gold 6248 (40 cores / 80 threads), 192 GB DDR4
 **GPU:** Quadro RTX 6000 (24 GB HBM, PCIe 3.0 x16)
@@ -29,15 +30,26 @@
 DuckDB benefits from sorted input (~12% faster) while GPU sort is
 input-oblivious. The GPU advantage is 12-13x across all distributions.
 
-## SF50: ~300M records, 34.2 GB
+## SF50: 300,005,811 records, 36.0 GB
 
-| System          | Median (ms) | Source       |
-|-----------------|-------------|--------------|
-| DuckDB (Parquet)| ~57,000*    | extrapolated |
-| GPU sort        | 6,210       | measured     |
+| System              | Median (ms) | Min    | Max    |
+|---------------------|-------------|--------|--------|
+| DuckDB (CTAS)       | 66,611      | 63,365 | 67,705 |
+| GPU sort (compact)  | 6,585       | 6,429  | 6,764  |
+| GPU sort (no-compact)| 4,169      | 4,153  | 4,180  |
 
-*SF50 DuckDB not run in clean conditions due to memory competition.
-GPU sort from `results/2026-04-15-arch-analysis/`.
+### Speedup (SF50)
+
+| GPU config   | DuckDB  | GPU     | Speedup |
+|--------------|---------|---------|---------|
+| compact T=48 | 66,611  | 6,585   | 10.1x   |
+| compact T=32 | 66,611  | 6,949   | 9.6x    |
+| no-compact   | 66,611  | 4,169   | 16.0x   |
+
+DuckDB benchmark: `CREATE TABLE sorted AS SELECT * FROM lineitem ORDER BY ...`
+using native TPC-H extension (`CALL dbgen(sf=50)`), 13 sort columns,
+database on /dev/shm, temp on /dev/shm. GPU compact from fixup thread
+scaling sweep; no-compact from compact ablation experiment.
 
 ## SF100: ~600M records, 68.4 GB
 
@@ -58,9 +70,14 @@ materialized sorted output.
 
 ## Notes
 
-- DuckDB uses FixedSizeBinary(66) key + FixedSizeBinary(54) payload
-  registered as Arrow table, sorted via ORDER BY key
-- DuckDB numbers vary with system load — cleanest SF10 numbers collected
-  with no competing processes on /dev/shm
-- Arrow table build time (3.7-4.3s) excluded from DuckDB sort time
-  (COPY timing starts after table is registered)
+- **SF10:** DuckDB uses FixedSizeBinary(66) key + FixedSizeBinary(54) payload
+  registered as Arrow table, sorted via COPY TO Parquet. Arrow table build
+  time (3.7-4.3s) excluded from sort time.
+- **SF50:** DuckDB uses native TPC-H extension (CALL dbgen), sorted via
+  CREATE TABLE AS SELECT ... ORDER BY (13 columns). This is a fair
+  comparison: both DuckDB and GPU sort produce materialized sorted output.
+  Database and temp files on /dev/shm (tmpfs).
+- DuckDB numbers vary with system load — cleanest numbers collected
+  with no competing processes
+- SF50 GPU sort (compact) uses 61/66 varying bytes with parallel fixup;
+  no-compact uses full 66B key with zero fixup
