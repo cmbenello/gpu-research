@@ -30,20 +30,41 @@ def to_arrow(recs):
     pay_arr = pa.FixedSizeBinaryArray.from_buffers(pa.binary(RECORD - KEY), len(recs), [None, pa.py_buffer(payloads)])
     return pa.table({'key': key_arr, 'payload': pay_arr})
 
-def bench_duckdb(table, n):
+def bench_duckdb(table, n, mode='parquet'):
     import duckdb
     con = duckdb.connect()
     con.register('lineitem', table)
     # Warm JIT with one row
     con.execute("SELECT key FROM lineitem LIMIT 1").fetchall()
-    # Time the sort (write to parquet so materialization cost is real)
-    out = f'/dev/shm/baselines/duckdb_out_{n}.parquet'
-    if os.path.exists(out): os.remove(out)
-    t0 = time.monotonic()
-    con.execute(f"COPY (SELECT key, payload FROM lineitem ORDER BY key) TO '{out}' (FORMAT PARQUET, COMPRESSION UNCOMPRESSED)")
-    elapsed = (time.monotonic() - t0) * 1000.0
-    con.close()
-    return elapsed, out
+    if mode == 'stream':
+        # Sort + streaming fetch: measures sort + output without Arrow table overhead
+        t0 = time.monotonic()
+        result = con.execute("SELECT key, payload FROM lineitem ORDER BY key")
+        count = 0
+        while True:
+            batch = result.fetchmany(100000)
+            if not batch:
+                break
+            count += len(batch)
+        elapsed = (time.monotonic() - t0) * 1000.0
+        con.close()
+        return elapsed, f"stream:{count}"
+    elif mode == 'arrow':
+        # Sort + full Arrow table materialization
+        t0 = time.monotonic()
+        result = con.execute("SELECT key, payload FROM lineitem ORDER BY key").fetch_arrow_table()
+        elapsed = (time.monotonic() - t0) * 1000.0
+        con.close()
+        return elapsed, f"arrow:{len(result)}"
+    else:
+        # Full: sort + Parquet write (original behavior)
+        out = f'/dev/shm/baselines/duckdb_out_{n}.parquet'
+        if os.path.exists(out): os.remove(out)
+        t0 = time.monotonic()
+        con.execute(f"COPY (SELECT key, payload FROM lineitem ORDER BY key) TO '{out}' (FORMAT PARQUET, COMPRESSION UNCOMPRESSED)")
+        elapsed = (time.monotonic() - t0) * 1000.0
+        con.close()
+        return elapsed, out
 
 def bench_polars(table, n):
     import polars as pl
@@ -73,14 +94,23 @@ def main():
     table = to_arrow(recs)
     print(f"[arrow] built in {(time.monotonic()-t0)*1000:.0f} ms")
 
+    duckdb_modes = []
     if engine in ('duckdb', 'both'):
-        print(f"\n[duckdb] warm runs...")
+        duckdb_modes = ['parquet', 'stream']
+    elif engine == 'duckdb_sort':
+        duckdb_modes = ['stream']
+    elif engine == 'duckdb_parquet':
+        duckdb_modes = ['parquet']
+
+    for mode in duckdb_modes:
+        label = f'duckdb ({mode})'
+        print(f"\n[{label}] warm runs...")
         times = []
         for i in range(runs):
-            ms, out = bench_duckdb(table, n)
+            ms, out = bench_duckdb(table, n, mode=mode)
             print(f"  run {i+1}: {ms:.0f} ms")
             times.append(ms)
-        print(f"[duckdb] median={sorted(times)[len(times)//2]:.0f} ms  min={min(times):.0f}  max={max(times):.0f}")
+        print(f"[{label}] median={sorted(times)[len(times)//2]:.0f} ms  min={min(times):.0f}  max={max(times):.0f}")
 
     if engine in ('polars', 'both'):
         print(f"\n[polars] warm runs...")
