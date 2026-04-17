@@ -75,9 +75,37 @@ On SF50 with 61 varying bytes, the non-compact path is superior because
 the full-key LSD sort produces a globally correct order with zero
 post-processing.
 
-## SF100 comparison (from existing data)
+## SF100 comparison: compact wins 5.1x
+
+| Metric              | Compact (SF100)     | No-compact (SF100)    |
+|---------------------|---------------------|-----------------------|
+| **Total (median)**  | **7,982 ms**        | **39,538 ms**         |
+| Chunks              | 7                   | 19                    |
+| Varying bytes       | 27/66               | 66/66 (full key)      |
+| Ties after merge    | 0                   | 0                     |
+| PCIe H2D            | ~18 GB              | 72 GB                 |
 
 SF100 has only 27/66 varying bytes → all fit in 32B compact prefix →
-zero fixup. Compact IS beneficial for SF100 because it avoids the
-7-chunk overhead entirely (4 chunks vs ~14 without compact) while
-producing a tie-free merge.
+zero fixup. Compact is 5.1x faster because:
+1. **Fewer chunks (7 vs 19):** Compact keys are smaller, more fit per chunk
+2. **Less PCIe (18 vs 72 GB):** 27B compact vs 66B full key upload
+3. **Faster run-gen:** CUB sorts 32B keys in 4 passes vs 66B in 9 passes
+
+### No-compact SF100 per-run CSV data
+```
+CSV,Quadro RTX 6000,72.00,600037902,19,2,35344.32,3374.69,38719.02,1.8597,72.00,2.40,74.40,1.0
+CSV,Quadro RTX 6000,72.00,600037902,19,2,36582.41,2956.08,39538.49,1.8211,72.00,2.40,74.40,1.0
+CSV,Quadro RTX 6000,72.00,600037902,19,2,35744.59,4966.89,40711.48,1.7687,72.00,2.40,74.40,1.0
+```
+
+## Summary: compact tradeoff depends on varying-byte count
+
+| Dataset | Varying bytes | Compact (ms) | No-compact (ms) | Winner     |
+|---------|--------------|-------------|-----------------|------------|
+| SF50    | 61/66        | 6,651       | 4,169           | No-compact (1.6x) |
+| SF100   | 27/66        | 7,982       | 39,538          | Compact (5.0x)    |
+
+The crossover point is ~32 varying bytes (the compact prefix width).
+Below 32, compact wins because it sorts the complete discriminating
+prefix with no fixup. Above 32, the CPU fixup cost and reduced GPU
+merge efficiency overwhelm the PCIe savings.
