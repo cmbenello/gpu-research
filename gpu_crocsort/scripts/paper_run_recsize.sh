@@ -1,24 +1,57 @@
 #!/bin/bash
-# Record size sensitivity: vary value size while keeping key fixed at 66B
-# Shows the key-value separation advantage — GPU sorts keys only,
-# larger values just increase gather cost
-#
-# NOTE: This requires recompiling with different VALUE_SIZE.
-# For now, just document the gather-phase sensitivity.
-# We use the existing 120B binary (66B key + 54B value) as baseline.
+# Record size sensitivity: fixed 66B key, varying value size
+# Shows key-value separation advantage: GPU sorts keys only,
+# larger values increase gather cost but not sort cost.
 set -e
 
-echo "=== Record Size Sensitivity ==="
-echo "This experiment measures gather-phase scaling with record size."
-echo "GPU sort time is key-size-dependent, not record-size-dependent."
-echo ""
-echo "Current binary: 66B key + 54B value = 120B records"
-echo "Key upload to GPU: 66B × N records (key-only)"
-echo "Gather: 120B × N records (full record permutation)"
-echo ""
-echo "To run with different record sizes, recompile with:"
-echo "  -DKEY_SIZE=66 -DVALUE_SIZE=<new_value_size>"
-echo ""
-echo "Gather-phase bandwidth is ~17 GB/s (DDR4, random scatter)."
-echo "Doubling record size approximately doubles gather time."
-echo "GPU sort time remains constant (only processes 66B keys)."
+RUNS=3
+OUTDIR=/dev/shm/paper_experiments
+LOG="${OUTDIR}/recsize_sweep.log"
+
+echo "=== Record Size Sensitivity Experiment ===" | tee "$LOG"
+echo "Key size: 66B (fixed)" | tee -a "$LOG"
+echo "Warm runs per size: $RUNS" | tee -a "$LOG"
+echo "" | tee -a "$LOG"
+
+# Value sizes to test. Record size = 66 + VSIZE.
+# At 60M records: 66B=3.96GB, 120B=7.2GB, 194B=11.6GB, 322B=19.3GB, 578B=34.7GB
+# Use 60M for sizes up to 322B (fit in GPU memory)
+# Use 30M for 578B (30M × 578B = 17.3 GB, fits in GPU)
+for VSIZE in 0 54 128 256 512; do
+    RSIZE=$((66 + VSIZE))
+    BINARY="./external_sort_v${VSIZE}"
+
+    if [ ! -f "$BINARY" ]; then
+        echo "SKIP: $BINARY not found" | tee -a "$LOG"
+        continue
+    fi
+
+    if [ $VSIZE -le 256 ]; then
+        NREC=60000000
+    else
+        NREC=30000000  # 578B records need less count to fit
+    fi
+
+    SIZE_GB=$(echo "scale=2; $NREC * $RSIZE / 1073741824" | bc)
+    INPUT="/dev/shm/recsize_v${VSIZE}_normalized.bin"
+
+    echo "--- VALUE=${VSIZE}B, RECORD=${RSIZE}B, ${NREC} records, ${SIZE_GB} GB ---" | tee -a "$LOG"
+
+    # Generate random records
+    python3 scripts/gen_random_records.py $NREC "$INPUT" --record-size $RSIZE 2>&1 | tail -1
+
+    # Sort
+    $BINARY --input "$INPUT" --runs $RUNS 2>&1 | tee -a "$LOG"
+
+    # Extract CSV
+    echo "CSV summary for v${VSIZE}:" | tee -a "$LOG"
+    grep "^CSV" "$LOG" | tail -$RUNS
+    echo "" | tee -a "$LOG"
+
+    # Clean up
+    rm -f "$INPUT"
+    echo "  Cleaned up $INPUT" | tee -a "$LOG"
+    echo "" | tee -a "$LOG"
+done
+
+echo "=== Record Size Sensitivity Complete ===" | tee -a "$LOG"
