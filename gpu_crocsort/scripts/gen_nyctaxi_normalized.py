@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Generate normalized NYC Yellow Taxi binary data for external sort benchmarks.
 
-Usage: python3 gen_nyctaxi_normalized.py MONTHS [output_file]
-  MONTHS = number of 2023 months to include (1-12)
-  output_file = defaults to /dev/shm/nyctaxi_{MONTHS}mo_normalized.bin
+Usage: python3 gen_nyctaxi_normalized.py SPEC [output_file]
+  SPEC = months of 2023 (1-12) OR year range like "2019-2023"
+  output_file = defaults to /dev/shm/nyctaxi_{SPEC}_normalized.bin
 
 Downloads parquet from NYC TLC, normalizes to 120-byte fixed-width records.
 Key layout matches the TPC-H binary format (66B key + 54B value = 120B record)
@@ -45,20 +45,15 @@ KEY_SIZE = 66
 VALUE_SIZE = 54
 OFFSET_I64 = 2**62
 
-MONTHS_2023 = [
-    "https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_2023-01.parquet",
-    "https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_2023-02.parquet",
-    "https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_2023-03.parquet",
-    "https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_2023-04.parquet",
-    "https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_2023-05.parquet",
-    "https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_2023-06.parquet",
-    "https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_2023-07.parquet",
-    "https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_2023-08.parquet",
-    "https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_2023-09.parquet",
-    "https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_2023-10.parquet",
-    "https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_2023-11.parquet",
-    "https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_2023-12.parquet",
-]
+BASE_URL = "https://d37ci6vzurychx.cloudfront.net/trip-data"
+
+def get_urls_for_year(year):
+    return [f"{BASE_URL}/yellow_tripdata_{year}-{m:02d}.parquet" for m in range(1, 13)]
+
+def get_urls_for_months(year, n_months):
+    return [f"{BASE_URL}/yellow_tripdata_{year}-{m:02d}.parquet" for m in range(1, n_months + 1)]
+
+MONTHS_2023 = get_urls_for_year(2023)
 
 def ts_to_micros(ts):
     """Convert a duckdb timestamp to microseconds since epoch."""
@@ -74,18 +69,41 @@ def to_mm(val):
     """Convert miles to millimeters (arbitrary but gives integer precision)."""
     return int(round(float(val) * 1_609_344))  # 1 mile = 1,609,344 mm
 
+def parse_spec(spec):
+    """Parse SPEC into (urls, label). Supports: '6' (months of 2023), '2019-2023' (year range), '2022' (single year)."""
+    if '-' in spec and len(spec) > 4:
+        start, end = spec.split('-', 1)
+        start_year, end_year = int(start), int(end)
+        urls = []
+        for y in range(start_year, end_year + 1):
+            urls.extend(get_urls_for_year(y))
+        label = f"{start_year}_{end_year}"
+        desc = f"NYC Yellow Taxi {start_year}-{end_year} ({end_year - start_year + 1} years)"
+        return urls, label, desc
+    elif len(spec) == 4 and spec.isdigit() and int(spec) >= 2009:
+        year = int(spec)
+        urls = get_urls_for_year(year)
+        label = str(year)
+        desc = f"NYC Yellow Taxi {year} (12 months)"
+        return urls, label, desc
+    else:
+        months = int(spec)
+        if months < 1 or months > 12:
+            print("MONTHS must be 1-12")
+            sys.exit(1)
+        urls = get_urls_for_months(2023, months)
+        label = f"{months}mo"
+        desc = f"{months} month(s) of NYC Yellow Taxi 2023"
+        return urls, label, desc
+
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python3 gen_nyctaxi_normalized.py MONTHS [output_file]")
-        print("  MONTHS = 1-12 (months of 2023 yellow taxi data)")
+        print("Usage: python3 gen_nyctaxi_normalized.py SPEC [output_file]")
+        print("  SPEC = months of 2023 (1-12), single year (2022), or range (2019-2023)")
         sys.exit(1)
 
-    months = int(sys.argv[1])
-    if months < 1 or months > 12:
-        print("MONTHS must be 1-12")
-        sys.exit(1)
-
-    outpath = sys.argv[2] if len(sys.argv) > 2 else f"/dev/shm/nyctaxi_{months}mo_normalized.bin"
+    urls, label, desc = parse_spec(sys.argv[1])
+    outpath = sys.argv[2] if len(sys.argv) > 2 else f"/dev/shm/nyctaxi_{label}_normalized.bin"
 
     try:
         import duckdb
@@ -95,8 +113,7 @@ def main():
 
     con = duckdb.connect()
 
-    urls = MONTHS_2023[:months]
-    print(f"Loading {months} month(s) of NYC Yellow Taxi 2023 data...")
+    print(f"Loading {desc}...")
 
     # Download parquet files locally first to avoid HTTP 403 rate limits
     local_dir = "/dev/shm/nyctaxi_parquet"
