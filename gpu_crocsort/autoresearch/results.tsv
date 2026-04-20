@@ -1,0 +1,29 @@
+commit	total_ms	Q1_ms	Q2_ms	Q3_ms	cpu_ms	status	description
+baseline	8539.6	2707.1	2567.7	3264.8	16511.0	keep	baseline: pipelined DMA + cached alloc + memset prefault
+14591f5	6212.2	1987.9	1876.7	2347.6	16331.0	keep	exp1: overlap memset pre-fault with upload DMA in background thread
+21eb2f5	5669.3	1536.5	1933.6	2199.2	15151.0	keep	exp2: download chunk size 4MB→32MB
+-	6081.5	1917.7	1841.1	2322.7	16080.0	discard	exp3: dual interleaved upload (keys+payload on separate streams) — regression +7.3%
+-	8377.2	2807.3	2640.2	2929.7	15709.0	discard	exp4: compact keys to comparison_size before upload — CPU compaction too expensive (+47.8%)
+bf6fc80	5234.4	1565.3	1655.6	2013.5	15453.0	keep	exp5: direct pinned DMA upload (cudaHostRegister source blocks, skip staging copy)
+7912420	5137.5	1638.8	1595.4	1903.3	15809.0	keep	exp6: direct pinned download (cudaHostRegister output, skip staging copy)
+-	6479.2	2151.4	1955.4	2372.4	15752.0	discard	exp7: remove memset pre-fault (regression — page faults during download +26%)
+1f6d66f	4580.0	1407.0	1338.0	1836.0	15245.0	keep	exp8: pre-pin output buffer in background thread (memset+cudaHostRegister before download)
+exp9	4140.0	1318.0	1315.0	1506.0	15440.0	keep	exp9: two-stream interleaved pin+DMA upload (overlap pin of next with DMA of current)
+-	4170.4	1336.5	1311.8	1522.1	15865.0	discard	exp10: cudaHostRegisterReadOnly — no effect on Turing
+-	4111.9	1351.2	1275.3	1485.4	15593.0	discard	exp11: overlap sort with payload upload (PCIe contention negates sort overlap, +complexity)
+-	5970.3	1862.6	1891.9	2215.8	15765.0	discard	exp12: bg thread for cudaMalloc+prefault (CUDA context contention +44%)
+-	5747.0	1706.9	1720.2	2319.9	15865.0	discard	exp13: plain cudaMemcpy (pageable, no pin) — regression +40%
+56201d2	4093.0	1314.0	1304.0	1476.0	15929.0	keep	exp14: madvise(MADV_SEQUENTIAL) on source blocks before pin
+-	10232.2	3360.6	3710.6	3161.0	16262.0	discard	exp15: CPU-side gather (permutation-only GPU sort) — random gather 3s+
+-	4130.0	1322.0	1311.0	1500.0	15513.0	discard	exp16: split prefault (memset-only bg, pin sequential) — CUDA lock cost is fixed, just shifts around
+-	5450.0	1817.0	1817.0	1817.0	15513.0	discard	exp17: batch pin upfront → DMA → unpin — total pin cost dominates (+33%)
+-	4700.0	1780.0	1780.0	1780.0	15513.0	discard	exp18: chunked pipelined upload (128MB staging) — memcpy to pinned staging ~3 GB/s (+15%)
+-	4130.0	1338.0	1338.0	1500.0	15513.0	discard	exp19: pin output during GPU sort overlap — net-neutral, CUDA lock between sort+pin
+-	4138.0	1364.0	1348.0	1464.0	15513.0	discard	exp20: compact key upload (MT CPU compact + DMA) — CPU compact cost ≈ PCIe savings
+-	7600.0	2740.0	2053.0	2740.0	15513.0	discard	exp21: key-only GPU sort + 16-thread CPU gather — random gather 1.1s even with pre-fault+MT
+-	4073.8	1343.6	1328.6	1401.6	15941.0	discard	exp22: skip per-thread sort (gpu_skip_sort) — saves 47% CPU but gather regression on low-cardinality keys
+-	-	-	-	-	-	analysis	exp23: wall-clock comparison — GPU 0.92x (8% SLOWER than CPU in total query time). Previous 3.8x was operator-only vs total-query
+-	-	-	-	-	-	analysis	exp24: sink instrumentation — sink_cpu=35s combine=30s (65s cumulative). Sort in AddLocalState dominates combine phase
+-	-	-	-	-	-	discard	exp25: multi-block output (16 blocks for parallel source) — 16× cudaHostRegister calls cause +520ms pin regression
+-	-	-	-	-	-	discard	exp26: split-after-download (single DMA + memcpy to 16 blocks) — 1.1s memcpy+page-fault overhead negates source parallelization
+-	4113	1382	1366	1364	15442	keep	exp27: compact key upload (entry→cmp stride, hugepage mmap) + skip presort (default on). Wall-clock 1.02-1.06x GPU FASTER than CPU. Compact saves DMA, skip-presort saves sink combine time.
