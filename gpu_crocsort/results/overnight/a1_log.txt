@@ -1,0 +1,61 @@
+
+=== TPC-H SF10 ===
+  Fetching columns (10,000,000 of 59,986,052 rows): l_returnflag, l_linestatus, l_shipdate, l_commitdate, l_receiptdate, l_extendedprice, l_discount, l_tax, l_quantity, l_orderkey, l_partkey, l_suppkey, l_linenumber
+  10,000,000 rows fetched in 30.5s
+  l_returnflag: 1B, total entropy = 1.49 bits (0.19 bytes)
+  l_linestatus: 1B, total entropy = 1.00 bits (0.12 bytes)
+  l_shipdate: 4B, total entropy = 11.32 bits (1.42 bytes)
+  l_commitdate: 4B, total entropy = 11.31 bits (1.41 bytes)
+  l_receiptdate: 4B, total entropy = 11.33 bits (1.42 bytes)
+  l_extendedprice: 8B, total entropy = 22.77 bits (2.85 bytes)
+  l_discount: 8B, total entropy = 3.46 bits (0.43 bytes)
+  l_tax: 8B, total entropy = 3.17 bits (0.40 bytes)
+  l_quantity: 8B, total entropy = 9.94 bits (1.24 bytes)
+  l_orderkey: 8B, total entropy = 21.84 bits (2.73 bytes)
+  l_partkey: 4B, total entropy = 20.95 bits (2.62 bytes)
+  l_suppkey: 4B, total entropy = 16.85 bits (2.11 bytes)
+  l_linenumber: 4B, total entropy = 2.61 bits (0.33 bytes)
+  SF10 done in 50.9s
+
+=== TPC-H SF50 ===
+  Fetching columns (10,000,000 of 300,005,811 rows): l_returnflag, l_linestatus, l_shipdate, l_commitdate, l_receiptdate, l_extendedprice, l_discount, l_tax, l_quantity, l_orderkey, l_partkey, l_suppkey, l_linenumber
+  10,000,000 rows fetched in 95.8s
+  l_returnflag: 1B, total entropy = 1.49 bits (0.19 bytes)
+  l_linestatus: 1B, total entropy = 1.00 bits (0.12 bytes)
+  l_shipdate: 4B, total entropy = 11.32 bits (1.42 bytes)
+  l_commitdate: 4B, total entropy = 11.31 bits (1.41 bytes)
+  l_receiptdate: 4B, total entropy = 11.33 bits (1.42 bytes)
+  l_extendedprice: 8B, total entropy = 22.77 bits (2.85 bytes)
+  l_discount: 8B, total entropy = 3.46 bits (0.43 bytes)
+  l_tax: 8B, total entropy = 3.17 bits (0.40 bytes)
+  l_quantity: 8B, total entropy = 9.94 bits (1.24 bytes)
+  l_orderkey: 8B, total entropy = 23.39 bits (2.92 bytes)
+  l_partkey: 4B, total entropy = 23.26 bits (2.91 bytes)
+  l_suppkey: 4B, total entropy = 18.98 bits (2.37 bytes)
+  l_linenumber: 4B, total entropy = 2.61 bits (0.33 bytes)
+  SF50 done in 116.5s
+
+=== TPC-H SF100 ===
+  Fetching columns (10,000,000 of 600,037,902 rows): l_returnflag, l_linestatus, l_shipdate, l_commitdate, l_receiptdate, l_extendedprice, l_discount, l_tax, l_quantity, l_orderkey, l_partkey, l_suppkey, l_linenumber
+  10,000,000 rows fetched in 168.2s
+  l_returnflag: 1B, total entropy = 1.49 bits (0.19 bytes)
+  l_linestatus: 1B, total entropy = 1.00 bits (0.12 bytes)
+  l_shipdate: 4B, total entropy = 11.32 bits (1.42 bytes)
+  l_commitdate: 4B, total entropy = 11.31 bits (1.41 bytes)
+  l_receiptdate: 4B, total entropy = 11.33 bits (1.42 bytes)
+  l_extendedprice: 8B, total entropy = 22.77 bits (2.85 bytes)
+  l_discount: 8B, total entropy = 3.46 bits (0.43 bytes)
+  l_tax: 8B, total entropy = 3.17 bits (0.40 bytes)
+  l_quantity: 8B, total entropy = 9.94 bits (1.24 bytes)
+  l_orderkey: 8B, total entropy = 24.67 bits (3.08 bytes)
+  l_partkey: 4B, total entropy = 24.57 bits (3.07 bytes)
+  l_suppkey: 4B, total entropy = 19.96 bits (2.50 bytes)
+  l_linenumber: 4B, total entropy = 2.61 bits (0.33 bytes)
+  SF100 done in 189.0s
+
+Wrote 198 rows to results/overnight/a1_byte_entropy.csv
+
+=== Summary: bytes per key with perfect order-preserving encoder ===
+  SF10: 138.0 bits = 17.3 bytes (raw: 66B, ratio: 3.8x)
+  SF50: 144.0 bits = 18.0 bytes (raw: 66B, ratio: 3.7x)
+  SF100: 147.6 bits = 18.5 bytes (raw: 66B, ratio: 3.6x)

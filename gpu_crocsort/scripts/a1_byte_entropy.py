@@ -83,10 +83,15 @@ def main():
         t0 = time.time()
         con = duckdb.connect(db_path, read_only=True)
 
-        # Fetch all sort columns at once
+        # Fetch sort columns (sample 10M for SF50/100 — entropy converges quickly)
         col_list = ", ".join(c[0] for c in SORT_COLS)
-        print(f"  Fetching columns: {col_list}")
-        df = con.execute(f"SELECT {col_list} FROM lineitem").fetchdf()
+        total_rows = con.execute("SELECT COUNT(*) FROM lineitem").fetchone()[0]
+        sample_size = min(10_000_000, total_rows)
+        print(f"  Fetching columns ({sample_size:,} of {total_rows:,} rows): {col_list}")
+        if total_rows > sample_size:
+            df = con.execute(f"SELECT {col_list} FROM lineitem USING SAMPLE {sample_size}").fetchdf()
+        else:
+            df = con.execute(f"SELECT {col_list} FROM lineitem").fetchdf()
         n = len(df)
         print(f"  {n:,} rows fetched in {time.time()-t0:.1f}s")
 

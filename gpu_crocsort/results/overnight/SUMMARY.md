@@ -59,6 +59,29 @@ However: CrocSort's actual K is small (SF100 = 3-6 chunks on 24GB GPU), so the m
 
 ## Completed Experiments
 
+### A1: Per-Column Byte Entropy
+
+| Column | Type | Raw bytes | Entropy (bits) | Entropy (bytes) |
+|--------|------|-----------|---------------|----------------|
+| l_returnflag | char | 1 | 1.49 | 0.19 |
+| l_linestatus | char | 1 | 1.00 | 0.12 |
+| l_shipdate | date | 4 | 11.32 | 1.42 |
+| l_commitdate | date | 4 | 11.31 | 1.41 |
+| l_receiptdate | date | 4 | 11.33 | 1.42 |
+| l_extendedprice | decimal | 8 | 22.77 | 2.85 |
+| l_discount | decimal | 8 | 3.46 | 0.43 |
+| l_tax | decimal | 8 | 3.17 | 0.40 |
+| l_quantity | decimal | 8 | 9.94 | 1.24 |
+| l_orderkey | bigint | 8 | 21.8-24.7 | 2.73-3.08 |
+| l_partkey | int | 4 | 21.0-24.6 | 2.62-3.07 |
+| l_suppkey | int | 4 | 16.9-20.0 | 2.11-2.50 |
+| l_linenumber | int | 4 | 2.61 | 0.33 |
+| **Total** | | **66** | **138-148** | **17.3-18.5** |
+
+**Perfect encoder limit: 17.3-18.5 bytes** (3.6-3.8x vs raw). Compact key gives 26-27B, FOR+bitpack gets 20B. There's ~2-3B of theoretical headroom beyond FOR+bitpack.
+
+The biggest waste is in decimal columns (discount: 8 raw → 0.43B entropy, tax: 8 → 0.40B). These have only 11 and 9 distinct values respectively — dictionary encoding is ideal.
+
 ### A2: Compact Key Baseline
 
 | Scale | Raw key | Compact key | Ratio | Varying positions |
@@ -144,12 +167,19 @@ See table in Decision Number 3 above. K=16 shows the expected branch-prediction 
 
 4. **Merge elimination via sample sort is valuable for K>8** but not urgent for CrocSort's typical K=3-6 chunks.
 
+## Baseline Sort Times (this branch)
+
+| Scale | Rows | Data | Time | Throughput |
+|-------|------|------|------|-----------|
+| SF10 | 60M | 7.2 GB | 1.29s | 5.6 GB/s |
+| SF50 | 300M | 36 GB | 2.72s | 13.2 GB/s |
+| SF100 | 600M | 72 GB | pending | generating data |
+
 ## Still Running / Pending
 
-- **A1**: Per-byte entropy analysis (running — processing 600M rows × 13 columns on SF100)
+- **E1**: SF100 baseline sort (generating 72 GB binary, ~14/72 GB done)
+- **E2**: Chunk sweep (after SF100 baseline)
 - **C1**: Not run (FOR doesn't improve compact key byte count — see Decision 1)
-- **E1**: SF100 baseline (generating normalized binary data)
-- **E2**: Chunk sweep (generating normalized binary data)
 
 ## Recommendations for Next Two Weeks
 
