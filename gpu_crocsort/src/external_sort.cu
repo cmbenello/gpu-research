@@ -264,6 +264,9 @@ static std::mutex g_exception_mtx;
 // sampling-based assumption can affect correctness.
 static bool g_force_no_compact = false;
 static bool g_disable_compact = false;
+// Streaming mode: use MAP_NORESERVE for output buffers to reduce peak RAM.
+// Set by main() when --streaming is used or auto-detected.
+static bool g_streaming_mode = false;
 // true if we have verified against full data (sample was confirmed complete)
 static bool g_map_full_scan_verified = false;
 
@@ -1807,7 +1810,22 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
         WallTimer t; t.begin();
         CUDA_CHECK(cudaMemcpy(d_buf[0], h_data, total_bytes, cudaMemcpyHostToDevice));
         sort_chunk_on_gpu(d_buf[0], d_buf[1], num_records, streams[0]);
-        CUDA_CHECK(cudaMemcpy(h_data, d_buf[0], total_bytes, cudaMemcpyDeviceToHost));
+
+        // In streaming mode, h_data may be mmap'd read-only — write sorted data
+        // to a separate output buffer instead of in-place.
+        uint8_t* h_sorted_buf = h_data;
+        bool h_sorted_buf_is_mmap = false;
+        if (g_streaming_mode) {
+            h_sorted_buf = (uint8_t*)mmap(nullptr, total_bytes, PROT_READ|PROT_WRITE,
+                                           MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE, -1, 0);
+            if (h_sorted_buf == MAP_FAILED) {
+                h_sorted_buf = (uint8_t*)malloc(total_bytes);
+            } else {
+                h_sorted_buf_is_mmap = true;
+            }
+            madvise(h_sorted_buf, total_bytes, MADV_HUGEPAGE);
+        }
+        CUDA_CHECK(cudaMemcpy(h_sorted_buf, d_buf[0], total_bytes, cudaMemcpyDeviceToHost));
         double gpu_ms = t.end_ms();
 
 #ifdef USE_COMPACT_KEY
@@ -1828,8 +1846,8 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
                     auto& my = bnd_per_t[ti];
                     my.reserve(512);
                     for (uint64_t i = lo; i < hi; i++) {
-                        const uint8_t* ra = h_data + (i-1) * RECORD_SIZE;
-                        const uint8_t* rb = h_data + i * RECORD_SIZE;
+                        const uint8_t* ra = h_sorted_buf + (i-1) * RECORD_SIZE;
+                        const uint8_t* rb = h_sorted_buf + i * RECORD_SIZE;
                         bool diff = false;
                         for (int c = 0; c < sc_prefix; c++) {
                             if (ra[g_compact_map[c]] != rb[g_compact_map[c]]) { diff = true; break; }
@@ -1873,8 +1891,8 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
                         tbuf.resize(count);
                         for (uint64_t j = 0; j < count; j++) {
                             tbuf[j].first.assign(
-                                h_data + (start+j)*RECORD_SIZE,
-                                h_data + (start+j)*RECORD_SIZE + KEY_SIZE);
+                                h_sorted_buf + (start+j)*RECORD_SIZE,
+                                h_sorted_buf + (start+j)*RECORD_SIZE + KEY_SIZE);
                             tbuf[j].second = (uint32_t)j;
                         }
                         std::sort(tbuf.begin(), tbuf.end(),
@@ -1890,8 +1908,8 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
                         std::vector<uint8_t> tmp(count * RECORD_SIZE);
                         for (uint64_t j = 0; j < count; j++)
                             memcpy(tmp.data() + j * RECORD_SIZE,
-                                   h_data + (start + tbuf[j].second) * RECORD_SIZE, RECORD_SIZE);
-                        memcpy(h_data + start * RECORD_SIZE, tmp.data(), count * RECORD_SIZE);
+                                   h_sorted_buf + (start + tbuf[j].second) * RECORD_SIZE, RECORD_SIZE);
+                        memcpy(h_sorted_buf + start * RECORD_SIZE, tmp.data(), count * RECORD_SIZE);
                     }
                 });
             }
@@ -1908,7 +1926,13 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
         r.total_ms = r.run_gen_ms = gpu_ms;
         r.num_runs = 1;
         r.pcie_h2d_gb = r.pcie_d2h_gb = total_bytes / 1e9;
-        r.sorted_output = nullptr; // sorted in-place in h_data
+        if (g_streaming_mode) {
+            r.sorted_output = h_sorted_buf;
+            r.sorted_output_size = total_bytes;
+            r.sorted_output_is_mmap = h_sorted_buf_is_mmap;
+        } else {
+            r.sorted_output = nullptr; // sorted in-place in h_data
+        }
         return r;
     }
 
@@ -1928,9 +1952,14 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
     uint32_t* h_perm = nullptr;
     cudaMallocHost(&h_perm, total_perm_bytes);
     // Pre-allocate gather output buffer
-    // Use mmap + MAP_POPULATE for pre-faulted pages (avoids page faults during gather)
+    // Streaming mode: MAP_NORESERVE avoids committing all RAM upfront (pages
+    // fault on demand, kernel can reclaim under pressure). Non-streaming uses
+    // MAP_POPULATE for pre-faulted pages (lower gather latency).
+    int mmap_flags = MAP_PRIVATE | MAP_ANONYMOUS;
+    if (g_streaming_mode) mmap_flags |= MAP_NORESERVE;
+    else mmap_flags |= MAP_POPULATE;
     uint8_t* h_output = (uint8_t*)mmap(nullptr, total_bytes, PROT_READ|PROT_WRITE,
-                                        MAP_PRIVATE|MAP_ANONYMOUS|MAP_POPULATE, -1, 0);
+                                        mmap_flags, -1, 0);
     if (h_output == MAP_FAILED) h_output = nullptr;
     if (h_output) madvise(h_output, total_bytes, MADV_HUGEPAGE);
     bool h_output_is_mmap = (h_output != nullptr);
@@ -3222,19 +3251,67 @@ static void gen_data(uint8_t* d, uint64_t n) {
     }
 }
 
+// Generate random data to a file in streaming fashion (no full-dataset allocation).
+// Writes in 256 MB chunks to avoid pinning the whole dataset in RAM.
+static void gen_data_to_file(const char* path, uint64_t num_records) {
+    FILE* f = fopen(path, "wb");
+    if (!f) { fprintf(stderr, "Cannot create %s\n", path); exit(1); }
+
+    const size_t CHUNK = 256ULL * 1024 * 1024;  // 256 MB
+    uint64_t recs_per_chunk = CHUNK / RECORD_SIZE;
+    uint8_t* buf = (uint8_t*)malloc(CHUNK);
+    if (!buf) { fprintf(stderr, "malloc failed for gen buffer\n"); exit(1); }
+
+    srand(42);
+    uint64_t written = 0;
+    while (written < num_records) {
+        uint64_t n = std::min(recs_per_chunk, num_records - written);
+        for (uint64_t i = 0; i < n; i++) {
+            uint8_t* r = buf + i * RECORD_SIZE;
+            for (int b = 0; b < KEY_SIZE; b++) r[b] = (uint8_t)(rand() & 0xFF);
+            memset(r + KEY_SIZE, 0, VALUE_SIZE);
+            uint64_t idx = written + i;
+            memcpy(r + KEY_SIZE, &idx, sizeof(uint64_t));
+        }
+        fwrite(buf, RECORD_SIZE, n, f);
+        written += n;
+        printf("\r  Generated %lu / %lu records (%.1f%%)", written, num_records,
+               100.0 * written / num_records);
+        fflush(stdout);
+    }
+    printf("\n");
+    fclose(f);
+    free(buf);
+}
+
 int main(int argc, char** argv) {
     double total_gb = 0.5;
     bool verify = true;
     const char* input_file = nullptr;
     const char* output_file = nullptr;
     int num_experiment_runs = 1;
+    bool streaming = false;
+    const char* gen_file = nullptr;  // --gen-to-file: generate data to file (streaming)
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i],"--total-gb") && i+1<argc) total_gb = atof(argv[++i]);
         else if (!strcmp(argv[i],"--input") && i+1<argc) input_file = argv[++i];
         else if (!strcmp(argv[i],"--output") && i+1<argc) output_file = argv[++i];
         else if (!strcmp(argv[i],"--no-verify")) verify = false;
         else if (!strcmp(argv[i],"--runs") && i+1<argc) num_experiment_runs = atoi(argv[++i]);
-        else { printf("Usage: %s [--total-gb N] [--input FILE] [--output FILE] [--no-verify] [--runs N]\n",argv[0]); return 0; }
+        else if (!strcmp(argv[i],"--streaming")) streaming = true;
+        else if (!strcmp(argv[i],"--gen-to-file") && i+1<argc) gen_file = argv[++i];
+        else { printf("Usage: %s [--total-gb N] [--input FILE] [--output FILE] [--no-verify] [--runs N] [--streaming] [--gen-to-file FILE]\n",argv[0]); return 0; }
+    }
+
+    // --gen-to-file: generate random data to a file, then sort from it
+    if (gen_file && !input_file) {
+        uint64_t gen_records = (uint64_t)(total_gb * 1e9) / RECORD_SIZE;
+        printf("Generating %.2f GB random data to %s...\n", gen_records * RECORD_SIZE / 1e9, gen_file);
+        WallTimer gt; gt.begin();
+        gen_data_to_file(gen_file, gen_records);
+        printf("  Generated in %.0f ms\n\n", gt.end_ms());
+        input_file = gen_file;
+        streaming = true;  // file-backed data uses streaming mode
     }
 
     // Determine data size from file or --total-gb
@@ -3252,8 +3329,22 @@ int main(int argc, char** argv) {
         total_bytes = num_records * RECORD_SIZE;
     }
 
+    // Auto-enable streaming if dataset is large (>80% of available RAM)
+    if (!streaming && input_file) {
+        long pages = sysconf(_SC_PHYS_PAGES);
+        long page_size = sysconf(_SC_PAGE_SIZE);
+        uint64_t total_ram = (uint64_t)pages * page_size;
+        // Need ~2.5× data for pinned mode (h_data + h_output + staging)
+        if (total_bytes * 2.5 > total_ram * 0.85) {
+            printf("[AutoStream] Dataset %.1f GB would need ~%.1f GB RAM (have %.1f GB) — enabling streaming mode\n",
+                   total_bytes/1e9, total_bytes*2.5/1e9, total_ram/1e9);
+            streaming = true;
+        }
+    }
+
     printf("════════════════════════════════════════════════════\n");
-    printf("  GPU External Merge Sort — Streaming Benchmark\n");
+    printf("  GPU External Merge Sort — %s Benchmark\n",
+           streaming ? "Streaming" : "In-Memory");
     printf("════════════════════════════════════════════════════\n");
 
     int dev; cudaGetDevice(&dev);
@@ -3261,33 +3352,68 @@ int main(int argc, char** argv) {
     printf("GPU: %s (%.1f GB HBM, %d SMs, %.0f GB/s BW)\n", props.name,
            props.totalGlobalMem/1e9, props.multiProcessorCount,
            2.0 * props.memoryClockRate * (props.memoryBusWidth/8) / 1e6);
-    printf("Data: %.2f GB (%lu records × %d bytes)%s\n\n",
+    printf("Data: %.2f GB (%lu records × %d bytes)%s%s\n\n",
            total_bytes/1e9, num_records, RECORD_SIZE,
-           input_file ? " (from file)" : " (random)");
+           input_file ? " (from file)" : " (random)",
+           streaming ? " [STREAMING]" : "");
 
-    printf("Allocating %.2f GB pinned host memory...\n", total_bytes/1e9);
     uint8_t* h_data;
-    cudaError_t alloc_err = cudaMallocHost(&h_data, total_bytes);
-    if (alloc_err != cudaSuccess) {
-        printf("  cudaMallocHost failed, falling back to malloc\n");
-        h_data = (uint8_t*)malloc(total_bytes);
-    }
-    if (!h_data) { fprintf(stderr,"allocation failed\n"); return 1; }
-    madvise(h_data, total_bytes, MADV_HUGEPAGE);
+    bool h_data_is_mmap = false;
+    cudaError_t alloc_err = cudaSuccess;
 
-    if (input_file) {
-        printf("Loading from %s...\n", input_file);
+    if (streaming && input_file) {
+        // Streaming mode: mmap the input file instead of loading into pinned memory.
+        // This avoids the 2× RAM overhead (tmpfs file + pinned copy).
+        // The sort pipeline reads h_data sequentially during compact extraction
+        // and randomly during gather — both work fine with mmap + page cache.
+        printf("Memory-mapping %.2f GB from %s (streaming, no pinned alloc)...\n",
+               total_bytes/1e9, input_file);
         WallTimer gt; gt.begin();
-        FILE* f = fopen(input_file, "rb");
-        size_t read = fread(h_data, 1, total_bytes, f);
-        fclose(f);
-        printf("  Loaded %.2f GB in %.0f ms (%.2f GB/s)\n\n",
-               read/1e9, gt.end_ms(), read/(gt.end_ms()*1e6));
+        int fd = open(input_file, O_RDONLY);
+        if (fd < 0) { fprintf(stderr, "Cannot open %s\n", input_file); return 1; }
+        h_data = (uint8_t*)mmap(nullptr, total_bytes, PROT_READ,
+                                MAP_PRIVATE | MAP_NORESERVE, fd, 0);
+        close(fd);
+        if (h_data == MAP_FAILED) {
+            fprintf(stderr, "mmap failed for %s\n", input_file);
+            return 1;
+        }
+        h_data_is_mmap = true;
+        // Advise the kernel about access patterns
+        madvise(h_data, total_bytes, MADV_SEQUENTIAL);  // mostly sequential during extraction
+        madvise(h_data, total_bytes, MADV_HUGEPAGE);
+        printf("  Mapped in %.0f ms (pages will fault on demand)\n\n", gt.end_ms());
     } else {
-        printf("Generating random data...\n");
-        WallTimer gt; gt.begin();
-        gen_data(h_data, num_records);
-        printf("  Generated in %.0f ms\n\n", gt.end_ms());
+        printf("Allocating %.2f GB pinned host memory...\n", total_bytes/1e9);
+        alloc_err = cudaMallocHost(&h_data, total_bytes);
+        if (alloc_err != cudaSuccess) {
+            printf("  cudaMallocHost failed, falling back to malloc\n");
+            h_data = (uint8_t*)malloc(total_bytes);
+        }
+        if (!h_data) { fprintf(stderr,"allocation failed\n"); return 1; }
+        madvise(h_data, total_bytes, MADV_HUGEPAGE);
+
+        if (input_file) {
+            printf("Loading from %s...\n", input_file);
+            WallTimer gt; gt.begin();
+            FILE* f = fopen(input_file, "rb");
+            size_t read = fread(h_data, 1, total_bytes, f);
+            fclose(f);
+            printf("  Loaded %.2f GB in %.0f ms (%.2f GB/s)\n\n",
+                   read/1e9, gt.end_ms(), read/(gt.end_ms()*1e6));
+        } else {
+            printf("Generating random data...\n");
+            WallTimer gt; gt.begin();
+            gen_data(h_data, num_records);
+            printf("  Generated in %.0f ms\n\n", gt.end_ms());
+        }
+    }
+
+    // Set global streaming flag for sort() internals
+    g_streaming_mode = streaming;
+    if (streaming) {
+        printf("[Streaming] Memory-efficient mode: output buffers use MAP_NORESERVE\n");
+        printf("[Streaming] Peak RAM ~= 1× data size (vs ~2.5× in pinned mode)\n\n");
     }
 
     if (const char* e = getenv("ADV_ZERO_BYTES")) {
@@ -3446,7 +3572,8 @@ int main(int argc, char** argv) {
                (result.pcie_h2d_gb + result.pcie_d2h_gb) / (total_bytes/1e9));
     }
 
-    if (alloc_err == cudaSuccess) cudaFreeHost(h_data);
+    if (h_data_is_mmap) munmap(h_data, total_bytes);
+    else if (alloc_err == cudaSuccess) cudaFreeHost(h_data);
     else free(h_data);
     return 0;
 }

@@ -135,6 +135,14 @@ external-sort-tpch-compact: src/external_sort.cu src/run_generation.cu src/merge
 external-sort-tpch66: src/external_sort.cu src/run_generation.cu src/merge.cu src/host_sort.cu $(HDRS)
 	$(NVCC) $(NVCC_FLAGS) $(INCLUDES) -DEXTERNAL_SORT_MAIN -DKEY_SIZE=66 -DVALUE_SIZE=54 src/external_sort.cu src/run_generation.cu src/merge.cu src/host_sort.cu -o external_sort_tpch66
 
+# Variable-length key sort
+varlen-sort: src/varlen_sort.cu
+	$(NVCC) $(NVCC_FLAGS) $(INCLUDES) -DVARLEN_SORT_MAIN src/varlen_sort.cu -o varlen_sort
+
+# GPU Sort shared library (for DuckDB integration)
+libgpusort.so: src/gpu_sort_api.cu include/gpu_sort_api.h
+	$(NVCC) $(NVCC_FLAGS) $(INCLUDES) -shared -Xcompiler -fPIC src/gpu_sort_api.cu -o libgpusort.so -lcuda
+
 # ── Build all experiments ───────────────────────────────────────────
 
 experiments: bottleneck-nocub radix-vs-merge layout-bench

@@ -1,0 +1,638 @@
+==========================================
+Test 1: Mode 0 (random 8-128B) 1M records
+==========================================
+════════════════════════════════════════════════════
+  GPU Variable-Length Key Sort Benchmark
+════════════════════════════════════════════════════
+GPU: Quadro RTX 6000 (25.4 GB HBM, 72 SMs)
+
+Generating 1000000 records (mode 0, key len 8-128)...
+  Generated in 1077 ms (0.07 GB total keys, avg 68.0 bytes/key)
+
+
+══════════ Run 1/3 ══════════
+Sorting 1000000 variable-length keys...
+  Prefix extraction: 104 ms (0.31 GB/s)
+  Upload + alloc: 20 ms
+  GPU LSD sort: 4 passes for 32B prefix
+  GPU sort: 3 ms
+  Download perm: 1 ms
+  Fixup: no prefix ties (all keys resolved by 32B prefix)
+  Fixup: 35 ms
+
+  Total: 165 ms (0.41 GB/s on key data)
+  Breakdown: extract 104 + upload 20 + GPU 3 + download 1 + fixup 35 ms
+
+Verifying...
+  PASS sortedness: 1000000 records in non-decreasing order
+  PASS permutation: valid bijection
+
+CSV,varlen,Quadro RTX 6000,1000000,68.0,8-128,164.67,103.97,19.84,3.33,1.04,34.58,0.41,0,0
+
+══════════ Run 2/3 ══════════
+Sorting 1000000 variable-length keys...
+  Prefix extraction: 21 ms (1.56 GB/s)
+  Upload + alloc: 18 ms
+  GPU LSD sort: 4 passes for 32B prefix
+  GPU sort: 3 ms
+  Download perm: 1 ms
+  Fixup: no prefix ties (all keys resolved by 32B prefix)
+  Fixup: 20 ms
+
+  Total: 65 ms (1.04 GB/s on key data)
+  Breakdown: extract 21 + upload 18 + GPU 3 + download 1 + fixup 20 ms
+
+Verifying...
+  PASS sortedness: 1000000 records in non-decreasing order
+  PASS permutation: valid bijection
+
+CSV,varlen,Quadro RTX 6000,1000000,68.0,8-128,65.39,20.52,18.22,3.19,1.08,20.48,1.04,0,0
+
+══════════ Run 3/3 ══════════
+Sorting 1000000 variable-length keys...
+  Prefix extraction: 20 ms (1.58 GB/s)
+  Upload + alloc: 9 ms
+  GPU LSD sort: 4 passes for 32B prefix
+  GPU sort: 3 ms
+  Download perm: 1 ms
+  Fixup: no prefix ties (all keys resolved by 32B prefix)
+  Fixup: 18 ms
+
+  Total: 53 ms (1.28 GB/s on key data)
+  Breakdown: extract 20 + upload 9 + GPU 3 + download 1 + fixup 18 ms
+
+Verifying...
+  PASS sortedness: 1000000 records in non-decreasing order
+  PASS permutation: valid bijection
+
+CSV,varlen,Quadro RTX 6000,1000000,68.0,8-128,53.11,20.30,8.89,3.18,0.90,18.06,1.28,0,0
+
+═══ CPU Baseline (std::sort) ═══
+  CPU std::sort: 478 ms (0.14 GB/s)
+  GPU speedup: 9.0x
+
+==========================================
+Test 2: Mode 0 (random 8-128B) 10M records
+==========================================
+════════════════════════════════════════════════════
+  GPU Variable-Length Key Sort Benchmark
+════════════════════════════════════════════════════
+GPU: Quadro RTX 6000 (25.4 GB HBM, 72 SMs)
+
+Generating 10000000 records (mode 0, key len 8-128)...
+  Generated in 10786 ms (0.68 GB total keys, avg 68.0 bytes/key)
+
+
+══════════ Run 1/3 ══════════
+Sorting 10000000 variable-length keys...
+  Prefix extraction: 292 ms (1.09 GB/s)
+  Upload + alloc: 95 ms
+  GPU LSD sort: 4 passes for 32B prefix
+  GPU sort: 26 ms
+  Download perm: 9 ms
+  Fixup: no prefix ties (all keys resolved by 32B prefix)
+  Fixup: 276 ms
+
+  Total: 703 ms (0.97 GB/s on key data)
+  Breakdown: extract 292 + upload 95 + GPU 26 + download 9 + fixup 276 ms
+
+Verifying...
+  PASS sortedness: 10000000 records in non-decreasing order
+  PASS permutation: valid bijection
+
+CSV,varlen,Quadro RTX 6000,10000000,68.0,8-128,703.48,292.27,95.24,25.53,8.88,275.86,0.97,0,0
+
+══════════ Run 2/3 ══════════
+Sorting 10000000 variable-length keys...
+  Prefix extraction: 167 ms (1.92 GB/s)
+  Upload + alloc: 83 ms
+  GPU LSD sort: 4 passes for 32B prefix
+  GPU sort: 28 ms
+  Download perm: 8 ms
+  Fixup: no prefix ties (all keys resolved by 32B prefix)
+  Fixup: 185 ms
+
+  Total: 478 ms (1.42 GB/s on key data)
+  Breakdown: extract 167 + upload 83 + GPU 28 + download 8 + fixup 185 ms
+
+Verifying...
+  PASS sortedness: 10000000 records in non-decreasing order
+  PASS permutation: valid bijection
+
+CSV,varlen,Quadro RTX 6000,10000000,68.0,8-128,478.41,167.02,83.16,28.49,8.40,184.57,1.42,0,0
+
+══════════ Run 3/3 ══════════
+Sorting 10000000 variable-length keys...
+  Prefix extraction: 163 ms (1.97 GB/s)
+  Upload + alloc: 82 ms
+  GPU LSD sort: 4 passes for 32B prefix
+  GPU sort: 28 ms
+  Download perm: 8 ms
+  Fixup: no prefix ties (all keys resolved by 32B prefix)
+  Fixup: 143 ms
+
+  Total: 431 ms (1.58 GB/s on key data)
+  Breakdown: extract 163 + upload 82 + GPU 28 + download 8 + fixup 143 ms
+
+Verifying...
+  PASS sortedness: 10000000 records in non-decreasing order
+  PASS permutation: valid bijection
+
+CSV,varlen,Quadro RTX 6000,10000000,68.0,8-128,430.77,162.64,82.03,28.25,8.38,142.77,1.58,0,0
+
+═══ CPU Baseline (std::sort) ═══
+  CPU std::sort: 9218 ms (0.07 GB/s)
+  GPU speedup: 21.4x
+
+==========================================
+Test 3: Mode 0 (random 8-128B) 50M records --no-verify
+==========================================
+════════════════════════════════════════════════════
+  GPU Variable-Length Key Sort Benchmark
+════════════════════════════════════════════════════
+GPU: Quadro RTX 6000 (25.4 GB HBM, 72 SMs)
+
+Generating 50000000 records (mode 0, key len 8-128)...
+  Generated in 54572 ms (3.40 GB total keys, avg 68.0 bytes/key)
+
+
+══════════ Run 1/3 ══════════
+Sorting 50000000 variable-length keys...
+  Prefix extraction: 1011 ms (1.58 GB/s)
+  Upload + alloc: 384 ms
+  GPU LSD sort: 4 passes for 32B prefix
+  GPU sort: 126 ms
+  Download perm: 41 ms
+  Fixup: no prefix ties (all keys resolved by 32B prefix)
+  Fixup: 835 ms
+
+  Total: 2405 ms (1.41 GB/s on key data)
+  Breakdown: extract 1011 + upload 384 + GPU 126 + download 41 + fixup 835 ms
+
+CSV,varlen,Quadro RTX 6000,50000000,68.0,8-128,2404.64,1011.47,383.83,125.82,41.40,834.66,1.41,0,0
+
+══════════ Run 2/3 ══════════
+Sorting 50000000 variable-length keys...
+  Prefix extraction: 860 ms (1.86 GB/s)
+  Upload + alloc: 432 ms
+  GPU LSD sort: 4 passes for 32B prefix
+  GPU sort: 128 ms
+  Download perm: 41 ms
+  Fixup: no prefix ties (all keys resolved by 32B prefix)
+  Fixup: 853 ms
+
+  Total: 2435 ms (1.40 GB/s on key data)
+  Breakdown: extract 860 + upload 432 + GPU 128 + download 41 + fixup 853 ms
+
+CSV,varlen,Quadro RTX 6000,50000000,68.0,8-128,2435.11,859.82,432.50,127.84,40.77,853.35,1.40,0,0
+
+══════════ Run 3/3 ══════════
+Sorting 50000000 variable-length keys...
+  Prefix extraction: 871 ms (1.84 GB/s)
+  Upload + alloc: 533 ms
+  GPU LSD sort: 4 passes for 32B prefix
+  GPU sort: 126 ms
+  Download perm: 25 ms
+  Fixup: no prefix ties (all keys resolved by 32B prefix)
+  Fixup: 925 ms
+
+  Total: 2488 ms (1.37 GB/s on key data)
+  Breakdown: extract 871 + upload 533 + GPU 126 + download 25 + fixup 925 ms
+
+CSV,varlen,Quadro RTX 6000,50000000,68.0,8-128,2488.43,870.66,533.23,125.89,25.39,924.73,1.37,0,0
+
+═══ CPU Baseline (std::sort) ═══
+  CPU std::sort: 64454 ms (0.05 GB/s)
+  GPU speedup: 25.9x
+
+==========================================
+Test 4: Mode 1 (40B prefix) 1M records
+==========================================
+════════════════════════════════════════════════════
+  GPU Variable-Length Key Sort Benchmark
+════════════════════════════════════════════════════
+GPU: Quadro RTX 6000 (25.4 GB HBM, 72 SMs)
+
+Generating 1000000 records (mode 1, key len 8-128)...
+  Generated in 2028 ms (0.11 GB total keys, avg 108.0 bytes/key)
+
+
+══════════ Run 1/3 ══════════
+Sorting 1000000 variable-length keys...
+  Prefix extraction: 115 ms (0.28 GB/s)
+  Upload + alloc: 21 ms
+  GPU LSD sort: 4 passes for 32B prefix
+  GPU sort: 2 ms
+  Download perm: 1 ms
+  Fixup: 1 groups, 1000000 records to re-sort
+  Fixup: 689 ms
+
+  Total: 831 ms (0.13 GB/s on key data)
+  Breakdown: extract 115 + upload 21 + GPU 2 + download 1 + fixup 689 ms
+  Fixup: 1 groups, 1000000 records (100.00%)
+
+Verifying...
+  PASS sortedness: 1000000 records in non-decreasing order
+  PASS permutation: valid bijection
+
+CSV,varlen,Quadro RTX 6000,1000000,108.0,8-128,831.17,115.48,20.67,2.37,1.14,689.44,0.13,1,1000000
+
+══════════ Run 2/3 ══════════
+Sorting 1000000 variable-length keys...
+  Prefix extraction: 19 ms (1.65 GB/s)
+  Upload + alloc: 9 ms
+  GPU LSD sort: 4 passes for 32B prefix
+  GPU sort: 2 ms
+  Download perm: 1 ms
+  Fixup: 1 groups, 1000000 records to re-sort
+  Fixup: 715 ms
+
+  Total: 748 ms (0.14 GB/s on key data)
+  Breakdown: extract 19 + upload 9 + GPU 2 + download 1 + fixup 715 ms
+  Fixup: 1 groups, 1000000 records (100.00%)
+
+Verifying...
+  PASS sortedness: 1000000 records in non-decreasing order
+  PASS permutation: valid bijection
+
+CSV,varlen,Quadro RTX 6000,1000000,108.0,8-128,747.89,19.37,8.68,2.23,0.98,714.79,0.14,1,1000000
+
+══════════ Run 3/3 ══════════
+Sorting 1000000 variable-length keys...
+  Prefix extraction: 19 ms (1.67 GB/s)
+  Upload + alloc: 12 ms
+  GPU LSD sort: 4 passes for 32B prefix
+  GPU sort: 2 ms
+  Download perm: 1 ms
+  Fixup: 1 groups, 1000000 records to re-sort
+  Fixup: 708 ms
+
+  Total: 745 ms (0.15 GB/s on key data)
+  Breakdown: extract 19 + upload 12 + GPU 2 + download 1 + fixup 708 ms
+  Fixup: 1 groups, 1000000 records (100.00%)
+
+Verifying...
+  PASS sortedness: 1000000 records in non-decreasing order
+  PASS permutation: valid bijection
+
+CSV,varlen,Quadro RTX 6000,1000000,108.0,8-128,744.55,19.12,11.95,2.24,1.00,708.33,0.15,1,1000000
+
+═══ CPU Baseline (std::sort) ═══
+  CPU std::sort: 788 ms (0.14 GB/s)
+  GPU speedup: 1.1x
+
+==========================================
+Test 5: Mode 1 (40B prefix) 10M records
+==========================================
+════════════════════════════════════════════════════
+  GPU Variable-Length Key Sort Benchmark
+════════════════════════════════════════════════════
+GPU: Quadro RTX 6000 (25.4 GB HBM, 72 SMs)
+
+Generating 10000000 records (mode 1, key len 8-128)...
+  Generated in 11892 ms (1.08 GB total keys, avg 108.0 bytes/key)
+
+
+══════════ Run 1/3 ══════════
+Sorting 10000000 variable-length keys...
+  Prefix extraction: 341 ms (0.94 GB/s)
+  Upload + alloc: 79 ms
+  GPU LSD sort: 4 passes for 32B prefix
+  GPU sort: 19 ms
+  Download perm: 9 ms
+  Fixup: 1 groups, 10000000 records to re-sort
+  Fixup: 11468 ms
+
+  Total: 11922 ms (0.09 GB/s on key data)
+  Breakdown: extract 341 + upload 79 + GPU 19 + download 9 + fixup 11468 ms
+  Fixup: 1 groups, 10000000 records (100.00%)
+
+Verifying...
+  PASS sortedness: 10000000 records in non-decreasing order
+  PASS permutation: valid bijection
+
+CSV,varlen,Quadro RTX 6000,10000000,108.0,8-128,11922.24,341.43,78.84,19.17,9.22,11467.79,0.09,1,10000000
+
+══════════ Run 2/3 ══════════
+Sorting 10000000 variable-length keys...
+  Prefix extraction: 164 ms (1.95 GB/s)
+  Upload + alloc: 76 ms
+  GPU LSD sort: 4 passes for 32B prefix
+  GPU sort: 19 ms
+  Download perm: 9 ms
+  Fixup: 1 groups, 10000000 records to re-sort
+  Fixup: 11006 ms
+
+  Total: 11282 ms (0.10 GB/s on key data)
+  Breakdown: extract 164 + upload 76 + GPU 19 + download 9 + fixup 11006 ms
+  Fixup: 1 groups, 10000000 records (100.00%)
+
+Verifying...
+  PASS sortedness: 10000000 records in non-decreasing order
+  PASS permutation: valid bijection
+
+CSV,varlen,Quadro RTX 6000,10000000,108.0,8-128,11282.38,164.38,75.56,19.01,9.08,11006.46,0.10,1,10000000
+
+══════════ Run 3/3 ══════════
+Sorting 10000000 variable-length keys...
+  Prefix extraction: 368 ms (0.87 GB/s)
+  Upload + alloc: 79 ms
+  GPU LSD sort: 4 passes for 32B prefix
+  GPU sort: 41 ms
+  Download perm: 9 ms
+  Fixup: 1 groups, 10000000 records to re-sort
+  Fixup: 16263 ms
+
+  Total: 16767 ms (0.06 GB/s on key data)
+  Breakdown: extract 368 + upload 79 + GPU 41 + download 9 + fixup 16263 ms
+  Fixup: 1 groups, 10000000 records (100.00%)
+
+Verifying...
+  PASS sortedness: 10000000 records in non-decreasing order
+  PASS permutation: valid bijection
+
+CSV,varlen,Quadro RTX 6000,10000000,108.0,8-128,16767.42,368.39,78.81,41.20,8.82,16263.34,0.06,1,10000000
+
+═══ CPU Baseline (std::sort) ═══
+  CPU std::sort: 11654 ms (0.09 GB/s)
+  GPU speedup: 0.7x
+
+==========================================
+Test 6: Mode 2 (short ≤32B) 1M records
+==========================================
+════════════════════════════════════════════════════
+  GPU Variable-Length Key Sort Benchmark
+════════════════════════════════════════════════════
+GPU: Quadro RTX 6000 (25.4 GB HBM, 72 SMs)
+
+Generating 1000000 records (mode 2, key len 8-128)...
+  Generated in 350 ms (0.02 GB total keys, avg 18.0 bytes/key)
+
+
+══════════ Run 1/3 ══════════
+Sorting 1000000 variable-length keys...
+  Prefix extraction: 86 ms (0.37 GB/s)
+  Upload + alloc: 19 ms
+  GPU LSD sort: 4 passes for 32B prefix
+  GPU sort: 3 ms
+  Download perm: 1 ms
+  Fixup: no prefix ties (all keys resolved by 32B prefix)
+  Fixup: 30 ms
+
+  Total: 142 ms (0.13 GB/s on key data)
+  Breakdown: extract 86 + upload 19 + GPU 3 + download 1 + fixup 30 ms
+
+Verifying...
+  PASS sortedness: 1000000 records in non-decreasing order
+  PASS permutation: valid bijection
+
+CSV,varlen,Quadro RTX 6000,1000000,18.0,4-32,142.04,86.48,19.17,3.20,1.03,30.22,0.13,0,0
+
+══════════ Run 2/3 ══════════
+Sorting 1000000 variable-length keys...
+  Prefix extraction: 20 ms (1.57 GB/s)
+  Upload + alloc: 8 ms
+  GPU LSD sort: 4 passes for 32B prefix
+  GPU sort: 3 ms
+  Download perm: 1 ms
+  Fixup: no prefix ties (all keys resolved by 32B prefix)
+  Fixup: 17 ms
+
+  Total: 51 ms (0.35 GB/s on key data)
+  Breakdown: extract 20 + upload 8 + GPU 3 + download 1 + fixup 17 ms
+
+Verifying...
+  PASS sortedness: 1000000 records in non-decreasing order
+  PASS permutation: valid bijection
+
+CSV,varlen,Quadro RTX 6000,1000000,18.0,4-32,51.13,20.35,8.42,3.02,0.95,16.60,0.35,0,0
+
+══════════ Run 3/3 ══════════
+Sorting 1000000 variable-length keys...
+  Prefix extraction: 20 ms (1.59 GB/s)
+  Upload + alloc: 9 ms
+  GPU LSD sort: 4 passes for 32B prefix
+  GPU sort: 3 ms
+  Download perm: 1 ms
+  Fixup: no prefix ties (all keys resolved by 32B prefix)
+  Fixup: 11 ms
+
+  Total: 46 ms (0.39 GB/s on key data)
+  Breakdown: extract 20 + upload 9 + GPU 3 + download 1 + fixup 11 ms
+
+Verifying...
+  PASS sortedness: 1000000 records in non-decreasing order
+  PASS permutation: valid bijection
+
+CSV,varlen,Quadro RTX 6000,1000000,18.0,4-32,45.82,20.14,8.75,3.04,0.96,11.10,0.39,0,0
+
+═══ CPU Baseline (std::sort) ═══
+  CPU std::sort: 489 ms (0.04 GB/s)
+  GPU speedup: 10.7x
+
+==========================================
+Test 7: Mode 2 (short ≤32B) 10M records
+==========================================
+════════════════════════════════════════════════════
+  GPU Variable-Length Key Sort Benchmark
+════════════════════════════════════════════════════
+GPU: Quadro RTX 6000 (25.4 GB HBM, 72 SMs)
+
+Generating 10000000 records (mode 2, key len 8-128)...
+  Generated in 3368 ms (0.18 GB total keys, avg 18.0 bytes/key)
+
+
+══════════ Run 1/3 ══════════
+Sorting 10000000 variable-length keys...
+  Prefix extraction: 273 ms (1.17 GB/s)
+  Upload + alloc: 81 ms
+  GPU LSD sort: 4 passes for 32B prefix
+  GPU sort: 26 ms
+  Download perm: 9 ms
+  Fixup: no prefix ties (all keys resolved by 32B prefix)
+  Fixup: 156 ms
+
+  Total: 551 ms (0.33 GB/s on key data)
+  Breakdown: extract 273 + upload 81 + GPU 26 + download 9 + fixup 156 ms
+
+Verifying...
+  PASS sortedness: 10000000 records in non-decreasing order
+  PASS permutation: valid bijection
+
+CSV,varlen,Quadro RTX 6000,10000000,18.0,4-32,550.56,273.17,80.93,25.99,8.70,156.11,0.33,0,0
+
+══════════ Run 2/3 ══════════
+Sorting 10000000 variable-length keys...
+  Prefix extraction: 161 ms (1.99 GB/s)
+  Upload + alloc: 79 ms
+  GPU LSD sort: 4 passes for 32B prefix
+  GPU sort: 26 ms
+  Download perm: 9 ms
+  Fixup: no prefix ties (all keys resolved by 32B prefix)
+  Fixup: 127 ms
+
+  Total: 410 ms (0.44 GB/s on key data)
+  Breakdown: extract 161 + upload 79 + GPU 26 + download 9 + fixup 127 ms
+
+Verifying...
+  PASS sortedness: 10000000 records in non-decreasing order
+  PASS permutation: valid bijection
+
+CSV,varlen,Quadro RTX 6000,10000000,18.0,4-32,409.73,160.57,79.37,25.96,8.84,127.18,0.44,0,0
+
+══════════ Run 3/3 ══════════
+Sorting 10000000 variable-length keys...
+  Prefix extraction: 161 ms (1.99 GB/s)
+  Upload + alloc: 80 ms
+  GPU LSD sort: 4 passes for 32B prefix
+  GPU sort: 26 ms
+  Download perm: 9 ms
+  Fixup: no prefix ties (all keys resolved by 32B prefix)
+  Fixup: 112 ms
+
+  Total: 395 ms (0.46 GB/s on key data)
+  Breakdown: extract 161 + upload 80 + GPU 26 + download 9 + fixup 112 ms
+
+Verifying...
+  PASS sortedness: 10000000 records in non-decreasing order
+  PASS permutation: valid bijection
+
+CSV,varlen,Quadro RTX 6000,10000000,18.0,4-32,395.35,161.08,79.79,25.95,8.67,112.08,0.46,0,0
+
+═══ CPU Baseline (std::sort) ═══
+  CPU std::sort: 8365 ms (0.02 GB/s)
+  GPU speedup: 21.2x
+
+==========================================
+Test 8: Mode 2 (short ≤32B) 50M records --no-verify
+==========================================
+════════════════════════════════════════════════════
+  GPU Variable-Length Key Sort Benchmark
+════════════════════════════════════════════════════
+GPU: Quadro RTX 6000 (25.4 GB HBM, 72 SMs)
+
+Generating 50000000 records (mode 2, key len 8-128)...
+  Generated in 17920 ms (0.90 GB total keys, avg 18.0 bytes/key)
+
+
+══════════ Run 1/3 ══════════
+Sorting 50000000 variable-length keys...
+  Prefix extraction: 975 ms (1.64 GB/s)
+  Upload + alloc: 412 ms
+  GPU LSD sort: 4 passes for 32B prefix
+  GPU sort: 114 ms
+  Download perm: 43 ms
+  Fixup: no prefix ties (all keys resolved by 32B prefix)
+  Fixup: 671 ms
+
+  Total: 2221 ms (0.41 GB/s on key data)
+  Breakdown: extract 975 + upload 412 + GPU 114 + download 43 + fixup 671 ms
+
+CSV,varlen,Quadro RTX 6000,50000000,18.0,4-32,2221.44,974.74,411.59,114.46,42.69,670.62,0.41,0,0
+
+══════════ Run 2/3 ══════════
+Sorting 50000000 variable-length keys...
+  Prefix extraction: 790 ms (2.02 GB/s)
+  Upload + alloc: 408 ms
+  GPU LSD sort: 4 passes for 32B prefix
+  GPU sort: 114 ms
+  Download perm: 43 ms
+  Fixup: no prefix ties (all keys resolved by 32B prefix)
+  Fixup: 617 ms
+
+  Total: 1982 ms (0.45 GB/s on key data)
+  Breakdown: extract 790 + upload 408 + GPU 114 + download 43 + fixup 617 ms
+
+CSV,varlen,Quadro RTX 6000,50000000,18.0,4-32,1981.58,790.27,407.54,114.31,42.99,617.07,0.45,0,0
+
+══════════ Run 3/3 ══════════
+Sorting 50000000 variable-length keys...
+  Prefix extraction: 819 ms (1.95 GB/s)
+  Upload + alloc: 386 ms
+  GPU LSD sort: 4 passes for 32B prefix
+  GPU sort: 114 ms
+  Download perm: 44 ms
+  Fixup: no prefix ties (all keys resolved by 32B prefix)
+  Fixup: 598 ms
+
+  Total: 1970 ms (0.46 GB/s on key data)
+  Breakdown: extract 819 + upload 386 + GPU 114 + download 44 + fixup 598 ms
+
+CSV,varlen,Quadro RTX 6000,50000000,18.0,4-32,1969.81,818.61,385.66,114.38,43.77,597.92,0.46,0,0
+
+═══ CPU Baseline (std::sort) ═══
+  CPU std::sort: 52892 ms (0.02 GB/s)
+  GPU speedup: 26.9x
+
+==========================================
+Test 9: Mode 0 (long keys 64-512B) 10M records
+==========================================
+════════════════════════════════════════════════════
+  GPU Variable-Length Key Sort Benchmark
+════════════════════════════════════════════════════
+GPU: Quadro RTX 6000 (25.4 GB HBM, 72 SMs)
+
+Generating 10000000 records (mode 0, key len 64-512)...
+  Generated in 43067 ms (2.88 GB total keys, avg 288.0 bytes/key)
+
+
+══════════ Run 1/3 ══════════
+Sorting 10000000 variable-length keys...
+  Prefix extraction: 502 ms (0.64 GB/s)
+  Upload + alloc: 79 ms
+  GPU LSD sort: 4 passes for 32B prefix
+  GPU sort: 29 ms
+  Download perm: 8 ms
+  Fixup: no prefix ties (all keys resolved by 32B prefix)
+  Fixup: 194 ms
+
+  Total: 819 ms (3.52 GB/s on key data)
+  Breakdown: extract 502 + upload 79 + GPU 29 + download 8 + fixup 194 ms
+
+Verifying...
+  PASS sortedness: 10000000 records in non-decreasing order
+  PASS permutation: valid bijection
+
+CSV,varlen,Quadro RTX 6000,10000000,288.0,64-512,818.59,502.46,79.34,28.67,8.47,193.95,3.52,0,0
+
+══════════ Run 2/3 ══════════
+Sorting 10000000 variable-length keys...
+  Prefix extraction: 170 ms (1.89 GB/s)
+  Upload + alloc: 77 ms
+  GPU LSD sort: 4 passes for 32B prefix
+  GPU sort: 29 ms
+  Download perm: 8 ms
+  Fixup: no prefix ties (all keys resolved by 32B prefix)
+  Fixup: 168 ms
+
+  Total: 459 ms (6.28 GB/s on key data)
+  Breakdown: extract 170 + upload 77 + GPU 29 + download 8 + fixup 168 ms
+
+Verifying...
+  PASS sortedness: 10000000 records in non-decreasing order
+  PASS permutation: valid bijection
+
+CSV,varlen,Quadro RTX 6000,10000000,288.0,64-512,458.67,169.59,76.87,28.57,8.29,167.60,6.28,0,0
+
+══════════ Run 3/3 ══════════
+Sorting 10000000 variable-length keys...
+  Prefix extraction: 166 ms (1.92 GB/s)
+  Upload + alloc: 77 ms
+  GPU LSD sort: 4 passes for 32B prefix
+  GPU sort: 29 ms
+  Download perm: 8 ms
+  Fixup: no prefix ties (all keys resolved by 32B prefix)
+  Fixup: 155 ms
+
+  Total: 443 ms (6.49 GB/s on key data)
+  Breakdown: extract 166 + upload 77 + GPU 29 + download 8 + fixup 155 ms
+
+Verifying...
+  PASS sortedness: 10000000 records in non-decreasing order
+  PASS permutation: valid bijection
+
+CSV,varlen,Quadro RTX 6000,10000000,288.0,64-512,443.45,166.28,77.04,28.65,8.47,155.24,6.49,0,0
+
+═══ CPU Baseline (std::sort) ═══
+  CPU std::sort: 8993 ms (0.32 GB/s)
+  GPU speedup: 20.3x

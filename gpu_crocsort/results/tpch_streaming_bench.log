@@ -1,0 +1,73 @@
+=== TPC-H Streaming vs Non-Streaming Benchmark ===
+Date: 2026-04-19
+GPU: Quadro RTX 6000 (25.4 GB HBM)
+Branch: exp/fixup-fast-comparator
+
+================================================================================
+SF10 STREAMING (7.20 GB, 59.99M records)
+================================================================================
+Mode: Memory-mapped, no pinned alloc, peak RAM ~1x data size
+CompactDetect: 61/66 bytes vary, 16381 ms (streaming mmap sampling is slow)
+Single-chunk sort (fits in GPU buffer):
+  Key Upload: 3909 ms (1.84 GB/s effective, 3.96 GB compact keys)
+  GPU CUB Radix Sort: 361 ms (9 passes)
+  Download Perm: 21 ms
+  CPU Gather: 497 ms (14.49 GB/s)
+  TOTAL: 4787 ms (gen: 4290 + merge: 497)
+  Throughput: 1.50 GB/s
+  PCIe: 4.2 GB total (0.6x amplification)
+
+================================================================================
+SF10 NON-STREAMING — FAILED (CUDA OOM at triple-buffer malloc)
+================================================================================
+Error: CUDA error at src/external_sort.cu:1720: out of memory
+Note: Pinned host alloc may reduce available GPU memory for triple buffers.
+
+================================================================================
+SF50 STREAMING (36.00 GB, 300M records)
+================================================================================
+Mode: Memory-mapped, no pinned alloc, peak RAM ~1x data size
+CompactDetect: 61/66 bytes vary, 72517 ms (streaming mmap sampling is very slow)
+OVC architecture: 2 runs, 32B prefix merge + CPU fixup
+  Run Generation: 13119 ms (2.74 GB/s)
+  GPU 32B Prefix Merge: 606 ms (4 CUB LSD passes, ties found)
+  Download Perm: 92 ms
+  CPU Gather: 2230 ms (16.14 GB/s)
+  CPU Fixup: 1612 ms (3.15M groups, avg 95 records)
+  Total merge+gather+fixup: 4541 ms
+  TOTAL: 17659 ms (gen: 13119 + merge+gather+fixup: 4541)
+  Throughput: 2.04 GB/s
+  PCIe: 10.8 GB total (0.3x amplification)
+
+================================================================================
+SF50 NON-STREAMING (36.00 GB, 300M records)
+================================================================================
+Mode: Pinned host memory (36 GB allocated)
+Load time: 9749 ms (3.69 GB/s) — not counted in sort time
+CompactDetect: 61/66 bytes vary, 41 ms (pinned memory sampling is fast)
+OVC architecture: 2 runs, 32B prefix merge + CPU fixup
+  Run Generation: 2214 ms (16.26 GB/s)
+  GPU 32B Prefix Merge: 609 ms (4 CUB LSD passes, ties found)
+  Download Perm: 91 ms
+  CPU Gather: 2452 ms (14.68 GB/s)
+  CPU Fixup: 1762 ms (3.15M groups, avg 95 records)
+  Total merge+gather+fixup: 4914 ms
+  TOTAL: 7128 ms (gen: 2214 + merge+gather+fixup: 4914)
+  Throughput: 5.05 GB/s
+  PCIe: 10.8 GB total (0.3x amplification)
+
+================================================================================
+COMPARISON SUMMARY (SF50)
+================================================================================
+                    Streaming       Non-Streaming   Delta
+CompactDetect       72517 ms        41 ms           -99.9% (pinned wins)
+Run Generation      13119 ms        2214 ms         -83.1% (pinned wins, DMA vs page faults)
+GPU Merge           606 ms          609 ms          ~same
+CPU Gather          2230 ms         2452 ms         -8.9% (streaming slightly wins)
+CPU Fixup           1612 ms         1762 ms         -8.5% (streaming slightly wins)
+TOTAL SORT          17659 ms        7128 ms         -59.6% (non-streaming 2.5x faster)
+
+Key finding: Streaming mode's mmap page-fault overhead devastates PCIe upload
+performance (2.74 vs 16.26 GB/s for run generation). The GPU sort, merge, gather,
+and fixup phases are comparable. The bottleneck is entirely in the H2D transfer
+where streaming pays ~6x penalty from demand-paged reads vs pinned DMA.

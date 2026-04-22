@@ -1,0 +1,261 @@
+=== Streaming Benchmark Sun Apr 19 07:08:50 UTC 2026 ===
+
+=== Test 1: 1GB streaming (gen-to-file) ===
+Generating 1.00 GB random data to /tmp/stream_1gb.bin...
+  Generated 2236962 / 8333333 records (26.8%)  Generated 4473924 / 8333333 records (53.7%)  Generated 6710886 / 8333333 records (80.5%)  Generated 8333333 / 8333333 records (100.0%)[Hybrid] Sample missed varying byte 64 on the fast path.
+  Falling back to full-key upload for a guaranteed-correct sort.
+
+  Generated in 4876 ms
+
+════════════════════════════════════════════════════
+  GPU External Merge Sort — Streaming Benchmark
+════════════════════════════════════════════════════
+GPU: Quadro RTX 6000 (25.4 GB HBM, 72 SMs, 672 GB/s BW)
+Data: 1.00 GB (8333333 records × 120 bytes) (from file) [STREAMING]
+
+Memory-mapping 1.00 GB from /tmp/stream_1gb.bin (streaming, no pinned alloc)...
+  Mapped in 0 ms (pages will fault on demand)
+
+[Streaming] Memory-efficient mode: output buffers use MAP_NORESERVE
+[Streaming] Peak RAM ~= 1× data size (vs ~2.5× in pinned mode)
+
+[ExternalSort] GPU: 25.22 GB free, budget: 16.39 GB
+[ExternalSort] Triple-buffer: 3 × 5.46 GB (46 M records each)
+[ExternalSort] Sorting 8333333 records (1.00 GB)
+
+[CompactDetect] 66/66 key bytes vary (full scan 8333K of 8M records, 116 ms)
+[CompactDetect] Varying byte positions: 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 ...
+[CompactDetect] Compactness: 66/66 = 100% varying. Decision: too many varying bytes — no compression benefit, use full upload
+[CompactDetect] Per-position bit-widths: 0×1b  0×2b  0×4b  66×8b → 528 bits = 66 packed bytes (vs 66 current)
+[CompactDetect] 32B prefix would cover 32/66 positions if nibble-packed (vs 32 currently)
+  Data fits in GPU — single-chunk sort
+[Hybrid] Retrying with full-key upload path...
+[ExternalSort] GPU: 25.21 GB free, budget: 16.39 GB
+[ExternalSort] Triple-buffer: 3 × 5.46 GB (46 M records each)
+[ExternalSort] Sorting 8333333 records (1.00 GB)
+
+[CompactDetect] 66/66 key bytes vary (full scan 8333K of 8M records, 0 ms)
+[CompactDetect] Varying byte positions: 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 ...
+[CompactDetect] Compactness: 66/66 = 100% varying. Decision: too many varying bytes — no compression benefit, use full upload
+[CompactDetect] Per-position bit-widths: 0×1b  0×2b  0×4b  66×8b → 528 bits = 66 packed bytes (vs 66 current)
+[CompactDetect] 32B prefix would cover 32/66 positions if nibble-packed (vs 32 currently)
+  Data fits in GPU — single-chunk sort
+[Hybrid] Fast-path retry: parallel CPU std::sort (full-key, guaranteed correct)
+
+CSV,Quadro RTX 6000,1.00,8333333,1,0,5050.92,0.00,5050.92,0.1980,0.00,0.00,0.00,0.0
+	Command being timed: "./external_sort_tpch_compact --total-gb 1 --gen-to-file /tmp/stream_1gb.bin --no-verify"
+	User time (seconds): 13.01
+	System time (seconds): 21.60
+	Percent of CPU this job got: 113%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:30.52
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 18094124
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 8028628
+	Voluntary context switches: 365
+	Involuntary context switches: 896
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 1953128
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
+
+=== Test 2: 2GB streaming (gen-to-file) ===
+Generating 2.00 GB random data to /tmp/stream_2gb.bin...
+  Generated 2236962 / 16666666 records (13.4%)  Generated 4473924 / 16666666 records (26.8%)  Generated 6710886 / 16666666 records (40.3%)  Generated 8947848 / 16666666 records (53.7%)  Generated 11184810 / 16666666 records (67.1%)  Generated 13421772 / 16666666 records (80.5%)  Generated 15658734 / 16666666 records (94.0%)  Generated 16666666 / 16666666 records (100.0%)[Hybrid] Sample missed varying byte 64 on the fast path.
+  Falling back to full-key upload for a guaranteed-correct sort.
+
+  Generated in 11061 ms
+
+════════════════════════════════════════════════════
+  GPU External Merge Sort — Streaming Benchmark
+════════════════════════════════════════════════════
+GPU: Quadro RTX 6000 (25.4 GB HBM, 72 SMs, 672 GB/s BW)
+Data: 2.00 GB (16666666 records × 120 bytes) (from file) [STREAMING]
+
+Memory-mapping 2.00 GB from /tmp/stream_2gb.bin (streaming, no pinned alloc)...
+  Mapped in 0 ms (pages will fault on demand)
+
+[Streaming] Memory-efficient mode: output buffers use MAP_NORESERVE
+[Streaming] Peak RAM ~= 1× data size (vs ~2.5× in pinned mode)
+
+[ExternalSort] GPU: 21.05 GB free, budget: 13.68 GB
+[ExternalSort] Triple-buffer: 3 × 4.56 GB (38 M records each)
+[ExternalSort] Sorting 16666666 records (2.00 GB)
+
+[CompactDetect] 66/66 key bytes vary (full scan 16666K of 16M records, 237 ms)
+[CompactDetect] Varying byte positions: 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 ...
+[CompactDetect] Compactness: 66/66 = 100% varying. Decision: too many varying bytes — no compression benefit, use full upload
+[CompactDetect] Per-position bit-widths: 0×1b  0×2b  0×4b  66×8b → 528 bits = 66 packed bytes (vs 66 current)
+[CompactDetect] 32B prefix would cover 32/66 positions if nibble-packed (vs 32 currently)
+  Data fits in GPU — single-chunk sort
+[Hybrid] Retrying with full-key upload path...
+[ExternalSort] GPU: 25.02 GB free, budget: 16.26 GB
+[ExternalSort] Triple-buffer: 3 × 5.42 GB (45 M records each)
+[ExternalSort] Sorting 16666666 records (2.00 GB)
+
+[CompactDetect] 66/66 key bytes vary (full scan 16666K of 16M records, 0 ms)
+[CompactDetect] Varying byte positions: 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 ...
+[CompactDetect] Compactness: 66/66 = 100% varying. Decision: too many varying bytes — no compression benefit, use full upload
+[CompactDetect] Per-position bit-widths: 0×1b  0×2b  0×4b  66×8b → 528 bits = 66 packed bytes (vs 66 current)
+[CompactDetect] 32B prefix would cover 32/66 positions if nibble-packed (vs 32 currently)
+  Data fits in GPU — single-chunk sort
+[Hybrid] Fast-path retry: parallel CPU std::sort (full-key, guaranteed correct)
+
+CSV,Quadro RTX 6000,2.00,16666666,1,0,9957.58,0.00,9957.58,0.2009,0.00,0.00,0.00,0.0
+	Command being timed: "./external_sort_tpch_compact --total-gb 2 --gen-to-file /tmp/stream_2gb.bin --no-verify"
+	User time (seconds): 27.95
+	System time (seconds): 20.44
+	Percent of CPU this job got: 121%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:39.76
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 19961364
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 7352937
+	Voluntary context switches: 409
+	Involuntary context switches: 329
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 3906256
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
+
+=== Test 3: 1GB non-streaming (pinned) ===
+[Hybrid] Sample missed varying byte 64 on the fast path.
+  Falling back to full-key upload for a guaranteed-correct sort.
+════════════════════════════════════════════════════
+  GPU External Merge Sort — In-Memory Benchmark
+════════════════════════════════════════════════════
+GPU: Quadro RTX 6000 (25.4 GB HBM, 72 SMs, 672 GB/s BW)
+Data: 1.00 GB (8333333 records × 120 bytes) (random)
+
+Allocating 1.00 GB pinned host memory...
+Generating random data...
+  Generated in 7927 ms
+
+[ExternalSort] GPU: 25.03 GB free, budget: 16.27 GB
+[ExternalSort] Triple-buffer: 3 × 5.42 GB (45 M records each)
+[ExternalSort] Sorting 8333333 records (1.00 GB)
+
+[CompactDetect] 66/66 key bytes vary (full scan 8333K of 8M records, 138 ms)
+[CompactDetect] Varying byte positions: 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 ...
+[CompactDetect] Compactness: 66/66 = 100% varying. Decision: too many varying bytes — no compression benefit, use full upload
+[CompactDetect] Per-position bit-widths: 0×1b  0×2b  0×4b  66×8b → 528 bits = 66 packed bytes (vs 66 current)
+[CompactDetect] 32B prefix would cover 32/66 positions if nibble-packed (vs 32 currently)
+  Data fits in GPU — single-chunk sort
+[Hybrid] Retrying with full-key upload path...
+[ExternalSort] GPU: 12.40 GB free, budget: 8.06 GB
+[ExternalSort] Triple-buffer: 3 × 2.69 GB (22 M records each)
+[ExternalSort] Sorting 8333333 records (1.00 GB)
+
+[CompactDetect] 66/66 key bytes vary (full scan 8333K of 8M records, 0 ms)
+[CompactDetect] Varying byte positions: 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 ...
+[CompactDetect] Compactness: 66/66 = 100% varying. Decision: too many varying bytes — no compression benefit, use full upload
+[CompactDetect] Per-position bit-widths: 0×1b  0×2b  0×4b  66×8b → 528 bits = 66 packed bytes (vs 66 current)
+[CompactDetect] 32B prefix would cover 32/66 positions if nibble-packed (vs 32 currently)
+  Data fits in GPU — single-chunk sort
+[Hybrid] Fast-path retry: parallel CPU std::sort (full-key, guaranteed correct)
+
+CSV,Quadro RTX 6000,1.00,8333333,1,0,4471.12,0.00,4471.12,0.2237,0.00,0.00,0.00,0.0
+	Command being timed: "./external_sort_tpch_compact --total-gb 1 --no-verify"
+	User time (seconds): 15.34
+	System time (seconds): 16.35
+	Percent of CPU this job got: 109%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:29.00
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 16973616
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 6194938
+	Voluntary context switches: 404
+	Involuntary context switches: 257
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 0
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
+
+=== Test 4: 2GB non-streaming (pinned) ===
+[Hybrid] Sample missed varying byte 64 on the fast path.
+  Falling back to full-key upload for a guaranteed-correct sort.
+════════════════════════════════════════════════════
+  GPU External Merge Sort — In-Memory Benchmark
+════════════════════════════════════════════════════
+GPU: Quadro RTX 6000 (25.4 GB HBM, 72 SMs, 672 GB/s BW)
+Data: 2.00 GB (16666666 records × 120 bytes) (random)
+
+Allocating 2.00 GB pinned host memory...
+Generating random data...
+  Generated in 16845 ms
+
+[ExternalSort] GPU: 24.84 GB free, budget: 16.14 GB
+[ExternalSort] Triple-buffer: 3 × 5.38 GB (45 M records each)
+[ExternalSort] Sorting 16666666 records (2.00 GB)
+
+[CompactDetect] 66/66 key bytes vary (full scan 16666K of 16M records, 185 ms)
+[CompactDetect] Varying byte positions: 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 ...
+[CompactDetect] Compactness: 66/66 = 100% varying. Decision: too many varying bytes — no compression benefit, use full upload
+[CompactDetect] Per-position bit-widths: 0×1b  0×2b  0×4b  66×8b → 528 bits = 66 packed bytes (vs 66 current)
+[CompactDetect] 32B prefix would cover 32/66 positions if nibble-packed (vs 32 currently)
+  Data fits in GPU — single-chunk sort
+[Hybrid] Retrying with full-key upload path...
+[ExternalSort] GPU: 24.83 GB free, budget: 16.14 GB
+[ExternalSort] Triple-buffer: 3 × 5.38 GB (45 M records each)
+[ExternalSort] Sorting 16666666 records (2.00 GB)
+
+[CompactDetect] 66/66 key bytes vary (full scan 16666K of 16M records, 0 ms)
+[CompactDetect] Varying byte positions: 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 ...
+[CompactDetect] Compactness: 66/66 = 100% varying. Decision: too many varying bytes — no compression benefit, use full upload
+[CompactDetect] Per-position bit-widths: 0×1b  0×2b  0×4b  66×8b → 528 bits = 66 packed bytes (vs 66 current)
+[CompactDetect] 32B prefix would cover 32/66 positions if nibble-packed (vs 32 currently)
+  Data fits in GPU — single-chunk sort
+[Hybrid] Fast-path retry: parallel CPU std::sort (full-key, guaranteed correct)
+
+CSV,Quadro RTX 6000,2.00,16666666,1,0,11171.65,0.00,11171.65,0.1790,0.00,0.00,0.00,0.0
+	Command being timed: "./external_sort_tpch_compact --total-gb 2 --no-verify"
+	User time (seconds): 34.08
+	System time (seconds): 21.57
+	Percent of CPU this job got: 112%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:49.28
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 19840272
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 8383793
+	Voluntary context switches: 621
+	Involuntary context switches: 2333
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 0
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
+
+=== Cleanup ===
+Temp files cleaned up.
+=== Done ===
