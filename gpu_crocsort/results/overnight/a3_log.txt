@@ -1,0 +1,14 @@
+
+=== TPC-H SF10 ===
+  Sampling 10,000,000 of 59,986,052 rows
+  10,000,000 rows loaded in 32.1s
+  l_returnflag: FOR=1B bitpack=5b dict=1B mop=1.0B (2.8s)
+  l_linestatus: FOR=1B bitpack=4b dict=1B mop=1.0B (3.2s)
+Traceback (most recent call last):
+  File "scripts/a3_codec_ratios.py", line 223, in <module>
+    main()
+  File "scripts/a3_codec_ratios.py", line 153, in main
+    values = to_uint_array(df, col_name, col_type)
+  File "scripts/a3_codec_ratios.py", line 54, in to_uint_array
+    result[i] = (d - epoch).days if d else 0
+numpy.core._exceptions.UFuncTypeError: ufunc 'subtract' cannot use operands with types dtype('<M8[us]') and dtype('O')

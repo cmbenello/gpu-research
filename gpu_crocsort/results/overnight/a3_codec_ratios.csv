@@ -1,0 +1,157 @@
+scale_factor,column,codec,raw_bytes,compressed_bytes,ratio,bits_per_value,n_distinct,notes
+10,l_returnflag,FOR,1,1,1.0,5,3,range=17
+10,l_returnflag,FOR+bitpack,1,0.625,1.6,5,3,
+10,l_returnflag,dictionary,1,1,1.0,2,3,3 distinct values
+10,l_returnflag,mostly_op_dict,1,1,1.0,8,3,"coverage=100.0%, escapes=0"
+10,l_linestatus,FOR,1,1,1.0,4,2,range=9
+10,l_linestatus,FOR+bitpack,1,0.5,2.0,4,2,
+10,l_linestatus,dictionary,1,1,1.0,1,2,2 distinct values
+10,l_linestatus,mostly_op_dict,1,1,1.0,8,2,"coverage=100.0%, escapes=0"
+10,l_shipdate,FOR,4,2,2.0,12,2526,range=2525
+10,l_shipdate,FOR+bitpack,4,1.5,2.67,12,2526,
+10,l_shipdate,dictionary,4,2,2.0,12,2526,2526 distinct values
+10,l_shipdate,mostly_op_dict,4,8.133,0.49,65.1,2526,"coverage=10.8%, escapes=8916115"
+10,l_commitdate,FOR,4,2,2.0,12,2466,range=2465
+10,l_commitdate,FOR+bitpack,4,1.5,2.67,12,2466,
+10,l_commitdate,dictionary,4,2,2.0,12,2466,2466 distinct values
+10,l_commitdate,mostly_op_dict,4,8.132,0.49,65.1,2466,"coverage=10.9%, escapes=8914991"
+10,l_receiptdate,FOR,4,2,2.0,12,2555,range=2554
+10,l_receiptdate,FOR+bitpack,4,1.5,2.67,12,2555,
+10,l_receiptdate,dictionary,4,2,2.0,12,2555,2555 distinct values
+10,l_receiptdate,mostly_op_dict,4,8.133,0.49,65.1,2555,"coverage=10.8%, escapes=8915820"
+10,l_extendedprice,FOR,8,3,2.67,24,1275784,range=10404800
+10,l_extendedprice,FOR+bitpack,8,3.0,2.67,24,1275784,
+10,l_extendedprice,dictionary,8,3,2.67,21,1275784,1275784 distinct values
+10,l_extendedprice,mostly_op_dict,8,8.989,0.89,71.9,1275784,"coverage=0.1%, escapes=9986253"
+10,l_discount,FOR,8,1,8.0,4,11,range=10
+10,l_discount,FOR+bitpack,8,0.5,16.0,4,11,
+10,l_discount,dictionary,8,1,8.0,4,11,11 distinct values
+10,l_discount,mostly_op_dict,8,1,8.0,8,11,"coverage=100.0%, escapes=0"
+10,l_tax,FOR,8,1,8.0,4,9,range=8
+10,l_tax,FOR+bitpack,8,0.5,16.0,4,9,
+10,l_tax,dictionary,8,1,8.0,4,9,9 distinct values
+10,l_tax,mostly_op_dict,8,1,8.0,8,9,"coverage=100.0%, escapes=0"
+10,l_quantity,FOR,8,2,4.0,13,50,range=4900
+10,l_quantity,FOR+bitpack,8,1.625,4.92,13,50,
+10,l_quantity,dictionary,8,1,8.0,6,50,50 distinct values
+10,l_quantity,mostly_op_dict,8,1,8.0,8,50,"coverage=100.0%, escapes=0"
+10,l_orderkey,FOR,8,4,2.0,26,2950341,range=59999811
+10,l_orderkey,FOR+bitpack,8,3.25,2.46,26,2950341,
+10,l_orderkey,dictionary,8,3,2.67,22,2950341,2950341 distinct values
+10,l_orderkey,mostly_op_dict,8,8.999,0.89,72.0,2950341,"coverage=0.0%, escapes=9998222"
+10,l_partkey,FOR,4,3,1.33,21,1986661,range=1999999
+10,l_partkey,FOR+bitpack,4,2.625,1.52,21,1986661,
+10,l_partkey,dictionary,4,3,1.33,21,1986661,1986661 distinct values
+10,l_partkey,mostly_op_dict,4,8.997,0.44,72.0,1986661,"coverage=0.0%, escapes=9996023"
+10,l_suppkey,FOR,4,3,1.33,17,100000,range=99999
+10,l_suppkey,FOR+bitpack,4,2.125,1.88,17,100000,
+10,l_suppkey,dictionary,4,3,1.33,17,100000,100000 distinct values
+10,l_suppkey,mostly_op_dict,4,8.973,0.45,71.8,100000,"coverage=0.3%, escapes=9966379"
+10,l_linenumber,FOR,4,1,4.0,3,7,range=6
+10,l_linenumber,FOR+bitpack,4,0.375,10.67,3,7,
+10,l_linenumber,dictionary,4,1,4.0,3,7,7 distinct values
+10,l_linenumber,mostly_op_dict,4,1,4.0,8,7,"coverage=100.0%, escapes=0"
+50,l_returnflag,FOR,1,1,1.0,5,3,range=17
+50,l_returnflag,FOR+bitpack,1,0.625,1.6,5,3,
+50,l_returnflag,dictionary,1,1,1.0,2,3,3 distinct values
+50,l_returnflag,mostly_op_dict,1,1,1.0,8,3,"coverage=100.0%, escapes=0"
+50,l_linestatus,FOR,1,1,1.0,4,2,range=9
+50,l_linestatus,FOR+bitpack,1,0.5,2.0,4,2,
+50,l_linestatus,dictionary,1,1,1.0,1,2,2 distinct values
+50,l_linestatus,mostly_op_dict,1,1,1.0,8,2,"coverage=100.0%, escapes=0"
+50,l_shipdate,FOR,4,2,2.0,12,2526,range=2525
+50,l_shipdate,FOR+bitpack,4,1.5,2.67,12,2526,
+50,l_shipdate,dictionary,4,2,2.0,12,2526,2526 distinct values
+50,l_shipdate,mostly_op_dict,4,8.133,0.49,65.1,2526,"coverage=10.8%, escapes=8915653"
+50,l_commitdate,FOR,4,2,2.0,12,2466,range=2465
+50,l_commitdate,FOR+bitpack,4,1.5,2.67,12,2466,
+50,l_commitdate,dictionary,4,2,2.0,12,2466,2466 distinct values
+50,l_commitdate,mostly_op_dict,4,8.132,0.49,65.1,2466,"coverage=10.8%, escapes=8915299"
+50,l_receiptdate,FOR,4,2,2.0,12,2555,range=2554
+50,l_receiptdate,FOR+bitpack,4,1.5,2.67,12,2555,
+50,l_receiptdate,dictionary,4,2,2.0,12,2555,2555 distinct values
+50,l_receiptdate,mostly_op_dict,4,8.133,0.49,65.1,2555,"coverage=10.8%, escapes=8916789"
+50,l_extendedprice,FOR,8,3,2.67,24,2453724,range=10399798
+50,l_extendedprice,FOR+bitpack,8,3.0,2.67,24,2453724,
+50,l_extendedprice,dictionary,8,3,2.67,22,2453724,2453724 distinct values
+50,l_extendedprice,mostly_op_dict,8,8.994,0.89,71.9,2453724,"coverage=0.1%, escapes=9992052"
+50,l_discount,FOR,8,1,8.0,4,11,range=10
+50,l_discount,FOR+bitpack,8,0.5,16.0,4,11,
+50,l_discount,dictionary,8,1,8.0,4,11,11 distinct values
+50,l_discount,mostly_op_dict,8,1,8.0,8,11,"coverage=100.0%, escapes=0"
+50,l_tax,FOR,8,1,8.0,4,9,range=8
+50,l_tax,FOR+bitpack,8,0.5,16.0,4,9,
+50,l_tax,dictionary,8,1,8.0,4,9,9 distinct values
+50,l_tax,mostly_op_dict,8,1,8.0,8,9,"coverage=100.0%, escapes=0"
+50,l_quantity,FOR,8,2,4.0,13,50,range=4900
+50,l_quantity,FOR+bitpack,8,1.625,4.92,13,50,
+50,l_quantity,dictionary,8,1,8.0,6,50,50 distinct values
+50,l_quantity,mostly_op_dict,8,1,8.0,8,50,"coverage=100.0%, escapes=0"
+50,l_orderkey,FOR,8,4,2.0,29,4611479,range=299999974
+50,l_orderkey,FOR+bitpack,8,3.625,2.21,29,4611479,
+50,l_orderkey,dictionary,8,3,2.67,23,4611479,4611479 distinct values
+50,l_orderkey,mostly_op_dict,8,8.999,0.89,72.0,4611479,"coverage=0.0%, escapes=9998222"
+50,l_partkey,FOR,4,3,1.33,24,6328695,range=9999998
+50,l_partkey,FOR+bitpack,4,3.0,1.33,24,6328695,
+50,l_partkey,dictionary,4,3,1.33,23,6328695,6328695 distinct values
+50,l_partkey,mostly_op_dict,4,8.998,0.44,72.0,6328695,"coverage=0.0%, escapes=9998122"
+50,l_suppkey,FOR,4,3,1.33,19,500000,range=499999
+50,l_suppkey,FOR+bitpack,4,2.375,1.68,19,500000,
+50,l_suppkey,dictionary,4,3,1.33,19,500000,500000 distinct values
+50,l_suppkey,mostly_op_dict,4,8.992,0.44,71.9,500000,"coverage=0.1%, escapes=9990390"
+50,l_linenumber,FOR,4,1,4.0,3,7,range=6
+50,l_linenumber,FOR+bitpack,4,0.375,10.67,3,7,
+50,l_linenumber,dictionary,4,1,4.0,3,7,7 distinct values
+50,l_linenumber,mostly_op_dict,4,1,4.0,8,7,"coverage=100.0%, escapes=0"
+100,l_returnflag,FOR,1,1,1.0,5,3,range=17
+100,l_returnflag,FOR+bitpack,1,0.625,1.6,5,3,
+100,l_returnflag,dictionary,1,1,1.0,2,3,3 distinct values
+100,l_returnflag,mostly_op_dict,1,1,1.0,8,3,"coverage=100.0%, escapes=0"
+100,l_linestatus,FOR,1,1,1.0,4,2,range=9
+100,l_linestatus,FOR+bitpack,1,0.5,2.0,4,2,
+100,l_linestatus,dictionary,1,1,1.0,1,2,2 distinct values
+100,l_linestatus,mostly_op_dict,1,1,1.0,8,2,"coverage=100.0%, escapes=0"
+100,l_shipdate,FOR,4,2,2.0,12,2526,range=2525
+100,l_shipdate,FOR+bitpack,4,1.5,2.67,12,2526,
+100,l_shipdate,dictionary,4,2,2.0,12,2526,2526 distinct values
+100,l_shipdate,mostly_op_dict,4,8.134,0.49,65.1,2526,"coverage=10.8%, escapes=8916958"
+100,l_commitdate,FOR,4,2,2.0,12,2466,range=2465
+100,l_commitdate,FOR+bitpack,4,1.5,2.67,12,2466,
+100,l_commitdate,dictionary,4,2,2.0,12,2466,2466 distinct values
+100,l_commitdate,mostly_op_dict,4,8.133,0.49,65.1,2466,"coverage=10.8%, escapes=8916494"
+100,l_receiptdate,FOR,4,2,2.0,12,2553,range=2552
+100,l_receiptdate,FOR+bitpack,4,1.5,2.67,12,2553,
+100,l_receiptdate,dictionary,4,2,2.0,12,2553,2553 distinct values
+100,l_receiptdate,mostly_op_dict,4,8.133,0.49,65.1,2553,"coverage=10.8%, escapes=8915627"
+100,l_extendedprice,FOR,8,3,2.67,24,3207897,range=10393741
+100,l_extendedprice,FOR+bitpack,8,3.0,2.67,24,3207897,
+100,l_extendedprice,dictionary,8,3,2.67,22,3207897,3207897 distinct values
+100,l_extendedprice,mostly_op_dict,8,8.995,0.89,72.0,3207897,"coverage=0.1%, escapes=9993405"
+100,l_discount,FOR,8,1,8.0,4,11,range=10
+100,l_discount,FOR+bitpack,8,0.5,16.0,4,11,
+100,l_discount,dictionary,8,1,8.0,4,11,11 distinct values
+100,l_discount,mostly_op_dict,8,1,8.0,8,11,"coverage=100.0%, escapes=0"
+100,l_tax,FOR,8,1,8.0,4,9,range=8
+100,l_tax,FOR+bitpack,8,0.5,16.0,4,9,
+100,l_tax,dictionary,8,1,8.0,4,9,9 distinct values
+100,l_tax,mostly_op_dict,8,1,8.0,8,9,"coverage=100.0%, escapes=0"
+100,l_quantity,FOR,8,2,4.0,13,50,range=4900
+100,l_quantity,FOR+bitpack,8,1.625,4.92,13,50,
+100,l_quantity,dictionary,8,1,8.0,6,50,50 distinct values
+100,l_quantity,mostly_op_dict,8,1,8.0,8,50,"coverage=100.0%, escapes=0"
+100,l_orderkey,FOR,8,4,2.0,30,5955540,range=599999844
+100,l_orderkey,FOR+bitpack,8,3.75,2.13,30,5955540,
+100,l_orderkey,dictionary,8,3,2.67,23,5955540,5955540 distinct values
+100,l_orderkey,mostly_op_dict,8,8.999,0.89,72.0,5955540,"coverage=0.0%, escapes=9998222"
+100,l_partkey,FOR,4,4,1.0,25,7882383,range=19999997
+100,l_partkey,FOR+bitpack,4,3.125,1.28,25,7882383,
+100,l_partkey,dictionary,4,3,1.33,23,7882383,7882383 distinct values
+100,l_partkey,mostly_op_dict,4,8.999,0.44,72.0,7882383,"coverage=0.0%, escapes=9998453"
+100,l_suppkey,FOR,4,3,1.33,20,999949,range=999999
+100,l_suppkey,FOR+bitpack,4,2.5,1.6,20,999949,
+100,l_suppkey,dictionary,4,3,1.33,20,999949,999949 distinct values
+100,l_suppkey,mostly_op_dict,4,8.995,0.44,72.0,999949,"coverage=0.1%, escapes=9993965"
+100,l_linenumber,FOR,4,1,4.0,3,7,range=6
+100,l_linenumber,FOR+bitpack,4,0.375,10.67,3,7,
+100,l_linenumber,dictionary,4,1,4.0,3,7,7 distinct values
+100,l_linenumber,mostly_op_dict,4,1,4.0,8,7,"coverage=100.0%, escapes=0"

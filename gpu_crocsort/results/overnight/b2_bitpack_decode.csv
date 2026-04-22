@@ -1,0 +1,6 @@
+B2_bitpack_decode,100000000,8,1.11,450.73
+B2_bitpack_decode,100000000,12,1.10,497.98
+B2_bitpack_decode,100000000,16,1.12,536.20
+B2_bitpack_decode,100000000,20,1.18,549.11
+B2_bitpack_decode,100000000,24,1.24,562.34
+B2_bitpack_decode,100000000,32,1.41,567.90

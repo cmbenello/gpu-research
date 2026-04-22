@@ -1,0 +1,7 @@
+experiment,N,width_bytes,time_ms,throughput_GBs
+B1_FOR_decode,100000000,1,1.07,466.48
+B1_FOR_decode,100000000,2,1.10,546.40
+B1_FOR_decode,100000000,4,1.41,567.86
+B1_FOR_decode,300000000,1,3.18,471.95
+B1_FOR_decode,300000000,2,3.29,547.67
+B1_FOR_decode,300000000,4,4.22,568.90

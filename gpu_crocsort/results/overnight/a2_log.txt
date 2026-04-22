@@ -1,0 +1,14 @@
+
+=== TPC-H SF10 ===
+  Total rows: 59,986,052
+  Sampling 10,000,000 rows for byte-level analysis...
+  Fetched 10,000,000 rows in 31.8s
+  Encoding keys...
+Traceback (most recent call last):
+  File "scripts/a2_compact_key_baseline.py", line 166, in <module>
+    main()
+  File "scripts/a2_compact_key_baseline.py", line 124, in main
+    keys = encode_all_keys(df)
+  File "scripts/a2_compact_key_baseline.py", line 52, in encode_all_keys
+    days = (d - epoch).days if d else 0
+numpy.core._exceptions.UFuncTypeError: ufunc 'subtract' cannot use operands with types dtype('<M8[us]') and dtype('O')
