@@ -173,12 +173,16 @@ See table in Decision Number 3 above. K=16 shows the expected branch-prediction 
 |-------|------|------|------|-----------|
 | SF10 | 60M | 7.2 GB | 1.29s | 5.6 GB/s |
 | SF50 | 300M | 36 GB | 2.72s | 13.2 GB/s |
-| SF100 | 600M | 72 GB | pending | generating data |
+| SF100 | 600M | 72 GB | 3.65s (median) | 19.8 GB/s |
 
-## Still Running / Pending
+**SF100 detail (5 runs):** 3874 / 3645 / 3677 / 3627 / 3608 ms. Median 3645ms. No fixup needed — 27/66 varying bytes fit in 32B prefix, so GPU 16B merge has NO TIES. Sort: ~1980ms, merge+gather: ~1660ms.
 
-- **E1**: SF100 baseline sort (generating 72 GB binary, ~14/72 GB done)
-- **E2**: Chunk sweep (after SF100 baseline)
+**Scaling:** SF10→SF50→SF100 = 1.29s→2.72s→3.65s. Near-linear scaling from SF50→SF100 (2.0x data, 1.34x time) because SF100 avoids fixup entirely. SF50 is slower per-GB because its 61 varying byte positions overflow 32B and require expensive CPU fixup.
+
+## Completed Experiments
+
+- **E1**: SF100 baseline sort — 3.65s median (5 runs, all verified)
+- **E2**: Chunk sweep — not applicable (binary auto-selects chunk size from GPU memory, no override)
 - **C1**: Not run (FOR doesn't improve compact key byte count — see Decision 1)
 
 ## Recommendations for Next Two Weeks
