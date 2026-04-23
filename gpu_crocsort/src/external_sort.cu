@@ -2305,10 +2305,10 @@ run_generation:
 
         double gather_ms = 0;
         {
-            // Forward gather with software prefetching.
-            // 512-ahead prefetch hides DRAM latency; NT stores avoid write cache pollution.
-            // At ~19 GB/s this is near DDR4 peak (72GB total traffic / 1.85s ≈ 39 GB/s).
-            int PREFETCH_AHEAD = 512;
+            // Forward gather: random reads from h_data, sequential NT writes to h_output.
+            // Prefetch 128 records ahead — optimal from sweep (128×120B=15KB fits L1 TLB,
+            // larger distances thrash TLB and hurt: 512→19.7 GB/s, 128→20.2 GB/s).
+            constexpr int PF_AHEAD = 128;
             std::vector<std::thread> threads;
             for (int t = 0; t < hw_threads; t++) {
                 threads.emplace_back([&, t]() {
@@ -2316,8 +2316,8 @@ run_generation:
                     uint64_t hi = std::min(lo + chunk_per_t, num_records);
                     constexpr int WORDS = RECORD_SIZE / 8;
                     for (uint64_t i = lo; i < hi; i++) {
-                        if (i + PREFETCH_AHEAD < hi)
-                            __builtin_prefetch(h_data + (uint64_t)h_perm[i+PREFETCH_AHEAD] * RECORD_SIZE, 0);
+                        if (i + PF_AHEAD < hi)
+                            __builtin_prefetch(h_data + (uint64_t)h_perm[i+PF_AHEAD] * RECORD_SIZE, 0, 0);
                         const int64_t* src = (const int64_t*)(h_data + (uint64_t)h_perm[i] * RECORD_SIZE);
                         int64_t* dst = (int64_t*)(h_output + i * RECORD_SIZE);
                         for (int w = 0; w < WORDS; w++)
@@ -2687,13 +2687,38 @@ int main(int argc, char** argv) {
 
     printf("Allocating %.2f GB pinned host memory...\n", total_bytes/1e9);
     uint8_t* h_data;
-    cudaError_t alloc_err = cudaMallocHost(&h_data, total_bytes);
-    if (alloc_err != cudaSuccess) {
-        printf("  cudaMallocHost failed, falling back to malloc\n");
-        h_data = (uint8_t*)malloc(total_bytes);
+    bool h_data_is_mmap = false;
+
+    // Try mmap + huge pages first: reduces TLB pressure for random gather reads
+    // (36GB / 4KB = 9M page table entries → 36GB / 2MB = 18K with huge pages)
+    h_data = (uint8_t*)mmap(nullptr, total_bytes, PROT_READ|PROT_WRITE,
+                            MAP_PRIVATE|MAP_ANONYMOUS|MAP_POPULATE, -1, 0);
+    if (h_data != MAP_FAILED) {
+        madvise(h_data, total_bytes, MADV_HUGEPAGE);
+        // Pin for GPU DMA access (equivalent to cudaMallocHost but keeps huge pages)
+        cudaError_t reg_err = cudaHostRegister(h_data, total_bytes, cudaHostRegisterDefault);
+        if (reg_err != cudaSuccess) {
+            printf("  cudaHostRegister failed (%s), falling back to cudaMallocHost\n",
+                   cudaGetErrorString(reg_err));
+            munmap(h_data, total_bytes);
+            h_data = nullptr;
+        } else {
+            h_data_is_mmap = true;
+            printf("  Using mmap + huge pages + cudaHostRegister\n");
+        }
+    } else {
+        h_data = nullptr;
+    }
+
+    if (!h_data) {
+        cudaError_t alloc_err = cudaMallocHost(&h_data, total_bytes);
+        if (alloc_err != cudaSuccess) {
+            printf("  cudaMallocHost failed, falling back to malloc\n");
+            h_data = (uint8_t*)malloc(total_bytes);
+        }
+        if (h_data) madvise(h_data, total_bytes, MADV_HUGEPAGE);
     }
     if (!h_data) { fprintf(stderr,"allocation failed\n"); return 1; }
-    madvise(h_data, total_bytes, MADV_HUGEPAGE);
 
     if (input_file) {
         printf("Loading from %s...\n", input_file);
@@ -2771,8 +2796,12 @@ int main(int argc, char** argv) {
                (result.pcie_h2d_gb + result.pcie_d2h_gb) / (total_bytes/1e9));
     }
 
-    if (alloc_err == cudaSuccess) cudaFreeHost(h_data);
-    else free(h_data);
+    if (h_data_is_mmap) {
+        cudaHostUnregister(h_data);
+        munmap(h_data, total_bytes);
+    } else {
+        cudaFreeHost(h_data);
+    }
     return 0;
 }
 #endif
