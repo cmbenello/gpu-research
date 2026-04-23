@@ -1,0 +1,190 @@
+════════════════════════════════════════════════════
+  GPU External Merge Sort — Streaming Benchmark
+════════════════════════════════════════════════════
+GPU: Quadro RTX 6000 (25.4 GB HBM, 72 SMs, 672 GB/s BW)
+Data: 7.20 GB (59986052 records × 120 bytes) (from file)
+
+Allocating 7.20 GB pinned host memory...
+Loading from /tmp/lineitem_sf10_normalized.bin...
+  Loaded 7.20 GB in 1910 ms (3.77 GB/s)
+
+
+══════════ Experiment run 1/5 ══════════
+[ExternalSort] GPU: 25.20 GB free, budget: 16.38 GB
+[ExternalSort] Triple-buffer: 3 × 5.46 GB (46 M records each)
+[ExternalSort] Sorting 59986052 records (7.20 GB)
+
+== Step 1+2: Key Upload ==
+  Uploaded 3.96 GB keys (strided, GPU-direct) in 14 ms (524.43 GB/s effective)
+== Step 3: GPU CUB Radix Sort ==
+  LSD sort: 9 passes for 66-byte key
+    Pass 1 (bytes 64-65): 0.0 ms
+    Pass 2 (bytes 56-63): 0.0 ms
+    Pass 3 (bytes 48-55): 0.0 ms
+    Pass 4 (bytes 40-47): 0.0 ms
+    Pass 5 (bytes 32-39): 0.0 ms
+    Pass 6 (bytes 24-31): 0.0 ms
+    Pass 7 (bytes 16-23): 0.0 ms
+    Pass 8 (bytes 8-15): 0.0 ms
+    Pass 9 (bytes 0-7): 0.0 ms
+  Sorted 59986052 keys in 1023 ms
+== Step 4: Download Permutation ==
+  Downloaded 0.24 GB perm in 21 ms
+== Step 5: CPU Gather ==
+  Gathered 7.20 GB in 236 ms (30.45 GB/s)
+
+[ExternalSort] ═══════════════════════════════════════
+  DONE: 1294 ms (gen: 1057 + merge: 236)
+  Throughput: 5.56 GB/s
+  Runs: 1 | Merge passes: 1
+  PCIe: 4.0 GB H2D + 0.2 GB D2H = 4.2 GB total (0.6x amplification)
+═══════════════════════════════════════════════════════
+
+Verifying...
+  PASS: 59986052 records sorted
+
+CSV,Quadro RTX 6000,7.20,59986052,1,1,1057.39,236.39,1293.77,5.5638,3.96,0.24,4.20,0.6
+
+══════════ Experiment run 2/5 ══════════
+[ExternalSort] GPU: 25.20 GB free, budget: 16.38 GB
+[ExternalSort] Triple-buffer: 3 × 5.46 GB (46 M records each)
+[ExternalSort] Sorting 59986052 records (7.20 GB)
+
+== Step 1+2: Key Upload ==
+  Uploaded 3.96 GB keys (strided, GPU-direct) in 14 ms (523.72 GB/s effective)
+== Step 3: GPU CUB Radix Sort ==
+  LSD sort: 9 passes for 66-byte key
+    Pass 1 (bytes 64-65): 0.0 ms
+    Pass 2 (bytes 56-63): 0.0 ms
+    Pass 3 (bytes 48-55): 0.0 ms
+    Pass 4 (bytes 40-47): 0.0 ms
+    Pass 5 (bytes 32-39): 0.0 ms
+    Pass 6 (bytes 24-31): 0.0 ms
+    Pass 7 (bytes 16-23): 0.0 ms
+    Pass 8 (bytes 8-15): 0.0 ms
+    Pass 9 (bytes 0-7): 0.0 ms
+  Sorted 59986052 keys in 1023 ms
+== Step 4: Download Permutation ==
+  Downloaded 0.24 GB perm in 21 ms
+== Step 5: CPU Gather ==
+  Gathered 7.20 GB in 214 ms (33.59 GB/s)
+
+[ExternalSort] ═══════════════════════════════════════
+  DONE: 1272 ms (gen: 1057 + merge: 214)
+  Throughput: 5.66 GB/s
+  Runs: 1 | Merge passes: 1
+  PCIe: 4.0 GB H2D + 0.2 GB D2H = 4.2 GB total (0.6x amplification)
+═══════════════════════════════════════════════════════
+
+Verifying...
+  PASS: 59986052 records sorted
+
+CSV,Quadro RTX 6000,7.20,59986052,1,1,1057.34,214.29,1271.64,5.6607,3.96,0.24,4.20,0.6
+
+══════════ Experiment run 3/5 ══════════
+[ExternalSort] GPU: 25.20 GB free, budget: 16.38 GB
+[ExternalSort] Triple-buffer: 3 × 5.46 GB (46 M records each)
+[ExternalSort] Sorting 59986052 records (7.20 GB)
+
+== Step 1+2: Key Upload ==
+  Uploaded 3.96 GB keys (strided, GPU-direct) in 14 ms (524.72 GB/s effective)
+== Step 3: GPU CUB Radix Sort ==
+  LSD sort: 9 passes for 66-byte key
+    Pass 1 (bytes 64-65): 0.0 ms
+    Pass 2 (bytes 56-63): 0.0 ms
+    Pass 3 (bytes 48-55): 0.0 ms
+    Pass 4 (bytes 40-47): 0.0 ms
+    Pass 5 (bytes 32-39): 0.0 ms
+    Pass 6 (bytes 24-31): 0.0 ms
+    Pass 7 (bytes 16-23): 0.0 ms
+    Pass 8 (bytes 8-15): 0.0 ms
+    Pass 9 (bytes 0-7): 0.0 ms
+  Sorted 59986052 keys in 1023 ms
+== Step 4: Download Permutation ==
+  Downloaded 0.24 GB perm in 21 ms
+== Step 5: CPU Gather ==
+  Gathered 7.20 GB in 238 ms (30.22 GB/s)
+
+[ExternalSort] ═══════════════════════════════════════
+  DONE: 1296 ms (gen: 1057 + merge: 238)
+  Throughput: 5.56 GB/s
+  Runs: 1 | Merge passes: 1
+  PCIe: 4.0 GB H2D + 0.2 GB D2H = 4.2 GB total (0.6x amplification)
+═══════════════════════════════════════════════════════
+
+Verifying...
+  PASS: 59986052 records sorted
+
+CSV,Quadro RTX 6000,7.20,59986052,1,1,1057.33,238.21,1295.54,5.5562,3.96,0.24,4.20,0.6
+
+══════════ Experiment run 4/5 ══════════
+[ExternalSort] GPU: 25.20 GB free, budget: 16.38 GB
+[ExternalSort] Triple-buffer: 3 × 5.46 GB (46 M records each)
+[ExternalSort] Sorting 59986052 records (7.20 GB)
+
+== Step 1+2: Key Upload ==
+  Uploaded 3.96 GB keys (strided, GPU-direct) in 14 ms (525.36 GB/s effective)
+== Step 3: GPU CUB Radix Sort ==
+  LSD sort: 9 passes for 66-byte key
+    Pass 1 (bytes 64-65): 0.0 ms
+    Pass 2 (bytes 56-63): 0.0 ms
+    Pass 3 (bytes 48-55): 0.0 ms
+    Pass 4 (bytes 40-47): 0.0 ms
+    Pass 5 (bytes 32-39): 0.0 ms
+    Pass 6 (bytes 24-31): 0.0 ms
+    Pass 7 (bytes 16-23): 0.0 ms
+    Pass 8 (bytes 8-15): 0.0 ms
+    Pass 9 (bytes 0-7): 0.0 ms
+  Sorted 59986052 keys in 1023 ms
+== Step 4: Download Permutation ==
+  Downloaded 0.24 GB perm in 21 ms
+== Step 5: CPU Gather ==
+  Gathered 7.20 GB in 215 ms (33.48 GB/s)
+
+[ExternalSort] ═══════════════════════════════════════
+  DONE: 1272 ms (gen: 1057 + merge: 215)
+  Throughput: 5.66 GB/s
+  Runs: 1 | Merge passes: 1
+  PCIe: 4.0 GB H2D + 0.2 GB D2H = 4.2 GB total (0.6x amplification)
+═══════════════════════════════════════════════════════
+
+Verifying...
+  PASS: 59986052 records sorted
+
+CSV,Quadro RTX 6000,7.20,59986052,1,1,1057.01,215.00,1272.01,5.6590,3.96,0.24,4.20,0.6
+
+══════════ Experiment run 5/5 ══════════
+[ExternalSort] GPU: 25.20 GB free, budget: 16.38 GB
+[ExternalSort] Triple-buffer: 3 × 5.46 GB (46 M records each)
+[ExternalSort] Sorting 59986052 records (7.20 GB)
+
+== Step 1+2: Key Upload ==
+  Uploaded 3.96 GB keys (strided, GPU-direct) in 14 ms (525.22 GB/s effective)
+== Step 3: GPU CUB Radix Sort ==
+  LSD sort: 9 passes for 66-byte key
+    Pass 1 (bytes 64-65): 0.0 ms
+    Pass 2 (bytes 56-63): 0.0 ms
+    Pass 3 (bytes 48-55): 0.0 ms
+    Pass 4 (bytes 40-47): 0.0 ms
+    Pass 5 (bytes 32-39): 0.0 ms
+    Pass 6 (bytes 24-31): 0.0 ms
+    Pass 7 (bytes 16-23): 0.0 ms
+    Pass 8 (bytes 8-15): 0.0 ms
+    Pass 9 (bytes 0-7): 0.0 ms
+  Sorted 59986052 keys in 1023 ms
+== Step 4: Download Permutation ==
+  Downloaded 0.24 GB perm in 21 ms
+== Step 5: CPU Gather ==
+  Gathered 7.20 GB in 235 ms (30.66 GB/s)
+
+[ExternalSort] ═══════════════════════════════════════
+  DONE: 1292 ms (gen: 1057 + merge: 235)
+  Throughput: 5.57 GB/s
+  Runs: 1 | Merge passes: 1
+  PCIe: 4.0 GB H2D + 0.2 GB D2H = 4.2 GB total (0.6x amplification)
+═══════════════════════════════════════════════════════
+
+Verifying...
+  PASS: 59986052 records sorted
+
+CSV,Quadro RTX 6000,7.20,59986052,1,1,1057.05,234.80,1291.85,5.5721,3.96,0.24,4.20,0.6

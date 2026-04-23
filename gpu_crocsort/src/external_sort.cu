@@ -29,14 +29,12 @@
 #include <thrust/device_ptr.h>
 #include <chrono>
 #include <thread>
-#include <array>
-#include <atomic>
-#include <mutex>
 #include <cub/cub.cuh>
 #include <sys/mman.h>  // madvise for huge pages
 #include <fcntl.h>     // open
 #include <unistd.h>    // close
 #include <emmintrin.h> // _mm_stream_si64, _mm_sfence
+#include "sample_sort.cuh"
 
 // Forward-declare the in-HBM sort from host_sort.cu
 enum MergeStrategy { STRATEGY_2WAY, STRATEGY_KWAY };
@@ -223,360 +221,142 @@ __global__ void extract_uint64_chunk_kernel(
 
 #ifdef USE_COMPACT_KEY
 static constexpr int COMPACT_KEY_SIZE = 32;
-// Runtime-detected compact map (no hardcoded TPC-H values).
-// Host-side: filled by detect_compact_map() at sort entry.
-// Device-side: a plain cudaMalloc'd buffer, NOT __constant__ memory.
-// We deliberately avoid cudaMemcpyToSymbol on a __constant__ symbol because
-// that forces eager CUDA module loading, which triggers a PTX→sm_75 JIT
-// failure on Turing ("no kernel image available"). Using cudaMalloc +
-// cudaMemcpy + pass-by-pointer keeps module loading lazy so only the kernels
-// we actually launch get JIT'd.
-static int g_compact_map[64];
-static int g_compact_count = 0;
-static int* d_compact_map_ptr = nullptr;   // device buffer, size 64*sizeof(int)
-// Per-byte observed min/max from detection (full KEY_SIZE indexed).
-// For bytes NOT in the compact map, g_sample_min[b] == g_sample_max[b] is the
-// "expected constant value" V[b] that extraction verifies against every record.
-static uint8_t g_sample_min[KEY_SIZE];
-static uint8_t g_sample_max[KEY_SIZE];
-// Set to the first (lowest) byte position where extraction found variation the
-// sample missed, or -1 if none. Primarily diagnostic now — the hybrid
-// canonical/exception fallback below handles the correctness side.
-static std::atomic<int> g_violated_byte{-1};
+// Source byte offsets within the RECORD for each compact key byte
+__constant__ int d_compact_map[26] = {
+    0, 1,           // returnflag, linestatus
+    4, 5,           // shipdate varying
+    8, 9,           // commitdate varying
+    12, 13,         // receiptdate varying
+    19, 20, 21,     // extprice varying (3 bytes)
+    29,             // discount varying
+    37,             // tax varying
+    44, 45,         // quantity varying
+    51, 52, 53,     // orderkey varying
+    54, 55, 56, 57, // partkey (all 4 bytes)
+    59, 60, 61,     // suppkey varying
+    65              // linenumber varying
+};
 
-// Hybrid exception tracking. During CPU extraction each record is classified
-// as canonical (all non-mapped bytes == V[b]) or exception. Exceptions are
-// accumulated into a global list (indexed by original record index) and after
-// the GPU canonical sort we CPU-sort the exceptions by full key and merge-in
-// at the permutation level. The GPU never sees exceptions' true keys, but
-// canonicals' compact order == full-key order by construction, so the merge
-// is correct.
-//
-// Global accumulator + mutex. Exceptions are expected to be rare so simple
-// locking is fine; if we ever see >1% exception rate the merge becomes the
-// bottleneck anyway.
-static std::vector<uint64_t> g_exception_indices;  // original record indices
-static std::mutex g_exception_mtx;
-
-// Hybrid fallback flag. When the compact path detects exceptions we rerun
-// sort() from the caller with this set, which takes the standard full-record
-// upload path instead. That path uploads full 66-byte keys to the GPU, so no
-// sampling-based assumption can affect correctness.
-static bool g_force_no_compact = false;
-static bool g_disable_compact = false;
-// true if we have verified against full data (sample was confirmed complete)
-static bool g_map_full_scan_verified = false;
-
-// TODO: measure the contribution of each stage independently:
-//   (1) how much does compact-key compression alone shrink the key / speed up sort?
-//   (2) how much additional compression/benefit does OVC give on top of that?
-// Want per-stage numbers (key bytes, PCIe bytes, CUB pass count, wall time) so we
-// can tell whether OVC is still pulling weight once the key is already compact.
-//
-// TODO: design a compression method specifically tailored to OVC.
-// Current approach (byte-position varies-or-not) is order-preserving but coarse —
-// keeps a whole byte if any bit varies. OVC compares adjacent sorted records and
-// encodes the first differing position, so an OVC-aware compression could:
-//   - use per-byte value ranges (min/max from sample) to pack at bit granularity
-//   - detect correlated byte groups that always co-vary (encode jointly)
-//   - exploit that OVC needs order-preserving equivalence, not exact bytes
-// Goal: shrink compact key below 32B (fewer CUB passes) while staying OVC-compatible.
-//
-// Detect which byte positions vary across a SAMPLE of records.
-//
-// Strategy: stratified random sampling. Divide the data into N buckets of size
-// stride; pick one random index from each bucket. Combines stride coverage
-// (sees all regions) with random offset (avoids periodic-alignment pathology).
-//
-// Probabilistic: a byte that varies in only K records (K << total) has
-// (K/total)^N probability of being missed at sample size N. For 1M sample
-// of 600M records, missing a byte that varies in 1% of records has prob
-// (0.99)^1M ≈ 0. Missing one that varies in 0.0001% (60 records) has prob
-// (0.9999999)^1M ≈ 90%. So sub-rare variations CAN be missed.
-//
-// Tunable via COMPACT_SAMPLE env var. Future work: characterize miss
-// probability vs. sample size on real datasets, compare strategies:
-//   - pure stride        (cheap, vulnerable to alignment)
-//   - stratified random  (current default — balanced)
-//   - reservoir sampling (uniform but more compute)
-//   - full scan          (deterministic, ~1-2s for 72GB)
-// Also returns, for every KEY_SIZE byte position:
-//   mn_out[b], mx_out[b] — min/max observed in the sample.
-// For bytes NOT in the compact map, mn==mx==V[b] is the "expected constant value"
-// the caller will later verify against every record in a full scan.
-static int detect_compact_map(const uint8_t* h_data, uint64_t num_records,
-                               int* h_map_out,
-                               uint8_t* mn_out = nullptr,
-                               uint8_t* mx_out = nullptr) {
-    uint64_t sample_target = 1000000;
-    if (const char* e = getenv("COMPACT_SAMPLE")) {
-        long v = atol(e);
-        if (v > 0) sample_target = (uint64_t)v;
-    }
-    // Full scan for datasets under 50M records (~6 GB). Sampling 1M from 19M
-    // can miss rare byte variations (e.g. timestamp high bytes that barely
-    // change over a few months). Full scan adds ~30-50ms — negligible.
-    if (num_records <= 50000000) sample_target = num_records;
-    uint64_t sample_n = std::min(num_records, sample_target);
-    uint64_t stride = std::max((uint64_t)1, num_records / sample_n);
-    uint64_t n_buckets = (num_records + stride - 1) / stride;
-
-    uint64_t seed0 = 0x12345678ULL;
-    if (const char* e = getenv("COMPACT_SEED")) seed0 = (uint64_t)atoll(e);
-
-    int nthreads = std::max(1u, std::thread::hardware_concurrency());
-    if (const char* e = getenv("COMPACT_THREADS")) {
-        long v = atol(e);
-        if (v > 0) nthreads = (int)v;
-    }
-    if ((uint64_t)nthreads > n_buckets) nthreads = (int)n_buckets;
-    if (nthreads < 1) nthreads = 1;
-
-    // Per-thread min/max + per-byte distinct-value bitmap (256 bits = 32 bytes
-    // per byte position). Distinct count = popcount, used as an entropy proxy
-    // for byte selection when the candidate count exceeds the compact map
-    // capacity (COMPACT_KEY_SIZE = 32). High-distinct-count bytes are
-    // discriminating; low-count bytes (constants or near-constants) are not.
-    std::vector<std::array<uint8_t, KEY_SIZE>> tmn(nthreads), tmx(nthreads);
-    // 32 B per byte position per thread = ~2 KB per thread for KEY_SIZE=66.
-    std::vector<std::array<std::array<uint32_t, 8>, KEY_SIZE>> tdistinct(nthreads);
-    for (int t = 0; t < nthreads; t++) {
-        for (int b = 0; b < KEY_SIZE; b++) {
-            tmn[t][b] = 0xff; tmx[t][b] = 0;
-            for (int w = 0; w < 8; w++) tdistinct[t][b][w] = 0;
-        }
-    }
-
-    auto worker = [&](int tid, uint64_t bucket_lo, uint64_t bucket_hi) {
-        uint64_t seed = seed0 ^ (0x9e3779b97f4a7c15ULL * (uint64_t)(tid + 1));
-        uint8_t* mn = tmn[tid].data();
-        uint8_t* mx = tmx[tid].data();
-        auto& dis = tdistinct[tid];
-        for (uint64_t bucket = bucket_lo; bucket < bucket_hi; bucket++) {
-            seed = seed * 1664525ULL + 1013904223ULL;
-            uint64_t b_lo = bucket * stride;
-            uint64_t b_hi = std::min(b_lo + stride, num_records);
-            uint64_t off = (b_hi > b_lo) ? (seed % (b_hi - b_lo)) : 0;
-            uint64_t i = b_lo + off;
-            const uint8_t* rec = h_data + i * RECORD_SIZE;
-            for (int b = 0; b < KEY_SIZE; b++) {
-                uint8_t v = rec[b];
-                if (v < mn[b]) mn[b] = v;
-                if (v > mx[b]) mx[b] = v;
-                dis[b][v >> 5] |= (1u << (v & 31));
-            }
-        }
-    };
-
-    std::vector<std::thread> threads;
-    uint64_t per = (n_buckets + nthreads - 1) / nthreads;
-    for (int t = 0; t < nthreads; t++) {
-        uint64_t lo = (uint64_t)t * per;
-        uint64_t hi = std::min(lo + per, n_buckets);
-        if (lo < hi) threads.emplace_back(worker, t, lo, hi);
-    }
-    for (auto& th : threads) th.join();
-
-    uint8_t mn[KEY_SIZE], mx[KEY_SIZE];
-    uint32_t merged_distinct[KEY_SIZE][8] = {{0}};
-    for (int b = 0; b < KEY_SIZE; b++) { mn[b] = 0xff; mx[b] = 0; }
-    for (int t = 0; t < nthreads; t++) {
-        for (int b = 0; b < KEY_SIZE; b++) {
-            if (tmn[t][b] < mn[b]) mn[b] = tmn[t][b];
-            if (tmx[t][b] > mx[b]) mx[b] = tmx[t][b];
-            for (int w = 0; w < 8; w++) merged_distinct[b][w] |= tdistinct[t][b][w];
-        }
-    }
-    // Compute per-byte distinct count via popcount.
-    int dc[KEY_SIZE];
-    for (int b = 0; b < KEY_SIZE; b++) {
-        int cnt = 0;
-        for (int w = 0; w < 8; w++) cnt += __builtin_popcount(merged_distinct[b][w]);
-        dc[b] = cnt;
-    }
-
-    // Build candidate list (bytes where min != max).
-    int candidates[KEY_SIZE]; int ncand = 0;
-    for (int b = 0; b < KEY_SIZE; b++) if (mn[b] != mx[b]) candidates[ncand++] = b;
-
-    // SELECTION POLICY:
-    //   "position" (DEFAULT, correctness-correct): take first 64 candidates by source position.
-    //   "entropy"  (COMPACT_SELECT=entropy): rank candidates by distinct count desc, top N.
-    //
-    // ⚠ BUG (overnight 2026-04-15): entropy selection produces INCORRECT sort
-    // order. If two records differ at byte B (NOT in top-32) AND byte P > B
-    // (IN top-32), compact compares at P first and disagrees with full-key lex
-    // which compares at B first. The only way compact-key order matches
-    // full-key lex order on canonicals is if compact bytes form a SOURCE-
-    // POSITION-ORDERED PREFIX of the varying bytes. Entropy mode violates this
-    // and should NOT be used for correctness-sensitive sort. Retained as
-    // COMPACT_SELECT=entropy for the paper's negative-result section only.
-    bool entropy_select = false;
-    if (const char* e = getenv("COMPACT_SELECT")) {
-        if (std::string(e) == "entropy") entropy_select = true;
-        else if (std::string(e) == "position") entropy_select = false;
-    }
-
-    // Entropy selection rule: when there are more candidates than the compact
-    // KEY can hold (COMPACT_KEY_SIZE=32), pick the top 32 by distinct-value
-    // count (entropy proxy). Sort those 32 by source byte position so the
-    // compact-key lex order still matches a sub-projection of the full-key
-    // lex order. The REMAINING candidates go into map[32..63] (also sorted by
-    // position) so verification + fixup logic still knows about every varying
-    // byte. The compact KEY is built from map[0..32] (caller caps at
-    // COMPACT_KEY_SIZE), so high-entropy bytes land in the GPU prefix.
-    if (entropy_select && ncand > COMPACT_KEY_SIZE) {
-        std::vector<std::pair<int, int>> pairs(ncand);   // (-distinct, byte_pos)
-        for (int i = 0; i < ncand; i++) pairs[i] = {-dc[candidates[i]], candidates[i]};
-        std::sort(pairs.begin(), pairs.end());
-        // Top 32 by entropy → mark as "in compact key".
-        std::vector<int> top32; top32.reserve(COMPACT_KEY_SIZE);
-        std::vector<int> rest;  rest.reserve(ncand - COMPACT_KEY_SIZE);
-        for (int i = 0; i < ncand; i++) {
-            if (i < COMPACT_KEY_SIZE) top32.push_back(pairs[i].second);
-            else                       rest.push_back(pairs[i].second);
-        }
-        std::sort(top32.begin(), top32.end());
-        std::sort(rest.begin(), rest.end());
-        // Place top32 first (these will be the compact key bytes), then rest.
-        int n_total = std::min(64, ncand);
-        for (int i = 0; i < (int)top32.size() && i < 64; i++) h_map_out[i] = top32[i];
-        int off = (int)top32.size();
-        for (int i = 0; i < (int)rest.size() && off + i < 64; i++) h_map_out[off + i] = rest[i];
-
-        if (mn_out) memcpy(mn_out, mn, KEY_SIZE);
-        if (mx_out) memcpy(mx_out, mx, KEY_SIZE);
-
-        printf("[CompactDetect] ENTROPY selection: %d candidates, top %zu by distinct count "
-               "go in compact KEY (positions:", ncand, top32.size());
-        for (int p : top32) printf(" %d", p);
-        printf(")\n");
-        return n_total;
-    }
-
-    // Default: position-order selection (existing behavior).
-    int count = 0;
-    for (int b = 0; b < KEY_SIZE; b++) {
-        if (mn[b] != mx[b]) {
-            if (count < 64) h_map_out[count] = b;
-            count++;
-        }
-    }
-    if (mn_out) memcpy(mn_out, mn, KEY_SIZE);
-    if (mx_out) memcpy(mx_out, mx, KEY_SIZE);
-    return count;
-}
-
-// Extract compact-key bytes [base..base+8) and [base+8..base+16) from records
-// in current perm order. Used for the 32B-extension fast path: after the 16B
-// merge, we need pfx3 (compact bytes 16..23) and pfx4 (compact bytes 24..31)
-// already in 16B-sorted order so we can do segmented sort within tied groups.
-//
-// out_lo[i] = uint64 from compact bytes [base..base+8) of records[perm[i]]
-// out_hi[i] = uint64 from compact bytes [base+8..base+16)
 __global__ void build_compact_keys_kernel(
     const uint8_t* __restrict__ records,
     uint8_t* __restrict__ compact_keys,
     uint64_t num_records,
     const int* __restrict__ cmap,
-    int cmap_n
+    int num_map_entries,
+    int compact_stride
 ) {
     uint64_t i = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= num_records) return;
     const uint8_t* rec = records + i * RECORD_SIZE;
-    uint8_t* ck = compact_keys + i * COMPACT_KEY_SIZE;
-    int n = cmap_n < COMPACT_KEY_SIZE ? cmap_n : COMPACT_KEY_SIZE;
-    for (int b = 0; b < n; b++) ck[b] = rec[cmap[b]];
-    for (int b = n; b < COMPACT_KEY_SIZE; b++) ck[b] = 0;
+    uint8_t* ck = compact_keys + i * compact_stride;
+    for (int b = 0; b < num_map_entries; b++) ck[b] = rec[cmap[b]];
+    // Zero padding
+    for (int b = num_map_entries; b < compact_stride; b++) ck[b] = 0;
 }
 
-// Extract uint64 from compact key buffer at COMPACT_KEY_SIZE stride
+// Extract uint64 from compact key buffer at given stride
 __global__ void extract_uint64_from_compact_kernel(
     const uint8_t* __restrict__ compact_keys,
     const uint32_t* __restrict__ perm,
     uint64_t* __restrict__ sort_keys,
     uint64_t num_records,
     int byte_offset,
-    int chunk_bytes
+    int chunk_bytes,
+    int key_stride = COMPACT_KEY_SIZE  // runtime stride (default 32B, less with bitpack)
 ) {
     uint64_t i = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= num_records) return;
     uint32_t orig_idx = perm[i];
-    const uint8_t* k = compact_keys + (uint64_t)orig_idx * COMPACT_KEY_SIZE + byte_offset;
+    const uint8_t* k = compact_keys + (uint64_t)orig_idx * key_stride + byte_offset;
     uint64_t v = 0;
     for (int b = 0; b < chunk_bytes; b++) v = (v << 8) | k[b];
     v <<= (8 - chunk_bytes) * 8;
     sort_keys[i] = v;
 }
-// Extract compact key prefix directly from original records using the byte map.
-// No separate compact key buffer needed — reads cmap positions from records.
-// Gives first min(32, cmap_n) varying bytes — much higher entropy than raw record bytes 0-31.
-// prefix3/prefix4 may be null; when non-null, we also emit compact bytes 16-23 and 24-31
-// so the GPU merge can do 4-pass LSD on 32B (native 32B OVC path).
+// Extract 16B compact key prefix directly from original records using the byte map.
+// No separate compact key buffer needed — reads d_compact_map positions from records.
+// This gives 16 of 26 varying bytes, much higher entropy than raw record bytes 0-15.
 __global__ void extract_compact_prefix_from_records_kernel(
     const uint8_t* __restrict__ records,
     const uint32_t* __restrict__ perm,
     uint64_t* __restrict__ prefix1,   // compact positions 0-7
     uint64_t* __restrict__ prefix2,   // compact positions 8-15
-    uint64_t* __restrict__ prefix3,   // compact positions 16-23 (may be null)
-    uint64_t* __restrict__ prefix4,   // compact positions 24-31 (may be null)
     uint64_t num_records,
     const int* __restrict__ cmap,
-    int cmap_n
+    int num_map_entries
 ) {
     uint64_t i = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= num_records) return;
     uint32_t idx = perm[i];
     const uint8_t* rec = records + (uint64_t)idx * RECORD_SIZE;
     uint64_t v1 = 0;
-    for (int b = 0; b < 8; b++) v1 = (v1 << 8) | (b < cmap_n ? rec[cmap[b]] : 0);
+    int n1 = (num_map_entries < 8) ? num_map_entries : 8;
+    for (int b = 0; b < n1; b++) v1 = (v1 << 8) | rec[cmap[b]];
+    v1 <<= (8 - n1) * 8;
     prefix1[i] = v1;
     uint64_t v2 = 0;
-    for (int b = 8; b < 16; b++) v2 = (v2 << 8) | (b < cmap_n ? rec[cmap[b]] : 0);
+    int n2 = (num_map_entries < 16) ? num_map_entries : 16;
+    for (int b = 8; b < n2; b++) v2 = (v2 << 8) | rec[cmap[b]];
+    v2 <<= (8 - (n2 - 8)) * 8;
     prefix2[i] = v2;
-    if (prefix3 != nullptr) {
-        uint64_t v3 = 0;
-        for (int b = 16; b < 24; b++) v3 = (v3 << 8) | (b < cmap_n ? rec[cmap[b]] : 0);
-        prefix3[i] = v3;
-    }
-    if (prefix4 != nullptr) {
-        uint64_t v4 = 0;
-        for (int b = 24; b < 32; b++) v4 = (v4 << 8) | (b < cmap_n ? rec[cmap[b]] : 0);
-        prefix4[i] = v4;
+}
+// Extract 16B prefix from compact key buffer (not from full records).
+// Used when compact keys were pre-extracted on CPU and uploaded directly.
+// GPU-side bit-packing: FOR-encode + pack 32B compact key → packed key
+// Runs at HBM bandwidth (~500 GB/s), negligible compared to PCIe.
+__global__ void bitpack_compact_keys_kernel(
+    const uint8_t* __restrict__ compact_in,   // N × COMPACT_KEY_SIZE (32B)
+    uint8_t* __restrict__ packed_out,          // N × padded_size
+    uint64_t num_records,
+    const int* __restrict__ bit_offsets,       // 26 entries: cumulative bit offset
+    const int* __restrict__ bits,              // 26 entries: bits per position
+    const uint8_t* __restrict__ mins,          // 26 entries: FOR minimum
+    int padded_size                            // output stride
+) {
+    uint64_t i = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= num_records) return;
+
+    const uint8_t* ck = compact_in + i * COMPACT_KEY_SIZE;
+    uint8_t* out = packed_out + i * padded_size;
+
+    // Zero output
+    for (int b = 0; b < padded_size; b++) out[b] = 0;
+
+    // Pack each position
+    for (int b = 0; b < 26; b++) {
+        int nbits = bits[b];
+        if (nbits == 0) continue;
+        uint8_t v = ck[b] - mins[b];  // FOR-encode
+        int boff = bit_offsets[b];
+        int byte_idx = boff / 8;
+        int shift = 16 - (boff & 7) - nbits;
+        uint16_t w = (uint16_t)v << shift;
+        out[byte_idx] |= (uint8_t)(w >> 8);
+        if (byte_idx + 1 < padded_size)
+            out[byte_idx + 1] |= (uint8_t)(w & 0xFF);
     }
 }
-// Extract compact key prefix from compact key buffer (not from full records).
-// Used when compact keys were pre-extracted on CPU and uploaded directly.
-// prefix3/prefix4 may be null; when non-null, reads compact bytes 16-23 and 24-31.
+
 __global__ void extract_prefix_from_compact_buffer_kernel(
     const uint8_t* __restrict__ compact_keys,
     const uint32_t* __restrict__ perm,
     uint64_t* __restrict__ prefix1,
     uint64_t* __restrict__ prefix2,
-    uint64_t* __restrict__ prefix3,   // may be null
-    uint64_t* __restrict__ prefix4,   // may be null
-    uint64_t num_records
+    uint64_t num_records,
+    int key_stride = COMPACT_KEY_SIZE
 ) {
     uint64_t i = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= num_records) return;
     uint32_t idx = perm[i];
-    const uint8_t* ck = compact_keys + (uint64_t)idx * COMPACT_KEY_SIZE;
+    const uint8_t* ck = compact_keys + (uint64_t)idx * key_stride;
     uint64_t v1 = 0;
     for (int b = 0; b < 8; b++) v1 = (v1 << 8) | ck[b];
     prefix1[i] = v1;
     uint64_t v2 = 0;
-    for (int b = 8; b < 16; b++) v2 = (v2 << 8) | ck[b];
+    int end2 = (key_stride < 16) ? key_stride : 16;
+    for (int b = 8; b < end2; b++) v2 = (v2 << 8) | ck[b];
+    v2 <<= (8 - (end2 - 8)) * 8;
     prefix2[i] = v2;
-    if (prefix3 != nullptr) {
-        uint64_t v3 = 0;
-        for (int b = 16; b < 24; b++) v3 = (v3 << 8) | ck[b];
-        prefix3[i] = v3;
-    }
-    if (prefix4 != nullptr) {
-        uint64_t v4 = 0;
-        for (int b = 24; b < 32; b++) v4 = (v4 << 8) | ck[b];
-        prefix4[i] = v4;
-    }
 }
 #endif // USE_COMPACT_KEY
 
@@ -670,28 +450,6 @@ __global__ void check_full_16B_ties_kernel(
         atomicOr(has_ties, 1u);
 }
 
-// Check if any adjacent pair has ALL FOUR pfx1/2/3/4 equal (full 32B tie).
-// Run between pass 3 and pass 4 of 4-pass LSD when the array is stably sorted
-// by (pfx2, pfx3, pfx4) and pfx1 is gathered to match. An equality on all four
-// prefixes means 32 compact bytes are identical — CPU fixup will finish the
-// ordering on the remaining record bytes.
-__global__ void check_full_32B_ties_kernel(
-    const uint64_t* __restrict__ pfx1,
-    const uint64_t* __restrict__ pfx2,
-    const uint64_t* __restrict__ pfx3,
-    const uint64_t* __restrict__ pfx4,
-    uint64_t num_records,
-    uint32_t* __restrict__ has_ties
-) {
-    uint64_t i = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x + 1;
-    if (i >= num_records) return;
-    if (pfx1[i] == pfx1[i - 1] &&
-        pfx2[i] == pfx2[i - 1] &&
-        pfx3[i] == pfx3[i - 1] &&
-        pfx4[i] == pfx4[i - 1])
-        atomicOr(has_ties, 1u);
-}
-
 // Simple gather for uint32 (used in LSD merge satellite reordering)
 __global__ void gather_uint32_kernel(const uint32_t* src, const uint32_t* idx,
                                       uint32_t* dst, uint64_t n) {
@@ -737,14 +495,13 @@ __global__ void extract_tiebreaker_kernel(
     const uint8_t* __restrict__ key_buffer,
     const uint32_t* __restrict__ perm,
     uint16_t* __restrict__ tiebreakers,
-    uint64_t num_records,
-    int byte_offset
+    uint64_t num_records
 ) {
     uint64_t i = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= num_records) return;
     uint32_t orig_idx = perm[i];
-    const uint8_t* k = key_buffer + (uint64_t)orig_idx * KEY_SIZE + byte_offset;
-    tiebreakers[i] = ((uint16_t)k[0] << 8) | k[1];
+    const uint8_t* k = key_buffer + (uint64_t)orig_idx * KEY_SIZE;
+    tiebreakers[i] = ((uint16_t)k[8] << 8) | k[9];
 }
 
 // ── GPU key extraction kernel ────────────────────────────────────────
@@ -806,18 +563,22 @@ struct SortWorkspace {
     uint8_t* d_compact = nullptr;   // Compact key buffer (USE_COMPACT_KEY)
     uint64_t capacity = 0;
 
-    void allocate(uint64_t max_records) {
-        if (capacity >= max_records) return;
+    int compact_stride = 0;  // actual compact key stride used for allocation
+
+    void allocate(uint64_t max_records, int compact_key_size = COMPACT_KEY_SIZE) {
+        if (capacity >= max_records && (!compact_key_size || compact_stride >= compact_key_size)) return;
         free();
         capacity = max_records;
+        compact_stride = compact_key_size;
         CUDA_CHECK(cudaMalloc(&d_keys, max_records * sizeof(uint64_t)));
         CUDA_CHECK(cudaMalloc(&d_keys_alt, max_records * sizeof(uint64_t)));
         CUDA_CHECK(cudaMalloc(&d_indices, max_records * sizeof(uint32_t)));
         CUDA_CHECK(cudaMalloc(&d_indices_alt, max_records * sizeof(uint32_t)));
 #ifdef USE_COMPACT_KEY
-        // Skip compact key buffer if OVC mode is active (saves 1.4GB GPU memory)
-        cudaError_t ck_err = cudaMalloc(&d_compact, max_records * COMPACT_KEY_SIZE);
-        if (ck_err != cudaSuccess) d_compact = nullptr; // Graceful fallback
+        if (compact_key_size > 0) {
+            cudaError_t ck_err = cudaMalloc(&d_compact, max_records * compact_key_size);
+            if (ck_err != cudaSuccess) d_compact = nullptr; // Graceful fallback
+        }
 #endif
     }
     void free() {
@@ -829,6 +590,78 @@ struct SortWorkspace {
         capacity = 0;
     }
 };
+
+// ── Bit-packing configuration for compact keys ─────────────────────
+// FOR-encode + bit-pack varying byte positions into a denser key.
+// If 26 bytes have total 160 bits, packed key = 20B → pad to 24B → 3 CUB passes.
+#ifdef USE_COMPACT_KEY
+struct BitPackConfig {
+    bool active = false;
+    uint8_t mins[26] = {};       // per-position minimum value (FOR base)
+    int bits[26] = {};           // bits needed per position
+    int bit_offsets[26] = {};    // cumulative bit offset for each position
+    int total_bits = 0;          // sum of bits[]
+    int packed_bytes = 0;        // ceil(total_bits/8)
+    int padded_size = 0;         // round up to next 8-byte boundary for CUB
+    int n_active = 0;            // number of positions with bits > 0
+    int active_pos[26] = {};     // indices of active positions
+
+    void compute(const uint8_t* h_data, uint64_t num_records, const int* cmap) {
+        // Scan sample records for per-position min/max
+        uint8_t maxs[26] = {};
+        for (int b = 0; b < 26; b++) { mins[b] = 255; maxs[b] = 0; }
+
+        uint64_t step = std::max((uint64_t)1, num_records / 1000000);
+        for (uint64_t i = 0; i < num_records; i += step) {
+            const uint8_t* rec = h_data + i * RECORD_SIZE;
+            for (int b = 0; b < 26; b++) {
+                uint8_t v = rec[cmap[b]];
+                if (v < mins[b]) mins[b] = v;
+                if (v > maxs[b]) maxs[b] = v;
+            }
+        }
+
+        total_bits = 0;
+        n_active = 0;
+        for (int b = 0; b < 26; b++) {
+            int range = (int)maxs[b] - (int)mins[b] + 1;
+            if (range <= 1) bits[b] = 0;
+            else if (range == 2) bits[b] = 1;
+            else bits[b] = 32 - __builtin_clz(range - 1);
+            bit_offsets[b] = total_bits;
+            if (bits[b] > 0) active_pos[n_active++] = b;
+            total_bits += bits[b];
+        }
+        packed_bytes = (total_bits + 7) / 8;
+        padded_size = ((packed_bytes + 7) / 8) * 8;  // round to 8-byte boundary
+        active = (padded_size < COMPACT_KEY_SIZE);
+
+        printf("  BITPACK: %d total bits → %dB packed → %dB padded (%d CUB passes vs %d without)\n",
+               total_bits, packed_bytes, padded_size,
+               (padded_size + 7) / 8, (COMPACT_KEY_SIZE + 7) / 8);
+    }
+
+    // Pack one record's compact bytes into a bit-packed key.
+    // Uses word-aligned writes (no per-bit loop).
+    inline void pack(const uint8_t* rec, const int* cmap, uint8_t* out) const {
+        memset(out, 0, padded_size);
+        for (int a = 0; a < n_active; a++) {
+            int b = active_pos[a];
+            uint8_t v = rec[cmap[b]] - mins[b];  // FOR-encode
+            int boff = bit_offsets[b];
+            int nbits = bits[b];
+            // Place nbits bits of v at bit offset boff (MSB-first big-endian layout).
+            // v fits in 8 bits; write spans at most 2 bytes.
+            int byte_idx = boff / 8;
+            int shift = 16 - (boff & 7) - nbits;  // position within 16-bit window
+            uint16_t w = (uint16_t)v << shift;
+            out[byte_idx] |= (uint8_t)(w >> 8);
+            if (byte_idx + 1 < padded_size)
+                out[byte_idx + 1] |= (uint8_t)(w & 0xFF);
+        }
+    }
+};
+#endif // USE_COMPACT_KEY
 
 // ============================================================================
 // External Sort Engine
@@ -852,12 +685,6 @@ class ExternalGpuSort {
     // Prefix merge buffers (for large-key path: persistent across run gen)
     uint64_t* d_ovc_buffer;        // 8B secondary prefix (bytes 8-15) per record
     uint64_t* d_prefix_buffer;     // 8B primary prefix (bytes 0-7) per record
-    // Native 32B OVC extension: optional pfx3/pfx4 (compact bytes 16-23, 24-31).
-    // Allocated only when the merge workspace fits in GPU memory (SF50: yes; SF100: no).
-    // When non-null, run gen extracts all 32B of compact prefix and merge does 4-pass
-    // LSD instead of 2-pass, preserving correctness (same source-position-order bytes).
-    uint64_t* d_pfx3_buffer;       // 8B tertiary prefix (bytes 16-23) per record, or null
-    uint64_t* d_pfx4_buffer;       // 8B quaternary prefix (bytes 24-31) per record, or null
     uint32_t* d_global_perm;       // global index per record
     uint64_t  ovc_buffer_records;  // capacity in records
     uint64_t  ovc_run_offset;     // current write position in prefix/perm buffers
@@ -868,6 +695,15 @@ class ExternalGpuSort {
 
     // Track whether compact key prefixes were used (for CPU fixup grouping)
     bool used_compact_prefix;
+#ifdef USE_COMPACT_KEY
+    BitPackConfig bitpack;
+    int effective_compact_size;  // runtime compact key size (padded to 8B)
+    // Runtime compact map: all varying byte positions, in order (preserves lex ordering)
+    int runtime_cmap[KEY_SIZE];  // varying positions in original key
+    int num_varying;             // number of varying positions
+    int runtime_compact_size;    // padded to 8-byte alignment
+    int* d_runtime_cmap;         // device copy of runtime_cmap
+#endif
 
 public:
     struct TimingResult {
@@ -877,11 +713,6 @@ public:
         uint8_t* sorted_output;  // pointer to sorted data
         uint64_t sorted_output_size;  // size in bytes (for munmap)
         bool sorted_output_is_mmap;   // true = munmap, false = free
-        // Hybrid correctness fallback: set to true when the compact path
-        // detected exception records (non-mapped bytes != V[]). Caller should
-        // discard sorted_output, set g_force_no_compact = true, and retry.
-        // Guaranteed correct because the non-compact path uploads full keys.
-        bool needs_hybrid_retry;
     };
 
     ExternalGpuSort();
@@ -915,13 +746,18 @@ ExternalGpuSort::ExternalGpuSort() {
     d_key_buffer = nullptr;
     d_ovc_buffer = nullptr;
     d_prefix_buffer = nullptr;
-    d_pfx3_buffer = nullptr;
-    d_pfx4_buffer = nullptr;
     d_global_perm = nullptr;
     ovc_buffer_records = 0;
     ovc_run_offset = 0;
     ovc_chunk_start = 0;
     used_compact_prefix = false;
+#ifdef USE_COMPACT_KEY
+    effective_compact_size = COMPACT_KEY_SIZE;
+    num_varying = 0;
+    runtime_compact_size = 0;
+    d_runtime_cmap = nullptr;
+    memset(runtime_cmap, 0, sizeof(runtime_cmap));
+#endif
     buf_records = (gpu_budget / NBUFS) / RECORD_SIZE;
     buf_bytes = buf_records * RECORD_SIZE;
 
@@ -949,8 +785,6 @@ ExternalGpuSort::~ExternalGpuSort() {
     if (d_key_buffer) cudaFree(d_key_buffer);
     if (d_ovc_buffer) cudaFree(d_ovc_buffer);
     if (d_prefix_buffer) cudaFree(d_prefix_buffer);
-    if (d_pfx3_buffer) cudaFree(d_pfx3_buffer);
-    if (d_pfx4_buffer) cudaFree(d_pfx4_buffer);
     if (d_global_perm) cudaFree(d_global_perm);
     sort_ws.free();
 }
@@ -972,18 +806,19 @@ void ExternalGpuSort::sort_chunk_on_gpu(uint8_t* d_in, uint8_t* d_scratch,
 
 #ifdef USE_COMPACT_KEY
     if (sort_ws.d_compact) {
-    // Compact key path: build 32B keys from varying bytes, then 4 LSD passes
+    // Compact key path: build keys from varying bytes, then LSD passes
+    int eff_size = effective_compact_size;
     if (!compact_preloaded)
         build_compact_keys_kernel<<<nblks, nthreads, 0, s>>>(
-            d_in, sort_ws.d_compact, n, d_compact_map_ptr, g_compact_count);
+            d_in, sort_ws.d_compact, n, d_runtime_cmap, num_varying, runtime_compact_size);
 
-    int num_chunks = (COMPACT_KEY_SIZE + 7) / 8;  // 4 for 32B
+    int num_chunks = (eff_size + 7) / 8;  // 4 for 32B, 3 for 24B
     for (int chunk = num_chunks - 1; chunk >= 0; chunk--) {
         int byte_offset = chunk * 8;
-        int chunk_bytes = std::min(8, COMPACT_KEY_SIZE - byte_offset);
+        int chunk_bytes = std::min(8, eff_size - byte_offset);
 
         extract_uint64_from_compact_kernel<<<nblks, nthreads, 0, s>>>(
-            sort_ws.d_compact, perm_in, sort_ws.d_keys, n, byte_offset, chunk_bytes);
+            sort_ws.d_compact, perm_in, sort_ws.d_keys, n, byte_offset, chunk_bytes, eff_size);
 
         cub::DoubleBuffer<uint64_t> keys_buf(sort_ws.d_keys, sort_ws.d_keys_alt);
         cub::DoubleBuffer<uint32_t> idx_buf(perm_in, perm_out);
@@ -1029,27 +864,19 @@ void ExternalGpuSort::sort_chunk_on_gpu(uint8_t* d_in, uint8_t* d_scratch,
         // key positions directly from records (16 of 26 varying bytes — much higher
         // entropy than raw bytes 0-15 which include ~40 constant bytes).
 #ifdef USE_COMPACT_KEY
-        // Native 32B OVC path: if pfx3/pfx4 buffers were allocated (SF50-class: merge
-        // workspace fits), extract all 32B of compact prefix during run gen — zero
-        // extra PCIe cost, reads already happen on the record for pfx1/pfx2. Merge
-        // will do 4-pass LSD instead of 2-pass.
-        uint64_t* pfx3_out = d_pfx3_buffer ? d_pfx3_buffer + ovc_run_offset : nullptr;
-        uint64_t* pfx4_out = d_pfx4_buffer ? d_pfx4_buffer + ovc_run_offset : nullptr;
         if (compact_preloaded) {
             // Compact keys already in sort_ws.d_compact — read prefix from there
             extract_prefix_from_compact_buffer_kernel<<<nblks, nthreads, 0, s>>>(
                 sort_ws.d_compact, perm_in,
                 d_prefix_buffer + ovc_run_offset,
                 d_ovc_buffer + ovc_run_offset,
-                pfx3_out, pfx4_out,
-                n);
+                n, effective_compact_size);
         } else {
             extract_compact_prefix_from_records_kernel<<<nblks, nthreads, 0, s>>>(
                 d_in, perm_in,
                 d_prefix_buffer + ovc_run_offset,
                 d_ovc_buffer + ovc_run_offset,
-                pfx3_out, pfx4_out,
-                n, d_compact_map_ptr, g_compact_count);
+                n, d_runtime_cmap, num_varying);
         }
         used_compact_prefix = true;
 #else
@@ -1100,17 +927,11 @@ ExternalGpuSort::generate_runs_pipelined(
     // Instead of uploading 120B records (72GB for SF100), extract 32B compact
     // keys on CPU and upload only those. 3.75× less PCIe traffic.
     // Pipeline: CPU extract → H2D compact keys → GPU sort (from d_compact)
-    // Compact upload: pack the first min(count, COMPACT_KEY_SIZE) varying bytes
-    // into the compact buffer. If count > 32 the compact prefix won't cover the
-    // full key, so CPU fixup will resolve prefix ties afterwards.
-    bool use_compact_upload = (!g_force_no_compact && !g_disable_compact && d_ovc_buffer && sort_ws.d_compact && g_compact_count > 0);
+    bool use_compact_upload = (d_ovc_buffer && sort_ws.d_compact);
     if (use_compact_upload) {
-        const int* h_cmap = g_compact_map;
-        const int cmap_n = std::min(g_compact_count, (int)COMPACT_KEY_SIZE);
+        const int eff_size = effective_compact_size;  // runtime_compact_size (set by detect)
 
         // Use h_pin[0] and h_pin[1] as double-buffered staging for compact keys.
-        // They're allocated at buf_bytes (3.7GB each), plenty for compact keys (1GB).
-        // Reinterpret as compact key staging buffers.
         uint8_t* h_compact[2] = { h_pin[0], h_pin[1] };
 
         // Sort completion event: ensure d_compact isn't overwritten during sort
@@ -1119,75 +940,41 @@ ExternalGpuSort::generate_runs_pipelined(
 
         int hw = std::max(1, (int)std::thread::hardware_concurrency());
 
-        // Build a dense list of non-mapped byte positions + expected values V[].
-        // Iterating only the positions we care about (not all 66) keeps the
-        // per-record inner loop tight and branch-free.
-        int nonmap[KEY_SIZE]; uint8_t V[KEY_SIZE]; int nonmap_n = 0;
-        {
-            bool mapped[KEY_SIZE]; for (int b = 0; b < (int)KEY_SIZE; b++) mapped[b] = false;
-            int stored = std::min(g_compact_count, 64);
-            for (int i = 0; i < stored; i++) if (g_compact_map[i] < (int)KEY_SIZE) mapped[g_compact_map[i]] = true;
-            for (int b = 0; b < (int)KEY_SIZE; b++) {
-                if (!mapped[b]) { nonmap[nonmap_n] = b; V[nonmap_n] = g_sample_min[b]; nonmap_n++; }
-            }
+        // Upload bitpack config to GPU constant memory if active
+        int* d_bp_bit_offsets = nullptr;
+        int* d_bp_bits = nullptr;
+        uint8_t* d_bp_mins = nullptr;
+        uint8_t* d_packed_buf = nullptr;  // separate packed buffer on GPU
+        if (bitpack.active) {
+            CUDA_CHECK(cudaMalloc(&d_bp_bit_offsets, 26 * sizeof(int)));
+            CUDA_CHECK(cudaMalloc(&d_bp_bits, 26 * sizeof(int)));
+            CUDA_CHECK(cudaMalloc(&d_bp_mins, 26));
+            CUDA_CHECK(cudaMemcpy(d_bp_bit_offsets, bitpack.bit_offsets, 26*sizeof(int), cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemcpy(d_bp_bits, bitpack.bits, 26*sizeof(int), cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemcpy(d_bp_mins, bitpack.mins, 26, cudaMemcpyHostToDevice));
+            // Allocate packed buffer (smaller stride than d_compact)
+            CUDA_CHECK(cudaMalloc(&d_packed_buf, buf_records * eff_size));
         }
 
-        // Helper lambda: multi-threaded compact key extraction + per-record
-        // canonical/exception classification. For every record we:
-        //   1. Write the compact key (mapped bytes → compact buffer).
-        //   2. Check non-mapped bytes against V[k]. If any mismatch, the record
-        //      is an EXCEPTION — its full key is not captured by the compact
-        //      representation. Append its original index to a per-thread list.
-        //      Also note the smallest differing byte position (diagnostic).
-        // After all threads join, the per-thread exception lists are flushed
-        // into the global g_exception_indices under a single mutex take.
+        // Helper lambda: multi-threaded compact key extraction for one chunk
+        // Uses runtime compact map (all varying positions, in order)
+        const int rcsize = runtime_compact_size;
+        const int nvary = num_varying;
         auto do_extract = [&](uint64_t offset, uint64_t cur_n, int ping) {
             uint64_t per_t = (cur_n + hw - 1) / hw;
             std::vector<std::thread> threads;
-            std::vector<std::vector<uint64_t>> thread_exc(hw);
             for (int t = 0; t < hw; t++) {
-                threads.emplace_back([&, t, offset, cur_n, ping]() {
+                threads.emplace_back([&, t, offset, cur_n, ping, rcsize, nvary]() {
                     uint64_t lo = t * per_t, hi = std::min(lo + per_t, cur_n);
-                    int local_violation = INT32_MAX;
-                    auto& my_exc = thread_exc[t];
                     for (uint64_t j = lo; j < hi; j++) {
                         const uint8_t* rec = h_data + (offset + j) * RECORD_SIZE;
-                        uint8_t* ck = h_compact[ping] + j * COMPACT_KEY_SIZE;
-                        // Copy mapped bytes → compact key
-                        for (int b = 0; b < cmap_n; b++) ck[b] = rec[h_cmap[b]];
-                        for (int b = cmap_n; b < COMPACT_KEY_SIZE; b++) ck[b] = 0;
-                        // Classify canonical vs exception by scanning only the
-                        // non-mapped positions (e.g. 39 of 66).
-                        bool is_exception = false;
-                        for (int k = 0; k < nonmap_n; k++) {
-                            int b = nonmap[k];
-                            if (rec[b] != V[k]) {
-                                is_exception = true;
-                                if (b < local_violation) local_violation = b;
-                                break;
-                            }
-                        }
-                        if (is_exception) my_exc.push_back(offset + j);
-                    }
-                    if (local_violation != INT32_MAX) {
-                        int cur = g_violated_byte.load(std::memory_order_relaxed);
-                        while ((cur == -1 || local_violation < cur) &&
-                               !g_violated_byte.compare_exchange_weak(cur, local_violation,
-                                                                     std::memory_order_relaxed)) {}
+                        uint8_t* ck = h_compact[ping] + j * rcsize;
+                        for (int b = 0; b < nvary; b++) ck[b] = rec[runtime_cmap[b]];
+                        for (int b = nvary; b < rcsize; b++) ck[b] = 0;
                     }
                 });
             }
             for (auto& t : threads) t.join();
-            // Flush per-thread exception indices into the global list under mutex.
-            size_t total_new = 0;
-            for (auto& v : thread_exc) total_new += v.size();
-            if (total_new) {
-                std::lock_guard<std::mutex> lk(g_exception_mtx);
-                g_exception_indices.reserve(g_exception_indices.size() + total_new);
-                for (auto& v : thread_exc) {
-                    g_exception_indices.insert(g_exception_indices.end(), v.begin(), v.end());
-                }
-            }
         };
 
         // Pipeline: overlap CPU extraction of chunk c+1 with GPU sort of chunk c.
@@ -1208,7 +995,7 @@ ExternalGpuSort::generate_runs_pipelined(
             }
 
             // H2D: upload compact keys to sort_ws.d_compact
-            size_t compact_bytes = cur_n * COMPACT_KEY_SIZE;
+            size_t compact_bytes = cur_n * rcsize;
             CUDA_CHECK(cudaMemcpyAsync(sort_ws.d_compact, h_compact[ping], compact_bytes,
                                         cudaMemcpyHostToDevice, streams[0]));
             h2d += compact_bytes;
@@ -1217,9 +1004,25 @@ ExternalGpuSort::generate_runs_pipelined(
             CUDA_CHECK(cudaEventRecord(events[0], streams[0]));
             CUDA_CHECK(cudaStreamWaitEvent(streams[1], events[0], 0));
 
+            // GPU-side bitpacking: 32B compact → packed keys in d_packed_buf
+            uint8_t* sort_compact_src = sort_ws.d_compact;
+            if (bitpack.active && d_packed_buf) {
+                int bp_threads = 256;
+                int bp_blocks = (cur_n + bp_threads - 1) / bp_threads;
+                bitpack_compact_keys_kernel<<<bp_blocks, bp_threads, 0, streams[1]>>>(
+                    sort_ws.d_compact, d_packed_buf, cur_n,
+                    d_bp_bit_offsets, d_bp_bits, d_bp_mins, eff_size);
+                sort_compact_src = d_packed_buf;
+            }
+
             // Sort from pre-loaded compact keys (skip build_compact_keys_kernel)
+            // If bitpack active, temporarily point sort at packed buffer
+            uint8_t* saved_compact = sort_ws.d_compact;
+            if (sort_compact_src != sort_ws.d_compact)
+                sort_ws.d_compact = sort_compact_src;
             ovc_chunk_start = offset;
             sort_chunk_on_gpu(nullptr, d_buf[2], cur_n, streams[1], /*compact_preloaded=*/true);
+            sort_ws.d_compact = saved_compact;  // restore for next chunk's H2D
 
             // Record sort completion so next H2D can safely overwrite d_compact
             CUDA_CHECK(cudaEventRecord(sort_done, streams[1]));
@@ -1241,6 +1044,11 @@ ExternalGpuSort::generate_runs_pipelined(
 
         CUDA_CHECK(cudaEventSynchronize(sort_done));
         CUDA_CHECK(cudaEventDestroy(sort_done));
+        // Free GPU bitpack buffers
+        if (d_bp_bit_offsets) { cudaFree(d_bp_bit_offsets); }
+        if (d_bp_bits) { cudaFree(d_bp_bits); }
+        if (d_bp_mins) { cudaFree(d_bp_mins); }
+        if (d_packed_buf) { cudaFree(d_packed_buf); }
         printf("\n");
         ms = timer.end_ms();
         return runs;
@@ -1612,105 +1420,6 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
     uint64_t total_bytes = num_records * RECORD_SIZE;
     printf("[ExternalSort] Sorting %lu records (%.2f GB)\n\n", num_records, total_bytes/1e9);
 
-#ifdef USE_COMPACT_KEY
-    // Detect varying byte positions in the sort key from a 1M-record sample.
-    // This makes the compact-key optimization general — works on any dataset,
-    // not just TPC-H. Cost: ~10-50ms (one sequential scan over 0.4-2 GB).
-    {
-        // Memoize detection across repeated sort() calls on the same buffer
-        // (--runs mode re-sorts the same h_data; no need to re-detect).
-        static const uint8_t* s_cached_data = nullptr;
-        static uint64_t s_cached_n = 0;
-        WallTimer dt; dt.begin();
-        double det_ms;
-        if (h_data == s_cached_data && num_records == s_cached_n && g_compact_count > 0) {
-            det_ms = 0;  // cache hit
-        } else {
-            g_compact_count = detect_compact_map(h_data, num_records, g_compact_map,
-                                                 g_sample_min, g_sample_max);
-            s_cached_data = h_data;
-            s_cached_n = num_records;
-            g_map_full_scan_verified = false;  // will be set true after extraction verifies
-            g_violated_byte.store(-1);
-            det_ms = dt.end_ms();
-        }
-        // Reset exception list for this sort call (independent of cache hit).
-        {
-            std::lock_guard<std::mutex> lk(g_exception_mtx);
-            g_exception_indices.clear();
-        }
-        uint64_t s_target = 1000000;
-        if (const char* e = getenv("COMPACT_SAMPLE")) { long v = atol(e); if (v > 0) s_target = (uint64_t)v; }
-        if (num_records <= 50000000) s_target = num_records;
-        uint64_t actual_sample = std::min(num_records, s_target);
-        bool full_scan = (actual_sample == num_records);
-        printf("[CompactDetect] %d/%d key bytes vary (%s %luK of %luM records, %.0f ms)\n",
-               g_compact_count, KEY_SIZE,
-               full_scan ? "full scan" : "stratified random sample",
-               actual_sample / 1000, num_records / 1000000, det_ms);
-        if (g_compact_count > 0) {
-            printf("[CompactDetect] Varying byte positions:");
-            for (int i = 0; i < g_compact_count && i < 32; i++) printf(" %d", g_compact_map[i]);
-            if (g_compact_count > 32) printf(" ...");
-            printf("\n");
-        }
-        // Decision: which sort path benefits most?
-        double compactness = (double)g_compact_count / KEY_SIZE;
-        const char* decision;
-        if (g_compact_count == 0) decision = "ALL CONSTANT — degenerate (sort is identity)";
-        else if (g_compact_count <= 16)
-            decision = "≤16 varying bytes — compact prefix is full sort key (no ties possible)";
-        else if (g_compact_count <= COMPACT_KEY_SIZE)
-            decision = "compact upload WINS (≤32 varying bytes, fits in 32B compact buffer)";
-        else if (g_compact_count <= 64)
-            decision = "compact UPLOAD still wins, but compact PREFIX may have ties (CPU fixup)";
-        else {
-            decision = "too many varying bytes — no compression benefit, use full upload";
-            g_disable_compact = true;
-        }
-        printf("[CompactDetect] Compactness: %d/%d = %.0f%% varying. Decision: %s\n",
-               g_compact_count, KEY_SIZE, compactness * 100.0, decision);
-        if (g_compact_count > 0) {
-            int bits1 = 0, bits2 = 0, bits4 = 0, bits8 = 0;
-            int packed_bits = 0;
-            for (int i = 0; i < g_compact_count; i++) {
-                int pos = g_compact_map[i];
-                int range = (int)g_sample_max[pos] - (int)g_sample_min[pos] + 1;
-                int bits = (range <= 2) ? 1 : (range <= 4) ? 2 : (range <= 16) ? 4 : 8;
-                packed_bits += bits;
-                if (bits == 1) bits1++;
-                else if (bits == 2) bits2++;
-                else if (bits == 4) bits4++;
-                else bits8++;
-            }
-            int packed_bytes = (packed_bits + 7) / 8;
-            printf("[CompactDetect] Per-position bit-widths: %d×1b  %d×2b  %d×4b  %d×8b"
-                   " → %d bits = %d packed bytes (vs %d current)\n",
-                   bits1, bits2, bits4, bits8, packed_bits, packed_bytes, g_compact_count);
-            int covered_by_32B = 0, cum_bits = 0;
-            for (int i = 0; i < g_compact_count && cum_bits < 256; i++) {
-                int pos = g_compact_map[i];
-                int range = (int)g_sample_max[pos] - (int)g_sample_min[pos] + 1;
-                int bits = (range <= 2) ? 1 : (range <= 4) ? 2 : (range <= 16) ? 4 : 8;
-                cum_bits += bits;
-                if (cum_bits <= 256) covered_by_32B = i + 1;
-            }
-            printf("[CompactDetect] 32B prefix would cover %d/%d positions if nibble-packed"
-                   " (vs %d currently)\n", covered_by_32B, g_compact_count,
-                   std::min(g_compact_count, (int)COMPACT_KEY_SIZE));
-        }
-        // Allocate + upload the runtime compact map to a plain device buffer.
-        // Using cudaMalloc + cudaMemcpy (not cudaMemcpyToSymbol on a __constant__
-        // symbol) keeps CUDA module loading lazy — the buggy PTX-JIT path on
-        // Turing only triggers if we eagerly touch a __constant__ symbol.
-        if (!d_compact_map_ptr) {
-            CUDA_CHECK(cudaMalloc(&d_compact_map_ptr, 64 * sizeof(int)));
-        }
-        CUDA_CHECK(cudaMemcpy(d_compact_map_ptr, g_compact_map,
-                              64 * sizeof(int), cudaMemcpyHostToDevice));
-    }
-#endif
-
     // Lazy-allocate GPU buffers if needed
     if (!d_buf[0]) {
         for (int i = 0; i < NBUFS; i++)
@@ -1720,205 +1429,72 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
     // Fast path: fits in one buffer
     if (num_records <= buf_records) {
         printf("  Data fits in GPU — single-chunk sort\n");
-
-#ifdef USE_COMPACT_KEY
-        // Correctness fallback on fast-path retry: sort_chunk_on_gpu uses
-        // compact keys internally, so if the sample was proven bad (retry)
-        // we can't use the GPU path at all. For fast-path data (≤5 GB) fall
-        // back to a parallel CPU full-key sort — slow but guaranteed correct.
-        if (g_force_no_compact) {
-            printf("[Hybrid] Fast-path retry: parallel CPU std::sort (full-key, guaranteed correct)\n");
-            WallTimer t; t.begin();
-            std::vector<uint32_t> idx(num_records);
-            for (uint64_t i = 0; i < num_records; i++) idx[i] = (uint32_t)i;
-            std::sort(idx.begin(), idx.end(), [h_data](uint32_t a, uint32_t b) {
-                return key_compare(h_data + (uint64_t)a * RECORD_SIZE,
-                                   h_data + (uint64_t)b * RECORD_SIZE, KEY_SIZE) < 0;
-            });
-            uint8_t* h_out = (uint8_t*)mmap(nullptr, total_bytes, PROT_READ|PROT_WRITE,
-                                            MAP_PRIVATE|MAP_ANONYMOUS|MAP_POPULATE, -1, 0);
-            for (uint64_t i = 0; i < num_records; i++)
-                memcpy(h_out + i * RECORD_SIZE, h_data + (uint64_t)idx[i] * RECORD_SIZE, RECORD_SIZE);
-            r.total_ms = r.run_gen_ms = t.end_ms();
-            r.num_runs = 1;
-            r.pcie_h2d_gb = r.pcie_d2h_gb = 0;
-            r.sorted_output = h_out;
-            r.sorted_output_size = total_bytes;
-            r.sorted_output_is_mmap = true;
-            return r;
-        }
-        // The fast path sorts compact keys on the GPU without the CPU extraction
-        // verification pass, so we need to verify the sample map ourselves here.
-        // Parallel scan of non-mapped bytes — bandwidth-bound, <200ms for
-        // anything under ~5 GB. If a violation is found, signal the caller to
-        // retry on the full-key upload path (no compaction).
-        if (g_compact_count > 0) {
-            bool mapped[KEY_SIZE] = {false};
-            int stored = std::min(g_compact_count, 64);
-            for (int i = 0; i < stored; i++)
-                if (g_compact_map[i] < (int)KEY_SIZE) mapped[g_compact_map[i]] = true;
-            int nonmap[KEY_SIZE]; uint8_t V[KEY_SIZE]; int nonmap_n = 0;
-            for (int b = 0; b < (int)KEY_SIZE; b++)
-                if (!mapped[b]) { nonmap[nonmap_n] = b; V[nonmap_n] = g_sample_min[b]; nonmap_n++; }
-
-            int hw = std::max(1, (int)std::thread::hardware_concurrency());
-            std::atomic<int> vb{-1};
-            uint64_t per_t = (num_records + hw - 1) / hw;
-            std::vector<std::thread> vts;
-            for (int t = 0; t < hw; t++) {
-                vts.emplace_back([&, t]() {
-                    uint64_t lo = (uint64_t)t * per_t, hi = std::min(lo + per_t, num_records);
-                    int local = INT32_MAX;
-                    for (uint64_t i = lo; i < hi; i++) {
-                        if (local == 0) break;
-                        const uint8_t* rec = h_data + i * RECORD_SIZE;
-                        for (int k = 0; k < nonmap_n; k++) {
-                            if (rec[nonmap[k]] != V[k]) {
-                                if (nonmap[k] < local) local = nonmap[k];
-                                break;
-                            }
-                        }
-                    }
-                    if (local != INT32_MAX) {
-                        int cur = vb.load(std::memory_order_relaxed);
-                        while ((cur == -1 || local < cur) &&
-                               !vb.compare_exchange_weak(cur, local, std::memory_order_relaxed)) {}
-                    }
-                });
-            }
-            for (auto& t : vts) t.join();
-            int v = vb.load();
-            if (v != -1) {
-                fprintf(stderr,
-                    "[Hybrid] Sample missed varying byte %d on the fast path.\n"
-                    "  Falling back to full-key upload for a guaranteed-correct sort.\n", v);
-                r.needs_hybrid_retry = true;
-                r.sorted_output = nullptr;
-                r.sorted_output_size = 0;
-                return r;
-            }
-            printf("[Correctness] Sample map verified against all %lu records "
-                   "(fast-path pre-scan) — compact sort is FULL-KEY-EQUIVALENT.\n",
-                   num_records);
-        }
-#endif
-
         sort_ws.allocate(num_records);
         WallTimer t; t.begin();
         CUDA_CHECK(cudaMemcpy(d_buf[0], h_data, total_bytes, cudaMemcpyHostToDevice));
         sort_chunk_on_gpu(d_buf[0], d_buf[1], num_records, streams[0]);
         CUDA_CHECK(cudaMemcpy(h_data, d_buf[0], total_bytes, cudaMemcpyDeviceToHost));
-        double gpu_ms = t.end_ms();
-
-#ifdef USE_COMPACT_KEY
-        int sc_prefix = std::min(g_compact_count, (int)COMPACT_KEY_SIZE);
-        if (g_compact_count > (int)COMPACT_KEY_SIZE) {
-            WallTimer ft; ft.begin();
-            int hw = std::max(1, (int)std::thread::hardware_concurrency());
-            if (const char* e = getenv("FIXUP_THREADS")) { int v = atoi(e); if (v > 0) hw = v; }
-
-            // Group detection: find runs of identical compact-key prefix
-            std::vector<std::vector<uint64_t>> bnd_per_t(hw);
-            uint64_t rpt = (num_records + hw - 1) / hw;
-            std::vector<std::thread> gd_t;
-            for (int ti = 0; ti < hw; ti++) {
-                gd_t.emplace_back([&, ti]() {
-                    uint64_t lo = (uint64_t)ti * rpt, hi = std::min(lo + rpt, num_records);
-                    if (lo == 0) lo = 1;
-                    auto& my = bnd_per_t[ti];
-                    my.reserve(512);
-                    for (uint64_t i = lo; i < hi; i++) {
-                        const uint8_t* ra = h_data + (i-1) * RECORD_SIZE;
-                        const uint8_t* rb = h_data + i * RECORD_SIZE;
-                        bool diff = false;
-                        for (int c = 0; c < sc_prefix; c++) {
-                            if (ra[g_compact_map[c]] != rb[g_compact_map[c]]) { diff = true; break; }
-                        }
-                        if (diff) my.push_back(i);
-                    }
-                });
-            }
-            for (auto& th : gd_t) th.join();
-
-            std::vector<uint64_t> all_bnd;
-            all_bnd.push_back(0);
-            for (int ti = 0; ti < hw; ti++)
-                all_bnd.insert(all_bnd.end(), bnd_per_t[ti].begin(), bnd_per_t[ti].end());
-            all_bnd.push_back(num_records);
-
-            std::vector<std::pair<uint64_t, uint64_t>> groups;
-            for (size_t i = 0; i + 1 < all_bnd.size(); i++) {
-                uint64_t cnt = all_bnd[i+1] - all_bnd[i];
-                if (cnt > 1) groups.push_back({all_bnd[i], cnt});
-            }
-
-            int active[KEY_SIZE]; int n_active = 0;
-            for (int c = sc_prefix; c < g_compact_count; c++) {
-                int pos = g_compact_map[c];
-                if (pos >= 0 && pos < (int)KEY_SIZE) active[n_active++] = pos;
-            }
-
-            // Parallel per-group sort
-            std::atomic<uint64_t> q{0};
-            uint64_t ng = groups.size();
-            std::vector<std::thread> fix_t;
-            std::vector<std::vector<std::pair<std::vector<uint8_t>, uint32_t>>> tbufs(hw);
-            for (int ti = 0; ti < hw; ti++) {
-                fix_t.emplace_back([&, ti]() {
-                    auto& tbuf = tbufs[ti];
-                    while (true) {
-                        uint64_t gi = q.fetch_add(1, std::memory_order_relaxed);
-                        if (gi >= ng) break;
-                        auto [start, count] = groups[gi];
-                        tbuf.resize(count);
-                        for (uint64_t j = 0; j < count; j++) {
-                            tbuf[j].first.assign(
-                                h_data + (start+j)*RECORD_SIZE,
-                                h_data + (start+j)*RECORD_SIZE + KEY_SIZE);
-                            tbuf[j].second = (uint32_t)j;
-                        }
-                        std::sort(tbuf.begin(), tbuf.end(),
-                            [&](const auto& a, const auto& b) {
-                                for (int k = 0; k < n_active; k++) {
-                                    int p = active[k];
-                                    if (a.first[p] != b.first[p])
-                                        return a.first[p] < b.first[p];
-                                }
-                                return false;
-                            });
-                        // Reorder records in-place using a temp buffer
-                        std::vector<uint8_t> tmp(count * RECORD_SIZE);
-                        for (uint64_t j = 0; j < count; j++)
-                            memcpy(tmp.data() + j * RECORD_SIZE,
-                                   h_data + (start + tbuf[j].second) * RECORD_SIZE, RECORD_SIZE);
-                        memcpy(h_data + start * RECORD_SIZE, tmp.data(), count * RECORD_SIZE);
-                    }
-                });
-            }
-            for (auto& th : fix_t) th.join();
-            double fix_ms = ft.end_ms();
-            printf("  Single-chunk fixup: %lu groups, %d active bytes, %.0f ms\n",
-                   groups.size(), n_active, fix_ms);
-            gpu_ms += fix_ms;
-        } else {
-            printf("  Single-chunk fixup: skipped (all %d varying bytes fit in %dB compact)\n",
-                   g_compact_count, (int)COMPACT_KEY_SIZE);
-        }
-#endif
-        r.total_ms = r.run_gen_ms = gpu_ms;
+        r.total_ms = r.run_gen_ms = t.end_ms();
         r.num_runs = 1;
         r.pcie_h2d_gb = r.pcie_d2h_gb = total_bytes / 1e9;
         r.sorted_output = nullptr; // sorted in-place in h_data
         return r;
     }
 
+#ifdef USE_COMPACT_KEY
+    // ── Runtime varying-byte detection ──
+    // Scan a sample of records to find which key bytes actually vary.
+    // The compact map must include ALL varying positions to preserve lex ordering.
+    {
+        uint64_t sample_n = num_records;  // scan ALL records for varying bytes
+        bool byte_varies[KEY_SIZE] = {};
+        int hw = std::max(1, (int)std::thread::hardware_concurrency());
+        uint64_t per_t = (sample_n + hw - 1) / hw;
+        std::vector<std::thread> scan_threads;
+        std::vector<std::array<bool, KEY_SIZE>> thread_varies(hw);
+        for (int t = 0; t < hw; t++) {
+            thread_varies[t].fill(false);
+            scan_threads.emplace_back([&, t]() {
+                uint64_t lo = std::max((uint64_t)1, (uint64_t)t * per_t);
+                uint64_t hi = std::min(lo + per_t, sample_n);
+                const uint8_t* r0 = h_data;
+                for (uint64_t i = lo; i < hi; i++) {
+                    const uint8_t* ri = h_data + i * RECORD_SIZE;
+                    for (int b = 0; b < (int)KEY_SIZE; b++) {
+                        if (!thread_varies[t][b] && r0[b] != ri[b])
+                            thread_varies[t][b] = true;
+                    }
+                }
+            });
+        }
+        for (auto& t : scan_threads) t.join();
+        for (int t = 0; t < hw; t++)
+            for (int b = 0; b < (int)KEY_SIZE; b++)
+                if (thread_varies[t][b]) byte_varies[b] = true;
+
+        num_varying = 0;
+        for (int b = 0; b < (int)KEY_SIZE; b++) {
+            if (byte_varies[b]) runtime_cmap[num_varying++] = b;
+        }
+        runtime_compact_size = ((num_varying + 7) / 8) * 8;  // pad to 8B
+        effective_compact_size = runtime_compact_size;
+
+        printf("== Step 1+2: Key Upload ==\n");
+        printf("  Runtime compact map: %d/%d bytes vary, %dB compact key (%d LSD passes)\n",
+               num_varying, (int)KEY_SIZE, runtime_compact_size, (runtime_compact_size + 7) / 8);
+
+        // Upload compact map to device
+        if (d_runtime_cmap) { cudaFree(d_runtime_cmap); d_runtime_cmap = nullptr; }
+        CUDA_CHECK(cudaMalloc(&d_runtime_cmap, num_varying * sizeof(int)));
+        CUDA_CHECK(cudaMemcpy(d_runtime_cmap, runtime_cmap, num_varying * sizeof(int), cudaMemcpyHostToDevice));
+
+        // Reallocate sort workspace for runtime compact size
+        sort_ws.free();
+    }
+#endif
+
     // ════════════════════════════════════════════════════════════════
-    // SINGLE-PASS KEY-ONLY SORT
-    //
-    // Instead of: upload full records → GPU sort → download sorted records → merge
-    // Do:         extract keys on CPU → upload 10% keys → GPU sort → download perm → CPU gather
-    //
-    // PCIe traffic: 8.4GB instead of 122.4GB for 60GB dataset (14.6× reduction!)
+    // KEY-ONLY SORT: extract keys on CPU → upload compact → GPU sort → download perm → CPU gather
     // ════════════════════════════════════════════════════════════════
 
     uint64_t total_keys_bytes = num_records * KEY_SIZE;
@@ -2176,6 +1752,278 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
     }
 #endif // PREFIX SORT disabled
 
+    // ── SAMPLE SORT PATH ──
+    // Eliminates merge phase entirely: partition → per-partition GPU sort → gather.
+    // SAMPLE_SORT=1 to enable.
+    if (getenv("SAMPLE_SORT") && atoi(getenv("SAMPLE_SORT")) > 0) {
+        printf("  Using SAMPLE SORT: partition → GPU sort → no merge\n\n");
+
+        // Free GPU buffers — sample sort manages its own GPU memory
+        for (int i = 0; i < NBUFS; i++) { if (d_buf[i]) { cudaFree(d_buf[i]); d_buf[i] = nullptr; } }
+        sort_ws.free();
+        if (d_key_buffer) { cudaFree(d_key_buffer); d_key_buffer = nullptr; }
+
+        // Sample sort operates directly on h_data — keys are the first KEY_SIZE
+        // bytes of each RECORD_SIZE record. No separate key extraction needed.
+        printf("== Phase 1+2: Sample Sort ==\n");
+        SampleSortResult ss = sample_sort_keys(h_data, KEY_SIZE, RECORD_SIZE, num_records);
+
+        printf("\n== Phase 3: CPU Gather ==\n");
+        WallTimer gather_timer; gather_timer.begin();
+        int num_threads = std::min(48, (int)std::thread::hardware_concurrency());
+        uint8_t* h_output_ss = h_output;
+        uint64_t chunk_g = (num_records + num_threads - 1) / num_threads;
+        std::vector<std::thread> gather_threads;
+        for (int t = 0; t < num_threads; t++) {
+            uint64_t start = (uint64_t)t * chunk_g;
+            uint64_t end = std::min(start + chunk_g, num_records);
+            if (start >= end) continue;
+            gather_threads.emplace_back([&, start, end]() {
+                constexpr int BLOCK = 256;
+                const uint8_t* src_ptrs[BLOCK];
+                for (uint64_t base = start; base < end; base += BLOCK) {
+                    int count = std::min((uint64_t)BLOCK, end - base);
+                    for (int j = 0; j < count; j++) {
+                        uint32_t src = ss.h_perm[base + j];
+                        src_ptrs[j] = h_data + (uint64_t)src * RECORD_SIZE;
+                        __builtin_prefetch(src_ptrs[j], 0, 0);
+                    }
+                    for (int j = 0; j < count; j++) {
+                        memcpy(h_output_ss + (base + j) * RECORD_SIZE, src_ptrs[j], RECORD_SIZE);
+                    }
+                }
+            });
+        }
+        for (auto& t : gather_threads) t.join();
+        double gather_ms = gather_timer.end_ms();
+        printf("  Gathered %.2f GB in %.0f ms (%.2f GB/s)\n",
+               total_bytes/1e9, gather_ms, total_bytes/(gather_ms*1e6));
+
+        ::free(ss.h_perm);
+        r.run_gen_ms = ss.classify_ms + ss.partition_ms;
+        r.merge_ms = ss.sort_ms;
+        r.total_ms = ss.total_ms + gather_ms;
+        r.num_runs = ss.num_partitions;
+        r.merge_passes = 0;
+        r.sorted_output = h_output_ss;
+        r.sorted_output_size = total_bytes;
+        r.sorted_output_is_mmap = h_output_is_mmap;
+        r.pcie_h2d_gb = 0;  // tracked internally by sample sort
+        r.pcie_d2h_gb = 0;
+        return r;
+    }
+
+    // ── SINGLE-PASS COMPACT SORT (DISABLED — needs fixup for SF50's 61 varying bytes) ──
+#if 0  // USE_COMPACT_KEY
+    {
+        size_t compact_total = (size_t)num_records * COMPACT_KEY_SIZE;
+        size_t ws_total = (size_t)num_records * (2*sizeof(uint64_t) + 2*sizeof(uint32_t));
+        size_t cub_est = 512ULL * 1024 * 1024;
+        size_t sp_needed = compact_total + ws_total + cub_est;
+
+        // Free d_buf to get max GPU memory for this check
+        for (int i = 0; i < NBUFS; i++) { if (d_buf[i]) { cudaFree(d_buf[i]); d_buf[i] = nullptr; } }
+        sort_ws.free();
+        if (d_key_buffer) { cudaFree(d_key_buffer); d_key_buffer = nullptr; }
+
+        size_t free_now_sp, dummy_sp;
+        CUDA_CHECK(cudaMemGetInfo(&free_now_sp, &dummy_sp));
+
+        if (sp_needed < free_now_sp * 0.95) {
+            printf("  SINGLE-PASS compact sort: %.1f GB needed, %.1f GB free\n",
+                   sp_needed/1e9, free_now_sp/1e9);
+            printf("  → No chunking, no merge, no fixup\n\n");
+
+            static const int h_cmap[26] = {
+                0, 1, 4, 5, 8, 9, 12, 13, 19, 20, 21, 29, 37, 44, 45, 51, 52, 53,
+                54, 55, 56, 57, 59, 60, 61, 65
+            };
+
+            // Allocate d_compact + sort workspace for ALL records
+            sort_ws.allocate(num_records);
+            // CUB scratch buffer
+            size_t cub_scratch_query = 0;
+            {
+                cub::DoubleBuffer<uint64_t> k(nullptr, nullptr);
+                cub::DoubleBuffer<uint32_t> v(nullptr, nullptr);
+                cub::DeviceRadixSort::SortPairs(nullptr, cub_scratch_query,
+                    k, v, (int)num_records, 0, 64);
+            }
+            size_t cub_scratch_size = std::max(cub_scratch_query * 2, (size_t)(128ULL*1024*1024));
+            uint8_t* d_cub_scratch;
+            CUDA_CHECK(cudaMalloc(&d_cub_scratch, cub_scratch_size));
+
+            // CPU extract compact keys — use both h_pin buffers as staging
+            // h_pin[0] and h_pin[1] are each buf_bytes (originally ~5.4GB).
+            // For compact keys: h_pin capacity = buf_bytes / COMPACT_KEY_SIZE per buffer.
+            uint64_t orig_buf_bytes = ((gpu_budget / NBUFS) / RECORD_SIZE) * (uint64_t)RECORD_SIZE;
+            uint64_t pin_cap = orig_buf_bytes / COMPACT_KEY_SIZE;  // records per h_pin
+
+            printf("== Phase 1: CPU Extract + H2D Compact Keys ==\n");
+            WallTimer sp_timer; sp_timer.begin();
+            int hw = std::max(1, (int)std::thread::hardware_concurrency());
+
+            // Pipeline: extract batch into h_pin[ping], H2D to d_compact, overlap next batch
+            cudaEvent_t h2d_done;
+            CUDA_CHECK(cudaEventCreate(&h2d_done));
+            uint64_t uploaded = 0;
+            int batch = 0;
+            double sp_h2d = 0;
+
+            while (uploaded < num_records) {
+                uint64_t cur_n = std::min(pin_cap, num_records - uploaded);
+                int ping = batch % 2;
+
+                // CPU extract this batch
+                {
+                    uint64_t per_t = (cur_n + hw - 1) / hw;
+                    std::vector<std::thread> threads;
+                    for (int t = 0; t < hw; t++) {
+                        threads.emplace_back([&, t, uploaded, cur_n, ping]() {
+                            uint64_t lo = t * per_t, hi = std::min(lo + per_t, cur_n);
+                            for (uint64_t j = lo; j < hi; j++) {
+                                const uint8_t* rec = h_data + (uploaded + j) * RECORD_SIZE;
+                                uint8_t* ck = h_pin[ping] + j * COMPACT_KEY_SIZE;
+                                for (int b = 0; b < 26; b++) ck[b] = rec[h_cmap[b]];
+                                ck[26]=0; ck[27]=0; ck[28]=0; ck[29]=0; ck[30]=0; ck[31]=0;
+                            }
+                        });
+                    }
+                    for (auto& t : threads) t.join();
+                }
+
+                // Wait for previous H2D to finish before overwriting d_compact region
+                if (batch > 0) CUDA_CHECK(cudaEventSynchronize(h2d_done));
+
+                // H2D this batch
+                size_t batch_bytes = cur_n * COMPACT_KEY_SIZE;
+                CUDA_CHECK(cudaMemcpyAsync(
+                    sort_ws.d_compact + uploaded * COMPACT_KEY_SIZE,
+                    h_pin[ping], batch_bytes,
+                    cudaMemcpyHostToDevice, streams[0]));
+                CUDA_CHECK(cudaEventRecord(h2d_done, streams[0]));
+                sp_h2d += batch_bytes;
+
+                uploaded += cur_n;
+                batch++;
+            }
+            CUDA_CHECK(cudaEventSynchronize(h2d_done));
+            CUDA_CHECK(cudaEventDestroy(h2d_done));
+            double extract_h2d_ms = sp_timer.end_ms();
+            printf("  Extracted + uploaded %lu compact keys in %.0f ms (%.1f GB PCIe)\n",
+                   num_records, extract_h2d_ms, sp_h2d/1e9);
+
+            // GPU sort: 4-pass LSD radix sort on all records at once
+            printf("== Phase 2: GPU CUB Sort (%d LSD passes on %luM records) ==\n",
+                   (COMPACT_KEY_SIZE + 7) / 8, num_records / 1000000);
+            CUDA_CHECK(cudaDeviceSynchronize());  // ensure H2D is truly done
+
+            cudaEvent_t sort_start_ev, sort_end_ev;
+            CUDA_CHECK(cudaEventCreate(&sort_start_ev));
+            CUDA_CHECK(cudaEventCreate(&sort_end_ev));
+            CUDA_CHECK(cudaEventRecord(sort_start_ev, streams[0]));
+
+            int nthreads = 256;
+            int nblks = (num_records + nthreads - 1) / nthreads;
+            init_identity_kernel<<<nblks, nthreads, 0, streams[0]>>>(sort_ws.d_indices, num_records);
+
+            uint32_t* perm_in = sort_ws.d_indices;
+            uint32_t* perm_out = sort_ws.d_indices_alt;
+            int num_chunks = (COMPACT_KEY_SIZE + 7) / 8;
+
+            WallTimer sort_wall; sort_wall.begin();
+            for (int chunk = num_chunks - 1; chunk >= 0; chunk--) {
+                int byte_offset = chunk * 8;
+                int chunk_bytes = std::min(8, (int)COMPACT_KEY_SIZE - byte_offset);
+
+                extract_uint64_from_compact_kernel<<<nblks, nthreads, 0, streams[0]>>>(
+                    sort_ws.d_compact, perm_in, sort_ws.d_keys, num_records,
+                    byte_offset, chunk_bytes, COMPACT_KEY_SIZE);
+                CUDA_CHECK(cudaGetLastError());
+
+                cub::DoubleBuffer<uint64_t> keys_buf(sort_ws.d_keys, sort_ws.d_keys_alt);
+                cub::DoubleBuffer<uint32_t> idx_buf(perm_in, perm_out);
+                size_t temp_bytes = cub_scratch_size;
+                cudaError_t cub_err = cub::DeviceRadixSort::SortPairs(d_cub_scratch, temp_bytes,
+                    keys_buf, idx_buf, (int)num_records, 0, chunk_bytes * 8, streams[0]);
+                if (cub_err != cudaSuccess) {
+                    printf("    CUB SortPairs ERROR: %s\n", cudaGetErrorString(cub_err));
+                }
+                perm_in = idx_buf.Current();
+                perm_out = idx_buf.Alternate();
+
+                CUDA_CHECK(cudaDeviceSynchronize());
+                double pass_ms = sort_wall.end_ms();
+                printf("    LSD pass %d (bytes %d-%d): %.3f ms\n",
+                       num_chunks - 1 - chunk, byte_offset, byte_offset + chunk_bytes - 1, pass_ms);
+                sort_wall.begin();
+            }
+            CUDA_CHECK(cudaEventRecord(sort_end_ev, streams[0]));
+            CUDA_CHECK(cudaDeviceSynchronize());
+            float sort_ms_f;
+            CUDA_CHECK(cudaEventElapsedTime(&sort_ms_f, sort_start_ev, sort_end_ev));
+            double sort_ms = sort_ms_f;
+            CUDA_CHECK(cudaEventDestroy(sort_start_ev));
+            CUDA_CHECK(cudaEventDestroy(sort_end_ev));
+            printf("  GPU sort total (event): %.1f ms, wall includes sync overhead\n", sort_ms);
+
+            // D2H permutation
+            phase_timer.begin();
+            CUDA_CHECK(cudaMemcpy(h_perm, perm_in, total_perm_bytes, cudaMemcpyDeviceToHost));
+            double dl_ms = phase_timer.end_ms();
+            printf("  Downloaded perm in %.0f ms\n", dl_ms);
+
+            // Free ALL GPU memory
+            sort_ws.free();
+            cudaFree(d_cub_scratch);
+
+            // CPU gather
+            printf("== Phase 3: CPU Gather ==\n");
+            phase_timer.begin();
+            int hw_threads = std::max(1, (int)std::thread::hardware_concurrency());
+            int PREFETCH_AHEAD = 512;
+            uint64_t chunk_per_t = (num_records + hw_threads - 1) / hw_threads;
+            std::vector<std::thread> threads;
+            for (int t = 0; t < hw_threads; t++) {
+                threads.emplace_back([&, t]() {
+                    uint64_t lo = t * chunk_per_t;
+                    uint64_t hi = std::min(lo + chunk_per_t, num_records);
+                    constexpr int WORDS = RECORD_SIZE / 8;
+                    for (uint64_t i = lo; i < hi; i++) {
+                        if (i + PREFETCH_AHEAD < hi)
+                            __builtin_prefetch(h_data + (uint64_t)h_perm[i+PREFETCH_AHEAD] * RECORD_SIZE, 0);
+                        const int64_t* src = (const int64_t*)(h_data + (uint64_t)h_perm[i] * RECORD_SIZE);
+                        int64_t* dst = (int64_t*)(h_output + i * RECORD_SIZE);
+                        for (int w = 0; w < WORDS; w++)
+                            _mm_stream_si64((long long*)(dst + w), src[w]);
+                    }
+                    _mm_sfence();
+                });
+            }
+            for (auto& t : threads) t.join();
+            double gather_ms = phase_timer.end_ms();
+            printf("  Gathered %.2f GB in %.0f ms (%.2f GB/s)\n",
+                   total_bytes/1e9, gather_ms, total_bytes/(gather_ms*1e6));
+
+            cudaFreeHost(h_perm);
+            r.run_gen_ms = extract_h2d_ms + sort_ms;
+            r.merge_ms = 0;
+            r.total_ms = extract_h2d_ms + sort_ms + dl_ms + gather_ms;
+            r.num_runs = 1;
+            r.merge_passes = 0;
+            r.pcie_h2d_gb = sp_h2d / 1e9;
+            r.pcie_d2h_gb = total_perm_bytes / 1e9;
+            r.sorted_output = h_output;
+            r.sorted_output_size = total_bytes;
+            r.sorted_output_is_mmap = h_output_is_mmap;
+            return r;
+        }
+        // Didn't fit — re-allocate d_buf for the OVC path below
+        for (int i = 0; i < NBUFS; i++)
+            CUDA_CHECK(cudaMalloc(&d_buf[i], buf_bytes));
+    }
+#endif // single-pass disabled
+
     // Check: prefix merge buffers fit? Need: 8B pfx1 + 8B pfx2 + 4B perm = 20B per record
     size_t ovc_total = num_records * (sizeof(uint64_t) + sizeof(uint64_t) + sizeof(uint32_t));
     bool use_ovc = (total_keys_bytes + est_arena > free_mem_now * 0.9) &&
@@ -2194,55 +2042,6 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
         ovc_buffer_records = num_records;
         ovc_run_offset = 0;
 
-        // ── Native 32B OVC extension: try to allocate pfx3/pfx4 ──────────
-        // With 4 × 8B prefix buffers the GPU merge can do 4-pass LSD on the
-        // full 32B compact prefix instead of 2-pass on 16B. The compact prefix
-        // is source-position-ordered, so correctness is preserved (compact-lex
-        // ≤ full-key-lex on canonicals). Extraction reads the record once and
-        // writes 4 uint64s instead of 2 — zero extra PCIe.
-        //
-        // Memory-conditional: only if total merge-peak footprint fits. At merge
-        // time sort_ws is freed; peak = 4 × 8B (pfx1..4) + 4B (perm) + 8B (alt)
-        // + 2 × 4B (perm_save + perm_alt) + CUB scratch ≈ 52B × N + ~1 GB.
-        //
-        //   SF50   (300 M): 15.6 GB + 1 GB = 16.6 GB ≤ 25 GB ✓
-        //   SF100  (600 M): 31.2 GB + 1 GB = 32.2 GB > 25 GB ✗
-        //
-        // Gate: num_records * 60 + 1 GB < free_mem * 0.90. Override with
-        // env OVC_32B=0 (force 16B) or OVC_32B=1 (attempt regardless; still
-        // checks cudaMalloc return).
-        bool try_32b = true;
-        if (const char* e = getenv("OVC_32B")) {
-            if (std::string(e) == "0") try_32b = false;
-            // Any non-"0" value forces attempt.
-        }
-        if (try_32b) {
-            size_t free_now_32b, total_32b;
-            CUDA_CHECK(cudaMemGetInfo(&free_now_32b, &total_32b));
-            size_t needed_32b = num_records * 52ULL + (size_t)(1ULL << 30); // +1 GB for CUB
-            const char* force = getenv("OVC_32B");
-            bool force_attempt = (force && std::string(force) != "0");
-            if (!force_attempt && needed_32b > (size_t)(free_now_32b * 0.90)) {
-                printf("  32B OVC extension: SKIPPED (would need %.1f GB, have %.1f GB usable)\n",
-                       needed_32b / 1e9, free_now_32b * 0.90 / 1e9);
-            } else {
-                cudaError_t e3 = cudaMalloc(&d_pfx3_buffer, num_records * sizeof(uint64_t));
-                cudaError_t e4 = (e3 == cudaSuccess) ?
-                    cudaMalloc(&d_pfx4_buffer, num_records * sizeof(uint64_t))
-                    : cudaErrorMemoryAllocation;
-                if (e3 != cudaSuccess || e4 != cudaSuccess) {
-                    if (d_pfx3_buffer) { cudaFree(d_pfx3_buffer); d_pfx3_buffer = nullptr; }
-                    if (d_pfx4_buffer) { cudaFree(d_pfx4_buffer); d_pfx4_buffer = nullptr; }
-                    printf("  32B OVC extension: cudaMalloc failed, falling back to 16B\n");
-                } else {
-                    printf("  32B OVC extension: ENABLED (pfx3+pfx4 allocated, %.1f GB extra)\n",
-                           2.0 * num_records * 8 / 1e9);
-                }
-            }
-        } else {
-            printf("  32B OVC extension: DISABLED via OVC_32B=0\n");
-        }
-
         // Memory strategy: try compact-key-only upload first (3.75× less PCIe).
         // If d_compact fits, we only need 1 CUB scratch buffer (not 3 full d_bufs).
         size_t ovc_used, ovc_dummy;
@@ -2252,7 +2051,7 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
         // Estimate chunk size for compact upload mode: only need sort_ws (no d_buf[0/1])
         // sort_ws per record: keys(8) + keys_alt(8) + indices(4) + indices_alt(4) + compact(32) = 56B
         // Plus 1 CUB scratch buffer
-        if (!g_disable_compact) {
+        {
             size_t compact_budget = (size_t)(ovc_used * 0.92);
             // Query CUB for actual scratch needed (then pad generously)
             size_t cub_temp_query = 0;
@@ -2265,13 +2064,13 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
             }
             size_t cub_scratch_size = std::max(cub_temp_query * 2, (size_t)(128ULL * 1024 * 1024));
             uint64_t compact_buf_records = (compact_budget - cub_scratch_size) /
-                (8 + 8 + 4 + 4 + COMPACT_KEY_SIZE);  // 56B per record
+                (8 + 8 + 4 + 4 + runtime_compact_size);  // per-record GPU memory
             // Cap to fit in h_pin staging (allocated at original buf_bytes in constructor)
             uint64_t orig_buf_bytes = ((gpu_budget / NBUFS) / RECORD_SIZE) * (uint64_t)RECORD_SIZE;
-            uint64_t h_pin_cap = orig_buf_bytes / COMPACT_KEY_SIZE;
+            uint64_t h_pin_cap = orig_buf_bytes / runtime_compact_size;
             if (compact_buf_records > h_pin_cap) compact_buf_records = h_pin_cap;
 
-            sort_ws.allocate(compact_buf_records);
+            sort_ws.allocate(compact_buf_records, runtime_compact_size);
             if (sort_ws.d_compact) {
                 CUDA_CHECK(cudaMalloc(&d_buf[2], cub_scratch_size));
                 d_buf[0] = nullptr;
@@ -2283,7 +2082,7 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
                 printf("  COMPACT UPLOAD: %.0fM rec/chunk, %d chunks, "
                        "PCIe %.1f GB (vs %.1f GB full), CUB scratch %.0f MB\n",
                        compact_buf_records/1e6, total_chunks,
-                       (double)num_records * COMPACT_KEY_SIZE / 1e9,
+                       (double)num_records * runtime_compact_size / 1e9,
                        (double)num_records * RECORD_SIZE / 1e9,
                        cub_scratch_size/1e6);
                 goto run_generation;
@@ -2305,7 +2104,7 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
             }
             buf_records = ovc_buf_records;
             buf_bytes = ovc_buf_bytes;
-            sort_ws.allocate(buf_records);
+            sort_ws.allocate(buf_records, runtime_compact_size);
         }
 run_generation:
 
@@ -2328,29 +2127,20 @@ run_generation:
         for (int i = 0; i < NBUFS; i++) { if (d_buf[i]) { cudaFree(d_buf[i]); d_buf[i] = nullptr; } }
         if (d_key_buffer) { cudaFree(d_key_buffer); d_key_buffer = nullptr; }
 
-        // Two merge paths:
-        //  - 2-pass: 16B prefix (pfx1+pfx2). Memory-parsimonious; used on SF100 where
-        //    pfx3/pfx4 wouldn't fit.
-        //  - 4-pass: 32B prefix (pfx1..pfx4). Used when pfx3/pfx4 were allocated
-        //    during setup (SF50-class). ~150-300 ms extra merge time pays for
-        //    itself when fixup is the bottleneck (SF50 ≈ 7-10 s fixup).
-        bool use_32b_merge = (d_pfx3_buffer != nullptr && d_pfx4_buffer != nullptr);
-        int effective_compact_prefix_bytes = use_32b_merge ? 32 : 16;
-
-        if (use_32b_merge) {
-            printf("== Phase 2: GPU 32B Prefix Merge (4 CUB LSD passes) ==\n");
-        } else {
-            printf("== Phase 2: GPU 16B Prefix Merge (2 CUB LSD passes) ==\n");
-        }
+        printf("== Phase 2: GPU 16B Prefix Merge (2 CUB LSD passes) ==\n");
 
         // We have: d_prefix_buffer (pfx1, bytes 0-7), d_ovc_buffer (pfx2, bytes 8-15),
-        // optionally d_pfx3_buffer (bytes 16-23), d_pfx4_buffer (bytes 24-31),
         // d_global_perm (global record indices).
         //
-        // LSD merge: sort from least significant 8B prefix to most significant.
-        // CUB SortPairs carries only ONE satellite array; after each pass we gather
-        // all other live arrays using the shuffle indices CUB produces when we pass
-        // an identity array as the satellite.
+        // LSD merge: sort by pfx2 first (least significant 8B), then by pfx1 (most
+        // significant 8B). CUB SortPairs carries only ONE satellite array, but we need
+        // both pfx1 and perm to follow the pfx2 sort. Solution: carry a local identity
+        // index as satellite in pass 1, then gather pfx1 and perm using the shuffle map.
+        //
+        // Memory (600M records):
+        //   Persistent: pfx1 (4.8GB) + pfx2 (4.8GB) + perm (2.4GB) = 12.0GB
+        //   New allocs: pfx_alt (4.8GB) + perm_save (2.4GB) + perm_alt (2.4GB) + CUB (~0.8GB) = 10.4GB
+        //   Total: ~22.4GB < 24.5GB usable ✓
 
         int nthreads2 = 256;
         int nblks2 = (num_records + nthreads2 - 1) / nthreads2;
@@ -2361,8 +2151,7 @@ run_generation:
             printf("  GPU free before merge alloc: %.2f GB\n", fr/1e9);
         }
 
-        // Allocate merge workspace. Same for both paths:
-        // 1 extra 8B alt + 2 extra 4B slots (perm_save + perm_alt) + CUB scratch.
+        // Allocate merge workspace
         uint64_t* d_pfx_alt;     // CUB key double-buffer alt (8B×N)
         uint32_t* d_perm_save;   // Backup of original perm before CUB overwrites it (4B×N)
         uint32_t* d_perm_alt;    // CUB val double-buffer / identity init (4B×N)
@@ -2385,16 +2174,6 @@ run_generation:
             printf("  GPU free after merge alloc: %.2f GB\n", fr/1e9);
         }
 
-        // Save original physical allocation pointers so cleanup is unambiguous.
-        // Through rotations below, the class-member pointers can end up aliasing
-        // the logical current-perm/current-pfx; freeing by original alloc avoids
-        // double-frees regardless of CUB's internal pass parity.
-        uint64_t* const alloc_p1 = d_prefix_buffer;
-        uint64_t* const alloc_p2 = d_ovc_buffer;
-        uint64_t* const alloc_p3 = d_pfx3_buffer;   // nullptr on 2-pass path
-        uint64_t* const alloc_p4 = d_pfx4_buffer;   // nullptr on 2-pass path
-        uint32_t* const alloc_perm = d_global_perm;
-
         // Save original perm — CUB will use d_global_perm as val double-buffer alt
         CUDA_CHECK(cudaMemcpy(d_perm_save, d_global_perm,
                                num_records * sizeof(uint32_t), cudaMemcpyDeviceToDevice));
@@ -2402,269 +2181,96 @@ run_generation:
         // Init identity index for pass 1 satellite
         init_identity_kernel<<<nblks2, nthreads2>>>(d_perm_alt, num_records);
 
-        WallTimer merge_timer;
-        uint32_t h_has_ties = 0;
-        uint32_t* final_perm = nullptr;     // holds final sorted perm after last pass
-        double merge_ms = 0;
-
-        if (use_32b_merge) {
-            // ── 4-pass LSD: pfx4 → pfx3 → pfx2 → pfx1 ──
-            // Logical pointers track which physical slot currently holds each array.
-            // After each pass one src slot becomes stale (src already read, dst written
-            // elsewhere), providing the free 8B alt for the next pass — so we need
-            // only 1 extra 8B alloc beyond the 4 pfx buffers.
-            uint64_t* cur_pfx1 = alloc_p1;
-            uint64_t* cur_pfx2 = alloc_p2;
-            uint64_t* cur_pfx3 = alloc_p3;
-            uint64_t* cur_pfx4 = alloc_p4;
-            uint64_t* free_pfx_alt = d_pfx_alt;
-            uint32_t* cur_perm = alloc_perm;
-            uint32_t* free_4B_a = d_perm_alt;  // initialized to identity above
-            uint32_t* free_4B_b = d_perm_save; // src for perm gather in pass 1
-
-            // ── PASS 1: Sort by pfx4 (LSB) ──
-            merge_timer.begin();
-            {
-                cub::DoubleBuffer<uint64_t> kb1(cur_pfx4, free_pfx_alt);
-                cub::DoubleBuffer<uint32_t> vb1(free_4B_a, cur_perm);
-                size_t temp = cub_merge_temp;
-                cub::DeviceRadixSort::SortPairs(d_cub_merge_temp, temp,
-                    kb1, vb1, (int)num_records, 0, 64);
-
-                uint64_t* sorted_p4 = kb1.Current();
-                uint64_t* junk_8B  = kb1.Alternate();
-                uint32_t* shuffle  = vb1.Current();
-                uint32_t* junk_4B  = vb1.Alternate();
-
-                // Gather pfx1 → junk_8B. cur_pfx1 slot becomes stale.
-                gather_uint64_kernel<<<nblks2, nthreads2>>>(cur_pfx1, shuffle, junk_8B, num_records);
-                uint64_t* p1_next = junk_8B;
-                uint64_t* slot_pfx1_stale = cur_pfx1;
-                // Gather pfx2 → stale pfx1 slot. cur_pfx2 slot becomes stale.
-                gather_uint64_kernel<<<nblks2, nthreads2>>>(cur_pfx2, shuffle, slot_pfx1_stale, num_records);
-                uint64_t* p2_next = slot_pfx1_stale;
-                uint64_t* slot_pfx2_stale = cur_pfx2;
-                // Gather pfx3 → stale pfx2 slot. cur_pfx3 slot becomes stale (our next free alt).
-                gather_uint64_kernel<<<nblks2, nthreads2>>>(cur_pfx3, shuffle, slot_pfx2_stale, num_records);
-                uint64_t* p3_next = slot_pfx2_stale;
-                uint64_t* next_free_alt = cur_pfx3;
-                // Gather perm (from the saved copy) → junk_4B.
-                gather_uint32_kernel<<<nblks2, nthreads2>>>(free_4B_b, shuffle, junk_4B, num_records);
-                uint32_t* perm_next = junk_4B;
-
-                cur_pfx4 = sorted_p4;
-                cur_pfx1 = p1_next;
-                cur_pfx2 = p2_next;
-                cur_pfx3 = p3_next;
-                free_pfx_alt = next_free_alt;
-                cur_perm = perm_next;
-                // shuffle slot becomes free after gathers; perm_save (free_4B_b) also free after last use
-                free_4B_a = shuffle;
-                free_4B_b = free_4B_b;  // still the same alloc, now stale = free
-            }
+        // ── PASS 1: Sort by pfx2 (bytes 8-15), carry local identity ──
+        // After: shuffle[i] = original position that maps to output position i
+        WallTimer merge_timer; merge_timer.begin();
+        uint64_t* pfx1_gathered;
+        uint32_t* perm_gathered;
+        uint64_t* pass2_key_alt;
+        uint32_t* pass2_val_alt;
+        {
+            cub::DoubleBuffer<uint64_t> kb1(d_ovc_buffer, d_pfx_alt);
+            cub::DoubleBuffer<uint32_t> vb1(d_perm_alt, d_global_perm);
+            size_t temp = cub_merge_temp;
+            cub::DeviceRadixSort::SortPairs(d_cub_merge_temp, temp,
+                kb1, vb1, (int)num_records, 0, 64);
             CUDA_CHECK(cudaDeviceSynchronize());
-            double pass1_ms = merge_timer.end_ms();
-            printf("  Pass 1 (sort by pfx4 + gather): %.0f ms\n", pass1_ms);
 
-            // ── PASS 2: Sort by pfx3 ──
-            merge_timer.begin();
-            init_identity_kernel<<<nblks2, nthreads2>>>(free_4B_a, num_records);
-            {
-                cub::DoubleBuffer<uint64_t> kb2(cur_pfx3, free_pfx_alt);
-                cub::DoubleBuffer<uint32_t> vb2(free_4B_a, free_4B_b);
-                size_t temp = cub_merge_temp;
-                cub::DeviceRadixSort::SortPairs(d_cub_merge_temp, temp,
-                    kb2, vb2, (int)num_records, 0, 64);
+            uint32_t* shuffle = vb1.Current();
 
-                uint64_t* sorted_p3 = kb2.Current();
-                uint64_t* junk_8B  = kb2.Alternate();
-                uint32_t* shuffle  = vb2.Current();
-                uint32_t* junk_4B  = vb2.Alternate();
+            // Gather pfx1 into pfx2-sorted order: pfx1_gathered[i] = pfx1[shuffle[i]]
+            // Write into CUB's key alt buffer (safe — sorted pfx2 not needed anymore)
+            pfx1_gathered = kb1.Alternate();
+            gather_uint64_kernel<<<nblks2, nthreads2>>>(
+                d_prefix_buffer, shuffle, pfx1_gathered, num_records);
 
-                gather_uint64_kernel<<<nblks2, nthreads2>>>(cur_pfx1, shuffle, junk_8B, num_records);
-                uint64_t* p1_next = junk_8B;
-                uint64_t* slot1_stale = cur_pfx1;
-                gather_uint64_kernel<<<nblks2, nthreads2>>>(cur_pfx2, shuffle, slot1_stale, num_records);
-                uint64_t* p2_next = slot1_stale;
-                uint64_t* slot2_stale = cur_pfx2;
-                gather_uint64_kernel<<<nblks2, nthreads2>>>(cur_pfx4, shuffle, slot2_stale, num_records);
-                uint64_t* p4_next = slot2_stale;
-                uint64_t* next_free_alt = cur_pfx4;
-                gather_uint32_kernel<<<nblks2, nthreads2>>>(cur_perm, shuffle, junk_4B, num_records);
-                uint32_t* perm_next = junk_4B;
-                uint32_t* prev_perm = cur_perm;
+            // Gather perm into pfx2-sorted order: perm_gathered[i] = perm_save[shuffle[i]]
+            // Write into CUB's val alt buffer
+            perm_gathered = vb1.Alternate();
+            gather_uint32_kernel<<<nblks2, nthreads2>>>(
+                d_perm_save, shuffle, perm_gathered, num_records);
 
-                cur_pfx3 = sorted_p3;
-                cur_pfx1 = p1_next;
-                cur_pfx2 = p2_next;
-                cur_pfx4 = p4_next;
-                free_pfx_alt = next_free_alt;
-                cur_perm = perm_next;
-                free_4B_a = shuffle;
-                free_4B_b = prev_perm;
-            }
-            CUDA_CHECK(cudaDeviceSynchronize());
-            double pass2_ms = merge_timer.end_ms();
-            printf("  Pass 2 (sort by pfx3 + gather): %.0f ms\n", pass2_ms);
-
-            // ── PASS 3: Sort by pfx2 ──
-            merge_timer.begin();
-            init_identity_kernel<<<nblks2, nthreads2>>>(free_4B_a, num_records);
-            {
-                cub::DoubleBuffer<uint64_t> kb3(cur_pfx2, free_pfx_alt);
-                cub::DoubleBuffer<uint32_t> vb3(free_4B_a, free_4B_b);
-                size_t temp = cub_merge_temp;
-                cub::DeviceRadixSort::SortPairs(d_cub_merge_temp, temp,
-                    kb3, vb3, (int)num_records, 0, 64);
-
-                uint64_t* sorted_p2 = kb3.Current();
-                uint64_t* junk_8B  = kb3.Alternate();
-                uint32_t* shuffle  = vb3.Current();
-                uint32_t* junk_4B  = vb3.Alternate();
-
-                gather_uint64_kernel<<<nblks2, nthreads2>>>(cur_pfx1, shuffle, junk_8B, num_records);
-                uint64_t* p1_next = junk_8B;
-                uint64_t* slot1_stale = cur_pfx1;
-                gather_uint64_kernel<<<nblks2, nthreads2>>>(cur_pfx3, shuffle, slot1_stale, num_records);
-                uint64_t* p3_next = slot1_stale;
-                uint64_t* slot3_stale = cur_pfx3;
-                gather_uint64_kernel<<<nblks2, nthreads2>>>(cur_pfx4, shuffle, slot3_stale, num_records);
-                uint64_t* p4_next = slot3_stale;
-                uint64_t* next_free_alt = cur_pfx4;
-                gather_uint32_kernel<<<nblks2, nthreads2>>>(cur_perm, shuffle, junk_4B, num_records);
-                uint32_t* perm_next = junk_4B;
-                uint32_t* prev_perm = cur_perm;
-
-                cur_pfx2 = sorted_p2;
-                cur_pfx1 = p1_next;
-                cur_pfx3 = p3_next;
-                cur_pfx4 = p4_next;
-                free_pfx_alt = next_free_alt;
-                cur_perm = perm_next;
-                free_4B_a = shuffle;
-                free_4B_b = prev_perm;
-            }
-            CUDA_CHECK(cudaDeviceSynchronize());
-            double pass3_ms = merge_timer.end_ms();
-            printf("  Pass 3 (sort by pfx2 + gather): %.0f ms\n", pass3_ms);
-
-            // ── 32B tie check (between pass 3 and pass 4) ──
-            // Array is stably sorted by (pfx2, pfx3, pfx4); pfx1 gathered to match.
-            // An adjacent pair with all 4 prefixes equal means the 32 compact bytes
-            // are identical → CPU fixup on remaining record bytes may be needed.
-            {
-                uint32_t* d_has_ties;
-                CUDA_CHECK(cudaMalloc(&d_has_ties, sizeof(uint32_t)));
-                CUDA_CHECK(cudaMemset(d_has_ties, 0, sizeof(uint32_t)));
-                check_full_32B_ties_kernel<<<nblks2, nthreads2>>>(
-                    cur_pfx1, cur_pfx2, cur_pfx3, cur_pfx4, num_records, d_has_ties);
-                CUDA_CHECK(cudaMemcpy(&h_has_ties, d_has_ties, sizeof(uint32_t), cudaMemcpyDeviceToHost));
-                cudaFree(d_has_ties);
-            }
-            printf("  GPU 32B tie check: %s\n",
-                   h_has_ties ? "TIES FOUND — CPU fixup needed" : "NO TIES — fixup skipped");
-
-            // ── PASS 4: Sort by pfx1 (MSB), carry perm directly ──
-            merge_timer.begin();
-            {
-                cub::DoubleBuffer<uint64_t> kb4(cur_pfx1, free_pfx_alt);
-                cub::DoubleBuffer<uint32_t> vb4(cur_perm, free_4B_a);
-                size_t temp = cub_merge_temp;
-                cub::DeviceRadixSort::SortPairs(d_cub_merge_temp, temp,
-                    kb4, vb4, (int)num_records, 0, 64);
-                final_perm = vb4.Current();
-            }
-            CUDA_CHECK(cudaDeviceSynchronize());
-            double pass4_ms = merge_timer.end_ms();
-            printf("  Pass 4 (sort by pfx1): %.0f ms\n", pass4_ms);
-            merge_ms = pass1_ms + pass2_ms + pass3_ms + pass4_ms;
-            printf("  GPU 32B prefix merge total: %.0f ms\n", merge_ms);
-        } else {
-            // ── 2-pass LSD: pfx2 → pfx1 (existing 16B path) ──
-            uint64_t* pfx1_gathered;
-            uint32_t* perm_gathered;
-            uint64_t* pass2_key_alt;
-            uint32_t* pass2_val_alt;
-
-            merge_timer.begin();
-            {
-                cub::DoubleBuffer<uint64_t> kb1(alloc_p2, d_pfx_alt);
-                cub::DoubleBuffer<uint32_t> vb1(d_perm_alt, alloc_perm);
-                size_t temp = cub_merge_temp;
-                cub::DeviceRadixSort::SortPairs(d_cub_merge_temp, temp,
-                    kb1, vb1, (int)num_records, 0, 64);
-                CUDA_CHECK(cudaDeviceSynchronize());
-
-                uint32_t* shuffle = vb1.Current();
-
-                pfx1_gathered = kb1.Alternate();
-                gather_uint64_kernel<<<nblks2, nthreads2>>>(
-                    alloc_p1, shuffle, pfx1_gathered, num_records);
-
-                perm_gathered = vb1.Alternate();
-                gather_uint32_kernel<<<nblks2, nthreads2>>>(
-                    d_perm_save, shuffle, perm_gathered, num_records);
-
-                pass2_key_alt = kb1.Current();
-                pass2_val_alt = vb1.Current();
-            }
-            CUDA_CHECK(cudaDeviceSynchronize());
-            double pass1_ms = merge_timer.end_ms();
-            printf("  Pass 1 (sort by pfx2 + gather): %.0f ms\n", pass1_ms);
-
-            {
-                uint32_t* d_has_ties;
-                CUDA_CHECK(cudaMalloc(&d_has_ties, sizeof(uint32_t)));
-                CUDA_CHECK(cudaMemset(d_has_ties, 0, sizeof(uint32_t)));
-                check_full_16B_ties_kernel<<<nblks2, nthreads2>>>(
-                    pass2_key_alt, pfx1_gathered, num_records, d_has_ties);
-                CUDA_CHECK(cudaMemcpy(&h_has_ties, d_has_ties, sizeof(uint32_t), cudaMemcpyDeviceToHost));
-                cudaFree(d_has_ties);
-            }
-            printf("  GPU 16B tie check: %s\n",
-                   h_has_ties ? "TIES FOUND — CPU fixup needed" : "NO TIES — fixup skipped");
-
-            merge_timer.begin();
-            {
-                cub::DoubleBuffer<uint64_t> kb2(pfx1_gathered, pass2_key_alt);
-                cub::DoubleBuffer<uint32_t> vb2(perm_gathered, pass2_val_alt);
-                size_t temp = cub_merge_temp;
-                cub::DeviceRadixSort::SortPairs(d_cub_merge_temp, temp,
-                    kb2, vb2, (int)num_records, 0, 64);
-                final_perm = vb2.Current();
-            }
-            CUDA_CHECK(cudaDeviceSynchronize());
-            double pass2_ms = merge_timer.end_ms();
-            printf("  Pass 2 (sort by pfx1): %.0f ms\n", pass2_ms);
-            merge_ms = pass1_ms + pass2_ms;
-            printf("  GPU 16B prefix merge total: %.0f ms\n", merge_ms);
+            // For pass 2 double-buffers: reuse Current() buffers as alt
+            pass2_key_alt = kb1.Current();   // sorted pfx2 (also used for tie check below)
+            pass2_val_alt = vb1.Current();
         }
+        CUDA_CHECK(cudaDeviceSynchronize());
+        double pass1_ms = merge_timer.end_ms();
+        printf("  Pass 1 (sort by pfx2 + gather): %.0f ms\n", pass1_ms);
+
+        // Full 16B tie check: between passes, we have sorted pfx2 (in pass2_key_alt)
+        // and gathered pfx1 (in pfx1_gathered). Check if any adjacent pair has BOTH equal.
+        // This is precise (not conservative) and runs at HBM bandwidth (~100ms).
+        uint32_t h_has_ties = 0;
+        {
+            uint32_t* d_has_ties;
+            CUDA_CHECK(cudaMalloc(&d_has_ties, sizeof(uint32_t)));
+            CUDA_CHECK(cudaMemset(d_has_ties, 0, sizeof(uint32_t)));
+            check_full_16B_ties_kernel<<<nblks2, nthreads2>>>(
+                pass2_key_alt, pfx1_gathered, num_records, d_has_ties);
+            CUDA_CHECK(cudaMemcpy(&h_has_ties, d_has_ties, sizeof(uint32_t), cudaMemcpyDeviceToHost));
+            cudaFree(d_has_ties);
+        }
+        printf("  GPU 16B tie check: %s\n", h_has_ties ? "TIES FOUND — CPU fixup needed" : "NO TIES — fixup skipped");
+
+        // Free buffers no longer needed
+        cudaFree(d_prefix_buffer); d_prefix_buffer = nullptr;  // original pfx1
+        cudaFree(d_perm_save);                                  // perm backup
+
+        // ── PASS 2: Sort by pfx1 (bytes 0-7), carry perm ──
+        merge_timer.begin();
+        {
+            cub::DoubleBuffer<uint64_t> kb2(pfx1_gathered, pass2_key_alt);
+            cub::DoubleBuffer<uint32_t> vb2(perm_gathered, pass2_val_alt);
+            size_t temp = cub_merge_temp;
+            cub::DeviceRadixSort::SortPairs(d_cub_merge_temp, temp,
+                kb2, vb2, (int)num_records, 0, 64);
+            d_global_perm = vb2.Current();
+        }
+        CUDA_CHECK(cudaDeviceSynchronize());
+        double pass2_ms = merge_timer.end_ms();
+
+        double merge_ms = pass1_ms + pass2_ms;
+        printf("  Pass 2 (sort by pfx1): %.0f ms\n", pass2_ms);
+        printf("  GPU 16B prefix merge total: %.0f ms\n", merge_ms);
 
         // Download final permutation
         phase_timer.begin();
-        CUDA_CHECK(cudaMemcpy(h_perm, final_perm, total_perm_bytes, cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(h_perm, d_global_perm, total_perm_bytes, cudaMemcpyDeviceToHost));
         double dl_ms = phase_timer.end_ms();
         r.pcie_d2h_gb = total_perm_bytes / 1e9;
         printf("  Downloaded perm in %.0f ms\n", dl_ms);
 
-        // Free ALL GPU merge buffers by their ORIGINAL physical allocation pointers.
-        // This avoids any aliasing hazard from CUB's internal buffer ping-pong.
-        cudaFree(alloc_p1);
-        cudaFree(alloc_p2);
-        if (alloc_p3) cudaFree(alloc_p3);
-        if (alloc_p4) cudaFree(alloc_p4);
-        cudaFree(alloc_perm);
+        // Free ALL GPU buffers
+        cudaFree(d_ovc_buffer); d_ovc_buffer = nullptr;
         cudaFree(d_pfx_alt);
         cudaFree(d_perm_alt);
-        cudaFree(d_perm_save);
+        cudaFree(d_global_perm); d_global_perm = nullptr;
         cudaFree(d_cub_merge_temp);
-        d_prefix_buffer = nullptr;
-        d_ovc_buffer = nullptr;
-        d_pfx3_buffer = nullptr;
-        d_pfx4_buffer = nullptr;
-        d_global_perm = nullptr;
 
-        // CPU gather: apply permutation to original h_data
+        // CPU gather + inline fixup detection: apply permutation to original h_data
+        // While gathering, detect groups of adjacent records with equal 16B prefix
+        // (the bytes the GPU sorted by). This eliminates a separate ~600ms scan.
         // Uses non-temporal stores to avoid cache pollution on the write side,
         // freeing L3 cache for random reads from h_data.
         phase_timer.begin();
@@ -2672,20 +2278,75 @@ run_generation:
         int hw_threads = std::max(1, (int)std::thread::hardware_concurrency());
         int PREFETCH_AHEAD = 512;
         uint64_t chunk_per_t = (num_records + hw_threads - 1) / hw_threads;
+
+        // Determine effective prefix bytes for group detection
+        int effective_prefix_bytes;
+#ifdef USE_COMPACT_KEY
+        if (used_compact_prefix) {
+            effective_prefix_bytes = std::min(16, runtime_compact_size);
+        } else
+#endif
+        {
+            effective_prefix_bytes = std::min(16, (int)KEY_SIZE);
+        }
+
+        bool need_fixup = h_has_ties;
+#ifdef USE_COMPACT_KEY
+        if (used_compact_prefix && runtime_compact_size <= 16) need_fixup = false;
+#endif
+        if (KEY_SIZE <= 16) need_fixup = false;
+
+        // Per-thread group vectors (only used when need_fixup)
+        std::vector<std::vector<std::pair<uint64_t,uint64_t>>> gather_thread_groups(hw_threads);
+
         std::vector<std::thread> threads;
         for (int t = 0; t < hw_threads; t++) {
             threads.emplace_back([&, t]() {
                 uint64_t lo = t * chunk_per_t;
                 uint64_t hi = std::min(lo + chunk_per_t, num_records);
                 constexpr int WORDS = RECORD_SIZE / 8;  // 120/8 = 15
+
+                // Small buffer for previous record's prefix bytes (for group detection)
+                uint8_t prev_pfx[16] = {};
+                uint64_t group_start = lo;
+
                 for (uint64_t i = lo; i < hi; i++) {
                     if (i + PREFETCH_AHEAD < hi)
                         __builtin_prefetch(h_data + (uint64_t)h_perm[i+PREFETCH_AHEAD] * RECORD_SIZE, 0);
-                    const int64_t* src = (const int64_t*)(h_data + (uint64_t)h_perm[i] * RECORD_SIZE);
+                    const uint8_t* src_raw = h_data + (uint64_t)h_perm[i] * RECORD_SIZE;
+                    const int64_t* src = (const int64_t*)src_raw;
                     int64_t* dst = (int64_t*)(h_output + i * RECORD_SIZE);
                     // Non-temporal streaming stores (bypass write cache)
                     for (int w = 0; w < WORDS; w++)
                         _mm_stream_si64((long long*)(dst + w), src[w]);
+
+                    // Inline group detection during gather
+                    if (need_fixup) {
+                        // Extract prefix from source (already in cache from the copy)
+                        uint8_t cur_pfx[16];
+#ifdef USE_COMPACT_KEY
+                        if (used_compact_prefix) {
+                            for (int c = 0; c < effective_prefix_bytes && c < num_varying; c++)
+                                cur_pfx[c] = src_raw[runtime_cmap[c]];
+                        } else
+#endif
+                        {
+                            memcpy(cur_pfx, src_raw, effective_prefix_bytes);
+                        }
+
+                        if (i > lo) {
+                            bool same = (memcmp(prev_pfx, cur_pfx, effective_prefix_bytes) == 0);
+                            if (!same && (i - group_start > 1)) {
+                                gather_thread_groups[t].push_back({group_start, i - group_start});
+                            }
+                            if (!same) group_start = i;
+                        }
+                        memcpy(prev_pfx, cur_pfx, effective_prefix_bytes);
+                    }
+                }
+                // Close final group in this thread's chunk
+                if (need_fixup && (hi - group_start > 1)) {
+                    gather_thread_groups[t].push_back({group_start, hi - group_start});
                 }
                 _mm_sfence();
             });
@@ -2695,310 +2356,88 @@ run_generation:
         printf("  Gathered %.2f GB in %.0f ms (%.2f GB/s)\n",
                total_bytes/1e9, gather_ms, total_bytes/(gather_ms*1e6));
 
-        // CPU fixup: only needed if GPU detected pfx1 ties (very rare with compact key).
+        // CPU fixup: groups were detected inline during gather (no separate scan needed).
         phase_timer.begin();
         double fixup_ms = 0;
-
-#ifdef USE_COMPACT_KEY
-        // Use runtime-detected compact map (filled by detect_compact_map at sort start)
-        const int* h_compact_map = g_compact_map;
-#endif
-
-        // Determine effective prefix bytes the GPU sorted by.
-        // With 4-pass merge (pfx1..pfx4) the GPU covers 32 compact bytes;
-        // with 2-pass it covers 16. effective_compact_prefix_bytes was set
-        // in Phase 2 based on whether d_pfx3/pfx4 were allocated.
-        int effective_prefix_bytes;
-#ifdef USE_COMPACT_KEY
-        if (used_compact_prefix) {
-            effective_prefix_bytes = std::min(effective_compact_prefix_bytes, g_compact_count);
-        } else
-#endif
-        {
-            effective_prefix_bytes = std::min(16, (int)KEY_SIZE);
-        }
-
-        // Skip fixup if: (a) no pfx1 ties detected on GPU, or (b) prefix covers full key
-        bool need_fixup = h_has_ties;
-#ifdef USE_COMPACT_KEY
-        // If compact has ≤ effective_compact_prefix_bytes varying bytes total,
-        // the GPU prefix IS the full sort key
-        if (used_compact_prefix && g_compact_count <= effective_compact_prefix_bytes) need_fixup = false;
-#endif
-        if (KEY_SIZE <= 16) need_fixup = false;
 
         if (!need_fixup) {
             printf("== Phase 4: CPU Fixup (skipped — %s) ==\n",
                    !h_has_ties ? "no pfx1 ties" : "prefix covers full key");
         } else {
             printf("== Phase 4: CPU Prefix Fixup (%dB prefix, ties detected) ==\n", effective_prefix_bytes);
-        }
 
-        if (need_fixup) {
-            int hw = std::max(1, (int)std::thread::hardware_concurrency());
-            if (const char* e = getenv("FIXUP_THREADS")) { int v = atoi(e); if (v > 0) hw = v; }
+            // Collect groups from all gather threads
             std::vector<std::pair<uint64_t, uint64_t>> groups;
-            uint64_t gs = 0;
+            for (int t = 0; t < hw_threads; t++)
+                for (auto& g : gather_thread_groups[t])
+                    groups.push_back(g);
 
-            auto grp_t0 = std::chrono::high_resolution_clock::now();
-            // Parallel group detection: each thread finds prefix-change boundaries
-            // in its chunk [lo, hi); serial stitch assembles groups of size > 1.
-            // Prior serial scan was 4.8s on SF50 — the main Phase-4 bottleneck.
-            std::vector<std::vector<uint64_t>> boundaries_per_thread(hw);
-            {
-                uint64_t rpt = (num_records + hw - 1) / hw;
-                std::vector<std::thread> gd_threads;
-                for (int t = 0; t < hw; t++) {
-                    gd_threads.emplace_back([&, t]() {
-                        uint64_t lo = (uint64_t)t * rpt;
-                        uint64_t hi = std::min(lo + rpt, num_records);
-                        if (lo == 0) lo = 1;   // boundary check needs [i-1, i]
-                        auto& my_bnd = boundaries_per_thread[t];
-                        // Rough estimate: 15k boundaries / 48 threads = ~350 per thread
-                        my_bnd.reserve(1024);
-                        for (uint64_t i = lo; i < hi; i++) {
-                            const uint8_t* ra = h_output + (i-1) * RECORD_SIZE;
-                            const uint8_t* rb = h_output + i * RECORD_SIZE;
-                            bool boundary;
+            // Check thread boundaries: adjacent threads may split a group
+            for (int t = 1; t < hw_threads; t++) {
+                uint64_t boundary_pos = (uint64_t)t * chunk_per_t;
+                if (boundary_pos >= num_records) continue;
+                // Read from h_output (gather is complete, sfence done)
+                const uint8_t* ra = h_output + (boundary_pos-1) * RECORD_SIZE;
+                const uint8_t* rb = h_output + boundary_pos * RECORD_SIZE;
+                bool same = true;
 #ifdef USE_COMPACT_KEY
-                            if (used_compact_prefix) {
-                                boundary = false;
-                                for (int c = 0; c < effective_prefix_bytes; c++) {
-                                    if (ra[h_compact_map[c]] != rb[h_compact_map[c]]) { boundary = true; break; }
-                                }
-                            } else
+                if (used_compact_prefix) {
+                    for (int c = 0; c < effective_prefix_bytes && c < num_varying; c++) {
+                        if (ra[runtime_cmap[c]] != rb[runtime_cmap[c]]) { same = false; break; }
+                    }
+                } else
 #endif
-                            {
-                                boundary = (memcmp(ra, rb, effective_prefix_bytes) != 0);
-                            }
-                            if (boundary) my_bnd.push_back(i);
-                        }
-                    });
+                {
+                    same = (memcmp(ra, rb, effective_prefix_bytes) == 0);
                 }
-                for (auto& t : gd_threads) t.join();
-            }
-            auto scan_t1 = std::chrono::high_resolution_clock::now();
-            double scan_ms = std::chrono::duration_cast<std::chrono::microseconds>(scan_t1 - grp_t0).count() / 1e3;
-            // Serial stitch: build groups list by concatenating boundaries.
-            {
-                std::vector<uint64_t> all_boundaries;
-                all_boundaries.reserve(16384);
-                all_boundaries.push_back(0);
-                for (int t = 0; t < hw; t++) {
-                    auto& bv = boundaries_per_thread[t];
-                    all_boundaries.insert(all_boundaries.end(), bv.begin(), bv.end());
-                }
-                all_boundaries.push_back(num_records);
-                for (size_t i = 0; i + 1 < all_boundaries.size(); i++) {
-                    uint64_t count = all_boundaries[i+1] - all_boundaries[i];
-                    if (count > 1) groups.push_back({all_boundaries[i], count});
+                if (same) {
+                    groups.push_back({boundary_pos - 1, 2});
                 }
             }
-            (void)gs;
-            auto grp_t1 = std::chrono::high_resolution_clock::now();
-            double grp_ms = std::chrono::duration_cast<std::chrono::microseconds>(grp_t1 - grp_t0).count() / 1e3;
-            double stitch_ms = grp_ms - scan_ms;
-            printf("  %lu groups with ties (avg %.0f records, scan %.0f + stitch %.0f ms)\n",
-                   groups.size(),
-                   groups.empty() ? 0.0 : (double)num_records / groups.size(),
-                   scan_ms, stitch_ms);
 
-            // Build list of "active" byte positions to compare during fixup.
-            // In the compact path, invariant bytes are identical across all canonical
-            // records (by the definition of "invariant" + verification that all records
-            // conform). So within any tied group we only need to compare compact-map
-            // positions NOT covered by the prefix — everything else is equal.
-            // compact_map is position-ordered (ascending) ⇒ lex order preserved.
-            int active_bytes[KEY_SIZE]; int n_active = 0;
-#ifdef USE_COMPACT_KEY
-            if (used_compact_prefix) {
-                int start = std::min(effective_prefix_bytes, g_compact_count);
-                for (int c = start; c < g_compact_count; c++) {
-                    int pos = h_compact_map[c];
-                    if (pos >= 0 && pos < (int)KEY_SIZE) active_bytes[n_active++] = pos;
-                }
-            } else
-#endif
-            {
-                // Non-compact path: skip the first effective_prefix_bytes (they're
-                // equal within a tied group by construction).
-                for (int b = effective_prefix_bytes; b < (int)KEY_SIZE; b++)
-                    active_bytes[n_active++] = b;
-            }
-
-            // Group-size distribution stats (to inform parallelism strategy).
-            {
-                uint64_t gmin = UINT64_MAX, gmax = 0, gsum = 0;
-                uint64_t big_1k = 0, big_10k = 0, big_100k = 0, big_1m = 0, big_10m = 0;
-                for (auto [s, c] : groups) {
-                    if (c < gmin) gmin = c;
-                    if (c > gmax) gmax = c;
-                    gsum += c;
-                    if (c >= 10000000) big_10m++;
-                    else if (c >= 1000000) big_1m++;
-                    else if (c >= 100000) big_100k++;
-                    else if (c >= 10000) big_10k++;
-                    else if (c >= 1000) big_1k++;
-                }
-                printf("  Groups stats: min=%lu max=%lu sum=%lu (distribution: 1k=%lu 10k=%lu 100k=%lu 1m=%lu 10m=%lu)\n",
-                       gmin, gmax, gsum, big_1k, big_10k, big_100k, big_1m, big_10m);
-            }
-
-            // Global max-count for pre-allocating scratch (cheaper than per-thread
-            // accounting now that work is distributed dynamically via atomic counter).
-            uint32_t global_max_count = 0;
-            for (auto [s, c] : groups)
-                if (c > global_max_count) global_max_count = (uint32_t)c;
-
-            // Per-thread phase timing for profiling.
-            struct PhaseTimes { uint64_t pack_ns = 0, sort_ns = 0, reorder_ns = 0, skipped = 0; };
-            std::vector<PhaseTimes> pt(hw);
-
-            auto par_t0 = std::chrono::high_resolution_clock::now();
-            // Atomic work-queue dispatch: each thread pulls a batch of groups at a
-            // time. Eliminates load imbalance from fixed chunks (max group can be 7×
-            // avg). Within each group we do: build 8B BE key from first ≤8 active
-            // bytes, sort std::pair<key,orig_idx>, sub-sort runs of tied keys over
-            // remaining active bytes, then reorder records.
-            //
-            // Fast path: when active_bytes form a contiguous run in the record (the
-            // common case on compact-key TPC-H after the prefix has consumed all
-            // sparse varying positions), we can do the 8B key via a single unaligned
-            // 64-bit load + bswap, and the tail compare via memcmp — ~4-5× faster
-            // than per-byte shift/load.
-            std::atomic<uint64_t> next_group{0};
-            const int kbytes = std::min(n_active, 8);
-            const bool has_tail = (n_active > 8);
-            bool ab_contig = (n_active > 0);
-            for (int i = 1; i < n_active; i++) {
-                if (active_bytes[i] != active_bytes[0] + i) { ab_contig = false; break; }
-            }
-            const int ab_base = ab_contig && n_active > 0 ? active_bytes[0] : 0;
-            const int ab_tail_off = ab_base + kbytes;     // record byte offset for tail
-            const int ab_tail_len = ab_contig ? (n_active - kbytes) : 0;
-            if (ab_contig) {
-                printf("  Fixup: active bytes are contiguous run [%d..%d] (8B key + %dB tail, fast path enabled)\n",
-                       ab_base, ab_base + n_active - 1, ab_tail_len);
-            }
+            uint64_t total_in_groups = 0;
+            for (auto& g : groups) total_in_groups += g.second;
+            printf("  %lu groups with ties (%lu records total", groups.size(), total_in_groups);
             if (!groups.empty()) {
+                uint64_t largest = 0;
+                for (auto& g : groups) largest = std::max(largest, g.second);
+                printf(", largest=%lu", largest);
+            }
+            printf(")\n");
+
+            if (!groups.empty()) {
+                int hw = hw_threads;
+                uint64_t gpt = (groups.size() + hw - 1) / hw;
                 std::vector<std::thread> fix_threads;
                 for (int t = 0; t < hw; t++) {
                     fix_threads.emplace_back([&, t]() {
-                        std::vector<std::pair<uint64_t, uint32_t>> keys(global_max_count);
-                        std::vector<uint8_t> reorder_buf((size_t)global_max_count * RECORD_SIZE);
-                        PhaseTimes& myp = pt[t];
-                        // Batch size scales with total group count so every thread gets
-                        // work even when #groups is small (e.g. adversarial inputs with
-                        // ~1000 huge groups). 64 was fine for typical 3.15M-group SF50
-                        // but capped parallelism at ~16 threads for low-count inputs.
-                        const uint64_t batch = std::max<uint64_t>(1,
-                            std::min<uint64_t>(64, (groups.size() + hw * 4 - 1) / (hw * 4)));
-                        uint64_t gs_local;
-                        while ((gs_local = next_group.fetch_add(batch, std::memory_order_relaxed)) < groups.size()) {
-                            uint64_t ge_local = std::min(gs_local + batch, (uint64_t)groups.size());
-                            for (uint64_t g = gs_local; g < ge_local; g++) {
+                        uint64_t g0 = t * gpt, g1 = std::min(g0 + gpt, (uint64_t)groups.size());
+                        for (uint64_t g = g0; g < g1; g++) {
                             auto [start, count] = groups[g];
                             uint8_t* base = h_output + start * RECORD_SIZE;
-
-                            auto t0 = std::chrono::high_resolution_clock::now();
-                            // Build 8-byte BE keys directly from record bytes.
-                            if (ab_contig) {
-                                // Fast path: one unaligned 8B load + bswap per record.
-                                for (uint64_t j = 0; j < count; j++) {
-                                    const uint8_t* src = base + j * RECORD_SIZE;
-                                    uint64_t k;
-                                    memcpy(&k, src + ab_base, 8);
-                                    k = __builtin_bswap64(k);
-                                    if (kbytes < 8) k &= (~(uint64_t)0) << ((8 - kbytes) * 8);
-                                    keys[j].first = k;
-                                    keys[j].second = (uint32_t)j;
-                                }
-                            } else {
-                                // Scatter path: per-byte load + shift.
-                                for (uint64_t j = 0; j < count; j++) {
-                                    const uint8_t* src = base + j * RECORD_SIZE;
-                                    uint64_t k = 0;
-                                    for (int b = 0; b < kbytes; b++) {
-                                        k = (k << 8) | (uint64_t)src[active_bytes[b]];
-                                    }
-                                    if (kbytes < 8) k <<= (size_t)(8 - kbytes) * 8;
-                                    keys[j].first = k;
-                                    keys[j].second = (uint32_t)j;
-                                }
-                            }
-                            auto t1 = std::chrono::high_resolution_clock::now();
-                            myp.pack_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
-
-                            // Primary sort on 8B key (fast uint64 compare).
-                            std::sort(keys.begin(), keys.begin() + count);
-
-                            // Sub-sort: find runs of equal keys and break ties over
-                            // remaining active bytes [kbytes..n_active). For data with
-                            // high entropy in the first 8 active bytes, most runs are
-                            // size 1 and this loop exits almost immediately.
-                            if (has_tail) {
-                                uint64_t i = 0;
-                                while (i < count) {
-                                    uint64_t j = i + 1;
-                                    while (j < count && keys[j].first == keys[i].first) j++;
-                                    if (j > i + 1) {
-                                        if (ab_contig) {
-                                            // Fast path: memcmp on contiguous tail bytes.
-                                            std::sort(keys.begin() + i, keys.begin() + j,
-                                                [&](const std::pair<uint64_t,uint32_t>& a,
-                                                    const std::pair<uint64_t,uint32_t>& b) {
-                                                    const uint8_t* ra = base + (uint64_t)a.second * RECORD_SIZE + ab_tail_off;
-                                                    const uint8_t* rb = base + (uint64_t)b.second * RECORD_SIZE + ab_tail_off;
-                                                    return memcmp(ra, rb, ab_tail_len) < 0;
-                                                });
-                                        } else {
-                                            std::sort(keys.begin() + i, keys.begin() + j,
-                                                [&](const std::pair<uint64_t,uint32_t>& a,
-                                                    const std::pair<uint64_t,uint32_t>& b) {
-                                                    const uint8_t* ra = base + (uint64_t)a.second * RECORD_SIZE;
-                                                    const uint8_t* rb = base + (uint64_t)b.second * RECORD_SIZE;
-                                                    for (int k = kbytes; k < n_active; k++) {
-                                                        uint8_t ba = ra[active_bytes[k]];
-                                                        uint8_t bb = rb[active_bytes[k]];
-                                                        if (ba != bb) return ba < bb;
-                                                    }
-                                                    return false;
-                                                });
-                                        }
-                                    }
-                                    i = j;
-                                }
-                            }
-                            auto t2 = std::chrono::high_resolution_clock::now();
-                            myp.sort_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(t2 - t1).count();
-
-                            bool already_sorted = true;
+                            std::vector<uint32_t> idx(count);
+                            for (uint32_t j = 0; j < (uint32_t)count; j++) idx[j] = j;
+                            std::sort(idx.begin(), idx.end(), [base](uint32_t a, uint32_t b) {
+                                return key_compare(base + (uint64_t)a*RECORD_SIZE,
+                                                   base + (uint64_t)b*RECORD_SIZE, KEY_SIZE) < 0;
+                            });
+                            bool sorted = true;
                             for (uint64_t j = 0; j < count; j++) {
-                                if (keys[j].second != (uint32_t)j) { already_sorted = false; break; }
+                                if (idx[j] != (uint32_t)j) { sorted = false; break; }
                             }
-                            if (already_sorted) { myp.skipped++; continue; }
+                            if (sorted) continue;
+                            std::vector<uint8_t> buf(count * RECORD_SIZE);
                             for (uint64_t j = 0; j < count; j++)
-                                memcpy(reorder_buf.data() + j*RECORD_SIZE,
-                                       base + (uint64_t)keys[j].second*RECORD_SIZE, RECORD_SIZE);
-                            memcpy(base, reorder_buf.data(), count * RECORD_SIZE);
-                            auto t3 = std::chrono::high_resolution_clock::now();
-                            myp.reorder_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(t3 - t2).count();
-                            }
+                                memcpy(buf.data() + j*RECORD_SIZE,
+                                       base + (uint64_t)idx[j]*RECORD_SIZE, RECORD_SIZE);
+                            memcpy(base, buf.data(), count * RECORD_SIZE);
                         }
                     });
                 }
                 for (auto& t : fix_threads) t.join();
             }
-            auto par_t1 = std::chrono::high_resolution_clock::now();
-            double par_ms = std::chrono::duration_cast<std::chrono::microseconds>(par_t1 - par_t0).count() / 1e3;
             fixup_ms = phase_timer.end_ms();
-            uint64_t pk_ns = 0, so_ns = 0, ro_ns = 0, skip = 0;
-            for (auto& p : pt) {
-                pk_ns += p.pack_ns; so_ns += p.sort_ns; ro_ns += p.reorder_ns; skip += p.skipped;
-            }
-            double dn = 1e6 * (double)hw;
-            printf("  Fixup: %.0f ms [group-detect %.0f + parallel %.0f] (per-thread: pack %.1f + sort %.1f + reorder %.1f ms, %lu skipped)\n",
-                   fixup_ms, grp_ms, par_ms, pk_ns/dn, so_ns/dn, ro_ns/dn, skip);
+            printf("  Fixup: %.0f ms\n", fixup_ms);
         }
 
         r.merge_ms = merge_ms + dl_ms + gather_ms + fixup_ms;
@@ -3008,34 +2447,6 @@ run_generation:
         r.sorted_output_is_mmap = h_output_is_mmap;
         r.total_ms = r.run_gen_ms + r.merge_ms;
         printf("  Total merge+gather+fixup: %.0f ms\n", r.merge_ms);
-#ifdef USE_COMPACT_KEY
-        // Hybrid correctness: the CPU extraction pass classified every record
-        // as canonical (non-mapped bytes == V[]) or exception. If any exception
-        // exists, the compact sort can't be trusted and we signal the caller to
-        // retry with the full-key upload path.
-        {
-            size_t n_exc;
-            {
-                std::lock_guard<std::mutex> lk(g_exception_mtx);
-                n_exc = g_exception_indices.size();
-            }
-            int v = g_violated_byte.load();
-            if (n_exc == 0 && v == -1) {
-                printf("[Correctness] Sample map verified against all %lu records — "
-                       "compact sort is FULL-KEY-EQUIVALENT.\n", num_records);
-                g_map_full_scan_verified = true;
-            } else {
-                fprintf(stderr,
-                    "[Hybrid] %zu exception records found (first differing byte %d).\n"
-                    "  Compact sort not safe. Discarding result and falling back to the\n"
-                    "  full-key upload path for a guaranteed-correct sort.\n",
-                    n_exc, v);
-                r.sorted_output = nullptr;
-                r.sorted_output_size = 0;
-                r.needs_hybrid_retry = true;
-            }
-        }
-#endif
         return r;
     }
 
@@ -3100,7 +2511,7 @@ run_generation:
             uint16_t* d_tie = reinterpret_cast<uint16_t*>(d_sort_keys);
             uint16_t* d_tie_alt = reinterpret_cast<uint16_t*>(d_sort_keys_alt);
             extract_tiebreaker_kernel<<<nblks, nthreads, 0, streams[0]>>>(
-                d_keys_10byte, d_perm_in, d_tie, num_records, byte_offset);
+                d_keys_10byte, d_perm_in, d_tie, num_records);
             cub::DoubleBuffer<uint16_t> tie_buf(d_tie, d_tie_alt);
             cub::DoubleBuffer<uint32_t> perm_buf(d_perm_in, d_perm_out);
             size_t t = cub_temp_bytes;
@@ -3190,10 +2601,6 @@ run_generation:
     r.sorted_output_size = total_bytes;
     r.sorted_output_is_mmap = h_output_is_mmap;
     r.total_ms = r.run_gen_ms + r.merge_ms;
-    // This path uses the FULL KEY_SIZE bytes on the GPU (no compaction), so
-    // the sort is full-key-equivalent by construction — the compact-map
-    // verification is not applicable here.
-    printf("[Correctness] Full-key sort path (no compaction) — inherently correct.\n");
 
     printf("\n[ExternalSort] ═══════════════════════════════════════\n");
     printf("  DONE: %.0f ms (gen: %.0f + merge: %.0f)\n",
@@ -3226,15 +2633,13 @@ int main(int argc, char** argv) {
     double total_gb = 0.5;
     bool verify = true;
     const char* input_file = nullptr;
-    const char* output_file = nullptr;
     int num_experiment_runs = 1;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i],"--total-gb") && i+1<argc) total_gb = atof(argv[++i]);
         else if (!strcmp(argv[i],"--input") && i+1<argc) input_file = argv[++i];
-        else if (!strcmp(argv[i],"--output") && i+1<argc) output_file = argv[++i];
         else if (!strcmp(argv[i],"--no-verify")) verify = false;
         else if (!strcmp(argv[i],"--runs") && i+1<argc) num_experiment_runs = atoi(argv[++i]);
-        else { printf("Usage: %s [--total-gb N] [--input FILE] [--output FILE] [--no-verify] [--runs N]\n",argv[0]); return 0; }
+        else { printf("Usage: %s [--total-gb N] [--input FILE] [--no-verify] [--runs N]\n",argv[0]); return 0; }
     }
 
     // Determine data size from file or --total-gb
@@ -3290,18 +2695,6 @@ int main(int argc, char** argv) {
         printf("  Generated in %.0f ms\n\n", gt.end_ms());
     }
 
-    if (const char* e = getenv("ADV_ZERO_BYTES")) {
-        int z = atoi(e);
-        if (z > 0 && z <= KEY_SIZE) {
-            printf("[ADVERSARIAL] Zeroing first %d bytes of each record (%lu records)...\n", z, num_records);
-            WallTimer zt; zt.begin();
-            #pragma omp parallel for schedule(static)
-            for (uint64_t i = 0; i < num_records; i++)
-                memset(h_data + i * RECORD_SIZE, 0, z);
-            printf("[ADVERSARIAL] Done in %.0f ms\n\n", zt.end_ms());
-        }
-    }
-
     for (int run = 0; run < num_experiment_runs; run++) {
         if (num_experiment_runs > 1) {
             printf("\n══════════ Experiment run %d/%d ══════════\n", run+1, num_experiment_runs);
@@ -3309,127 +2702,44 @@ int main(int argc, char** argv) {
             // buffer that's freed after verification. No reload needed.
         }
 
-        // Hybrid correctness: try the compact path first. If it detects
-        // exception records (non-mapped bytes that the sample missed), retry
-        // with the full-key upload path which has no sampling assumption.
-#ifdef USE_COMPACT_KEY
-        g_force_no_compact = false;
-        g_disable_compact = false;
-        if (const char* e = getenv("DISABLE_COMPACT")) {
-            if (std::string(e) != "0") {
-                g_disable_compact = true;
-                printf("[CONFIG] Compact key compression DISABLED via DISABLE_COMPACT\n");
-            }
-        }
-#endif
-        ExternalGpuSort::TimingResult result;
-        {
-            ExternalGpuSort sorter;
-            result = sorter.sort(h_data, num_records);
-        }
-#ifdef USE_COMPACT_KEY
-        if (result.needs_hybrid_retry) {
-            printf("[Hybrid] Retrying with full-key upload path...\n");
-            g_force_no_compact = true;
-            ExternalGpuSort sorter;
-            result = sorter.sort(h_data, num_records);
-            g_force_no_compact = false;
-        }
-#endif
+        ExternalGpuSort sorter;
+        auto result = sorter.sort(h_data, num_records);
 
         const uint8_t* sorted = result.sorted_output ? result.sorted_output : h_data;
 
         if (verify) {
             printf("\nVerifying...\n");
-            // Check 1: parallel sortedness — adjacent pairs in non-decreasing order.
-            int hw = std::max(1u, std::thread::hardware_concurrency());
-            std::atomic<uint64_t> first_bad{UINT64_MAX};
-            uint64_t per_t = (num_records + hw - 1) / hw;
-            std::vector<std::thread> sthreads;
-            WallTimer st; st.begin();
-            for (int t = 0; t < hw; t++) {
-                sthreads.emplace_back([&, t]() {
-                    uint64_t lo = (uint64_t)t * per_t;
-                    uint64_t hi = std::min(lo + per_t, num_records);
-                    if (lo == 0) lo = 1;
-                    for (uint64_t i = lo; i < hi; i++) {
-                        if (first_bad.load(std::memory_order_relaxed) != UINT64_MAX) break;
-                        if (key_compare(sorted + (i-1)*RECORD_SIZE,
-                                        sorted + i*RECORD_SIZE, KEY_SIZE) > 0) {
-                            uint64_t cur = first_bad.load();
-                            while (i < cur && !first_bad.compare_exchange_weak(cur, i)) {}
-                            break;
+            uint64_t bad = 0;
+            for (uint64_t i = 1; i < num_records && bad < 10; i++) {
+                if (key_compare(sorted+(i-1)*RECORD_SIZE, sorted+i*RECORD_SIZE, KEY_SIZE)>0) {
+                    if (bad<3) {
+                        printf("  VIOLATION at %lu:\n", i);
+                        const uint8_t* ka = sorted+(i-1)*RECORD_SIZE;
+                        const uint8_t* kb = sorted+i*RECORD_SIZE;
+                        printf("    prev: ");
+                        for (int b = 0; b < (int)KEY_SIZE; b++) printf("%02x", ka[b]);
+                        printf("\n    curr: ");
+                        for (int b = 0; b < (int)KEY_SIZE; b++) printf("%02x", kb[b]);
+                        printf("\n    first diff at byte ");
+                        for (int b = 0; b < (int)KEY_SIZE; b++) {
+                            if (ka[b] != kb[b]) { printf("%d: prev=0x%02x > curr=0x%02x\n", b, ka[b], kb[b]); break; }
                         }
+#ifdef USE_COMPACT_KEY
+                        static const int cm[26] = {0,1,4,5,8,9,12,13,19,20,21,29,37,44,45,51,52,53,54,55,56,57,59,60,61,65};
+                        printf("    compact prev: ");
+                        for (int c = 0; c < 26; c++) printf("%02x", ka[cm[c]]);
+                        printf("\n    compact curr: ");
+                        for (int c = 0; c < 26; c++) printf("%02x", kb[cm[c]]);
+                        bool ctie = true;
+                        for (int c = 0; c < 26; c++) if (ka[cm[c]]!=kb[cm[c]]) { ctie=false; break; }
+                        printf("\n    compact tie: %s\n", ctie ? "YES" : "NO");
+#endif
                     }
-                });
-            }
-            for (auto& t : sthreads) t.join();
-            double sort_ms = st.end_ms();
-            uint64_t fb = first_bad.load();
-            if (fb == UINT64_MAX) {
-                printf("  PASS sortedness: %lu records in non-decreasing order (%.0f ms)\n",
-                       num_records, sort_ms);
-            } else {
-                printf("  FAIL sortedness: first violation at record %lu (%.0f ms)\n",
-                       fb, sort_ms);
-            }
-
-            // Check 2: multiset preservation — sum of FNV-1a 64 hashes per record,
-            // computed over BOTH the input buffer (h_data) and the sorted output.
-            // Order-independent: equal iff output is a permutation of input.
-            // Catches the "all-zero permutation" failure mode where every output
-            // record is a copy of input[0] (which trivially passes sortedness).
-            auto multiset_hash = [&](const uint8_t* data) {
-                std::vector<std::atomic<uint64_t>> partials(hw);
-                for (int t = 0; t < hw; t++) partials[t].store(0);
-                std::vector<std::thread> hthreads;
-                for (int t = 0; t < hw; t++) {
-                    hthreads.emplace_back([&, t]() {
-                        uint64_t lo = (uint64_t)t * per_t;
-                        uint64_t hi = std::min(lo + per_t, num_records);
-                        uint64_t local = 0;
-                        for (uint64_t i = lo; i < hi; i++) {
-                            uint64_t h = 0xcbf29ce484222325ULL;
-                            const uint8_t* r = data + i * RECORD_SIZE;
-                            for (int b = 0; b < (int)RECORD_SIZE; b++) {
-                                h ^= r[b]; h *= 0x100000001b3ULL;
-                            }
-                            local += h;
-                        }
-                        partials[t].store(local);
-                    });
+                    bad++;
                 }
-                for (auto& t : hthreads) t.join();
-                uint64_t sum = 0;
-                for (int t = 0; t < hw; t++) sum += partials[t].load();
-                return sum;
-            };
-            WallTimer ht; ht.begin();
-            uint64_t in_sum = multiset_hash(h_data);
-            uint64_t out_sum = multiset_hash(sorted);
-            double hash_ms = ht.end_ms();
-            if (in_sum == out_sum) {
-                printf("  PASS multiset:   output is a permutation of input "
-                       "(hash=0x%016lx, %.0f ms)\n", in_sum, hash_ms);
-            } else {
-                printf("  FAIL multiset:   in=0x%016lx out=0x%016lx — output IS NOT "
-                       "a permutation of input (records lost/duplicated/modified, %.0f ms)\n",
-                       in_sum, out_sum, hash_ms);
             }
-        }
-
-        // Dump sorted output for independent external verification (tools/verify_sorted).
-        // Only on the last experiment run to avoid repeated writes.
-        if (output_file && run == num_experiment_runs - 1) {
-            printf("Writing sorted output to %s...\n", output_file);
-            FILE* of = fopen(output_file, "wb");
-            if (!of) { fprintf(stderr, "  cannot open output file\n"); }
-            else {
-                WallTimer wt; wt.begin();
-                size_t w = fwrite(sorted, 1, total_bytes, of);
-                fclose(of);
-                printf("  Wrote %.2f GB in %.0f ms\n", w/1e9, wt.end_ms());
-            }
+            printf(bad==0 ? "  PASS: %lu records sorted\n" : "  FAIL: %lu violations\n",
+                   bad==0 ? num_records : bad);
         }
         if (result.sorted_output) {
             if (result.sorted_output_is_mmap) munmap(result.sorted_output, result.sorted_output_size);
