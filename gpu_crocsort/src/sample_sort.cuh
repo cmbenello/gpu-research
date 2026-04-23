@@ -9,6 +9,10 @@
 //   - Better GPU utilization (each partition sorts independently)
 //   - Natural multi-GPU extension (one partition per GPU)
 //
+// When compact_map is provided, only the varying byte positions are used
+// for classification and GPU sorting (e.g., 26B instead of 66B → 4 LSD
+// passes instead of 9, 2.6x less PCIe bandwidth).
+//
 // Usage: SAMPLE_SORT=1 ./external_sort_tpch_compact ...
 // ============================================================================
 
@@ -62,13 +66,18 @@ struct SampleSortResult {
 // CPU-side sample sort orchestrator.
 // h_data: host records (N × record_stride). Keys are the first key_size bytes.
 // Produces a sorted permutation using only key_size bytes for comparison.
-// GPU upload extracts only key bytes (padded to 8B alignment) — not full records.
+//
+// compact_map / compact_map_size: if provided, only these byte positions are
+// extracted for GPU sorting. Classification still uses the full key for
+// correctness (splitter comparison needs full lexicographic order).
 static SampleSortResult sample_sort_keys(
     const uint8_t* h_data,       // host record buffer (N × record_stride)
     uint32_t key_size,           // meaningful key bytes per record
     uint32_t record_stride,      // stride between records (>= key_size)
     uint64_t num_records,
-    int target_partitions = 0    // 0 = auto
+    int target_partitions = 0,   // 0 = auto
+    const int* compact_map = nullptr,  // byte positions of varying bytes
+    int compact_map_size = 0           // number of varying byte positions
 ) {
     SampleSortResult result = {};
 
@@ -79,8 +88,11 @@ static SampleSortResult sample_sort_keys(
     };
     auto total_t0 = now();
 
-    // GPU key stride: pad key_size to 8-byte alignment for efficient CUB access
-    uint32_t gpu_key_stride = ((key_size + 7) / 8) * 8;
+    // Determine effective key size for GPU: compact if available, else full
+    bool use_compact = (compact_map != nullptr && compact_map_size > 0);
+    uint32_t gpu_key_bytes = use_compact ? (uint32_t)compact_map_size : key_size;
+    uint32_t gpu_key_stride = ((gpu_key_bytes + 7) / 8) * 8;
+    int num_lsd_chunks = (gpu_key_bytes + 7) / 8;
 
     // ── Step 1: Determine number of partitions ──
     size_t free_mem, total_mem;
@@ -97,10 +109,12 @@ static SampleSortResult sample_sort_keys(
     result.num_partitions = P;
     printf("  [SampleSort] %d partitions for %lu records (%.1fM avg, GPU fits %.1fM)\n",
            P, num_records, num_records / (double)P / 1e6, max_per_partition / 1e6);
-    printf("  [SampleSort] Key: %dB → %dB GPU stride, %d LSD passes\n",
-           key_size, gpu_key_stride, (key_size + 7) / 8);
+    printf("  [SampleSort] %s: %dB → %dB GPU stride, %d LSD passes\n",
+           use_compact ? "Compact key" : "Full key",
+           gpu_key_bytes, gpu_key_stride, num_lsd_chunks);
 
     // ── Step 2: Sample keys and compute splitters ──
+    // Always use full key_size for sampling/classification to maintain correctness.
     int sample_size = std::min((uint64_t)(P * 10000), num_records);
     uint64_t step = num_records / sample_size;
     std::vector<std::vector<uint8_t>> samples(sample_size);
@@ -118,6 +132,7 @@ static SampleSortResult sample_sort_keys(
     }
 
     // ── Step 3: Classify (CPU, multi-threaded) ──
+    // Uses full key for correct partitioning regardless of compact map.
     auto classify_t0 = now();
     std::vector<uint32_t> part_ids(num_records);
     std::vector<uint64_t> part_counts(P, 0);
@@ -198,12 +213,12 @@ static SampleSortResult sample_sort_keys(
         cub::DoubleBuffer<uint64_t> kb(nullptr, nullptr);
         cub::DoubleBuffer<uint32_t> vb(nullptr, nullptr);
         cub::DeviceRadixSort::SortPairs(nullptr, cub_temp_bytes, kb, vb,
-                                         (int)largest, 0, key_size * 8);
+                                         (int)largest, 0, gpu_key_bytes * 8);
     }
     void* d_temp;
     cudaMalloc(&d_temp, cub_temp_bytes);
 
-    // Host staging buffer: extract just key bytes (at gpu_key_stride), not full records
+    // Host staging buffer for compact key extraction
     uint8_t* h_staging = (uint8_t*)malloc(largest * gpu_key_stride);
     if (!h_staging) {
         fprintf(stderr, "malloc failed for staging buffer (%.1f GB)\n",
@@ -212,7 +227,6 @@ static SampleSortResult sample_sort_keys(
         return result;
     }
 
-    int num_lsd_chunks = (key_size + 7) / 8;
     double h2d_bytes = 0, d2h_bytes = 0;
 
     for (int p = 0; p < P; p++) {
@@ -220,7 +234,7 @@ static SampleSortResult sample_sort_keys(
         uint64_t count = part_counts[p];
         if (count <= 1) continue;
 
-        // Gather this partition's KEY bytes into staging (multi-threaded)
+        // Gather this partition's key bytes into staging (multi-threaded)
         {
             int gt = std::max(1, (int)std::thread::hardware_concurrency());
             uint64_t per_t = (count + gt - 1) / gt;
@@ -231,17 +245,25 @@ static SampleSortResult sample_sort_keys(
                     for (uint64_t i = lo; i < hi; i++) {
                         uint8_t* dst = h_staging + i * gpu_key_stride;
                         const uint8_t* src = h_data + (uint64_t)perm[off + i] * record_stride;
-                        memcpy(dst, src, key_size);
-                        // Zero padding
-                        if (gpu_key_stride > key_size)
-                            memset(dst + key_size, 0, gpu_key_stride - key_size);
+                        if (use_compact) {
+                            // Extract only varying byte positions
+                            for (int b = 0; b < compact_map_size; b++)
+                                dst[b] = src[compact_map[b]];
+                            // Zero padding
+                            for (int b = compact_map_size; b < (int)gpu_key_stride; b++)
+                                dst[b] = 0;
+                        } else {
+                            memcpy(dst, src, key_size);
+                            if (gpu_key_stride > key_size)
+                                memset(dst + key_size, 0, gpu_key_stride - key_size);
+                        }
                     }
                 });
             }
             for (auto& t : gthreads) t.join();
         }
 
-        // Upload to GPU (only key bytes, not full records)
+        // Upload to GPU
         cudaMemcpy(d_keys, h_staging, count * gpu_key_stride, cudaMemcpyHostToDevice);
         h2d_bytes += count * gpu_key_stride;
 
@@ -255,7 +277,7 @@ static SampleSortResult sample_sort_keys(
 
         for (int chunk = num_lsd_chunks - 1; chunk >= 0; chunk--) {
             int byte_offset = chunk * 8;
-            int chunk_bytes = std::min(8, (int)key_size - byte_offset);
+            int chunk_bytes = std::min(8, (int)gpu_key_bytes - byte_offset);
 
             ss_extract_uint64_kernel<<<nb, nt>>>(d_keys, pi, d_sort_keys, count,
                                                    gpu_key_stride, byte_offset, chunk_bytes);

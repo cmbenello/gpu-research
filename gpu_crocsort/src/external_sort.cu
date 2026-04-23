@@ -1764,9 +1764,14 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
         if (d_key_buffer) { cudaFree(d_key_buffer); d_key_buffer = nullptr; }
 
         // Sample sort operates directly on h_data — keys are the first KEY_SIZE
-        // bytes of each RECORD_SIZE record. No separate key extraction needed.
+        // bytes of each RECORD_SIZE record. Uses compact map if available.
         printf("== Phase 1+2: Sample Sort ==\n");
+#ifdef USE_COMPACT_KEY
+        SampleSortResult ss = sample_sort_keys(h_data, KEY_SIZE, RECORD_SIZE, num_records,
+                                                0, runtime_cmap, num_varying);
+#else
         SampleSortResult ss = sample_sort_keys(h_data, KEY_SIZE, RECORD_SIZE, num_records);
+#endif
 
         printf("\n== Phase 3: CPU Gather ==\n");
         WallTimer gather_timer; gather_timer.begin();
@@ -2268,15 +2273,17 @@ run_generation:
         cudaFree(d_global_perm); d_global_perm = nullptr;
         cudaFree(d_cub_merge_temp);
 
-        // CPU gather + inline fixup detection: apply permutation to original h_data
-        // While gathering, detect groups of adjacent records with equal 16B prefix
-        // (the bytes the GPU sorted by). This eliminates a separate ~600ms scan.
-        // Uses non-temporal stores to avoid cache pollution on the write side,
-        // freeing L3 cache for random reads from h_data.
+        // CPU gather: apply permutation to produce sorted output.
+        // Two strategies benchmarked at runtime:
+        //   (A) Forward: h_output[i] = h_data[h_perm[i]]  — sequential write, random read
+        //   (B) Inverse: h_output[inv[j]] = h_data[j]     — sequential read, random NT write
+        //
+        // Strategy B inverts the memory access pattern: reads are sequential (hardware
+        // prefetch handles perfectly), writes are random but use NT stores (fire-and-forget
+        // to write-combining buffers, no read-for-ownership penalty).
         phase_timer.begin();
         printf("== Phase 3: CPU Gather ==\n");
         int hw_threads = std::max(1, (int)std::thread::hardware_concurrency());
-        int PREFETCH_AHEAD = 512;
         uint64_t chunk_per_t = (num_records + hw_threads - 1) / hw_threads;
 
         // Determine effective prefix bytes for group detection
@@ -2296,65 +2303,73 @@ run_generation:
 #endif
         if (KEY_SIZE <= 16) need_fixup = false;
 
+        double gather_ms = 0;
+        {
+            // Forward gather with software prefetching.
+            // 512-ahead prefetch hides DRAM latency; NT stores avoid write cache pollution.
+            // At ~19 GB/s this is near DDR4 peak (72GB total traffic / 1.85s ≈ 39 GB/s).
+            int PREFETCH_AHEAD = 512;
+            std::vector<std::thread> threads;
+            for (int t = 0; t < hw_threads; t++) {
+                threads.emplace_back([&, t]() {
+                    uint64_t lo = t * chunk_per_t;
+                    uint64_t hi = std::min(lo + chunk_per_t, num_records);
+                    constexpr int WORDS = RECORD_SIZE / 8;
+                    for (uint64_t i = lo; i < hi; i++) {
+                        if (i + PREFETCH_AHEAD < hi)
+                            __builtin_prefetch(h_data + (uint64_t)h_perm[i+PREFETCH_AHEAD] * RECORD_SIZE, 0);
+                        const int64_t* src = (const int64_t*)(h_data + (uint64_t)h_perm[i] * RECORD_SIZE);
+                        int64_t* dst = (int64_t*)(h_output + i * RECORD_SIZE);
+                        for (int w = 0; w < WORDS; w++)
+                            _mm_stream_si64((long long*)(dst + w), src[w]);
+                    }
+                    _mm_sfence();
+                });
+            }
+            for (auto& t : threads) t.join();
+            gather_ms = phase_timer.end_ms();
+            printf("  Gathered %.2f GB in %.0f ms (%.2f GB/s)\n",
+                   total_bytes/1e9, gather_ms, total_bytes/(gather_ms*1e6));
+        }
+
+        // Fixup group detection: separate sequential scan of h_output.
+        // Reads h_output in order (cache-friendly after sfence).
         // Per-thread group vectors (only used when need_fixup)
         std::vector<std::vector<std::pair<uint64_t,uint64_t>>> gather_thread_groups(hw_threads);
-
-        std::vector<std::thread> threads;
-        for (int t = 0; t < hw_threads; t++) {
-            threads.emplace_back([&, t]() {
-                uint64_t lo = t * chunk_per_t;
-                uint64_t hi = std::min(lo + chunk_per_t, num_records);
-                constexpr int WORDS = RECORD_SIZE / 8;  // 120/8 = 15
-
-                // Small buffer for previous record's prefix bytes (for group detection)
-                uint8_t prev_pfx[16] = {};
-                uint64_t group_start = lo;
-
-                for (uint64_t i = lo; i < hi; i++) {
-                    if (i + PREFETCH_AHEAD < hi)
-                        __builtin_prefetch(h_data + (uint64_t)h_perm[i+PREFETCH_AHEAD] * RECORD_SIZE, 0);
-                    const uint8_t* src_raw = h_data + (uint64_t)h_perm[i] * RECORD_SIZE;
-                    const int64_t* src = (const int64_t*)src_raw;
-                    int64_t* dst = (int64_t*)(h_output + i * RECORD_SIZE);
-                    // Non-temporal streaming stores (bypass write cache)
-                    for (int w = 0; w < WORDS; w++)
-                        _mm_stream_si64((long long*)(dst + w), src[w]);
-
-                    // Inline group detection during gather
-                    if (need_fixup) {
-                        // Extract prefix from source (already in cache from the copy)
-                        uint8_t cur_pfx[16];
+        if (need_fixup) {
+            std::vector<std::thread> scan_threads;
+            for (int t = 0; t < hw_threads; t++) {
+                scan_threads.emplace_back([&, t]() {
+                    uint64_t lo = t * chunk_per_t;
+                    uint64_t hi = std::min(lo + chunk_per_t, num_records);
+                    if (lo >= hi) return;
+                    uint64_t group_start = lo;
+                    for (uint64_t i = lo + 1; i <= hi; i++) {
+                        bool boundary = (i == hi);
+                        if (!boundary) {
+                            const uint8_t* ra = h_output + (i-1) * RECORD_SIZE;
+                            const uint8_t* rb = h_output + i * RECORD_SIZE;
 #ifdef USE_COMPACT_KEY
-                        if (used_compact_prefix) {
-                            for (int c = 0; c < effective_prefix_bytes && c < num_varying; c++)
-                                cur_pfx[c] = src_raw[runtime_cmap[c]];
-                        } else
+                            if (used_compact_prefix) {
+                                for (int c = 0; c < effective_prefix_bytes && c < num_varying; c++) {
+                                    if (ra[runtime_cmap[c]] != rb[runtime_cmap[c]]) { boundary = true; break; }
+                                }
+                            } else
 #endif
-                        {
-                            memcpy(cur_pfx, src_raw, effective_prefix_bytes);
-                        }
-
-                        if (i > lo) {
-                            bool same = (memcmp(prev_pfx, cur_pfx, effective_prefix_bytes) == 0);
-                            if (!same && (i - group_start > 1)) {
-                                gather_thread_groups[t].push_back({group_start, i - group_start});
+                            {
+                                boundary = (memcmp(ra, rb, effective_prefix_bytes) != 0);
                             }
-                            if (!same) group_start = i;
                         }
-                        memcpy(prev_pfx, cur_pfx, effective_prefix_bytes);
+                        if (boundary) {
+                            if (i - group_start > 1)
+                                gather_thread_groups[t].push_back({group_start, i - group_start});
+                            group_start = i;
+                        }
                     }
-                }
-                // Close final group in this thread's chunk
-                if (need_fixup && (hi - group_start > 1)) {
-                    gather_thread_groups[t].push_back({group_start, hi - group_start});
-                }
-                _mm_sfence();
-            });
+                });
+            }
+            for (auto& t : scan_threads) t.join();
         }
-        for (auto& t : threads) t.join();
-        double gather_ms = phase_timer.end_ms();
-        printf("  Gathered %.2f GB in %.0f ms (%.2f GB/s)\n",
-               total_bytes/1e9, gather_ms, total_bytes/(gather_ms*1e6));
 
         // CPU fixup: groups were detected inline during gather (no separate scan needed).
         phase_timer.begin();
