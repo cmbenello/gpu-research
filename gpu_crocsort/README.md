@@ -11,6 +11,103 @@ bash run.sh
 
 This auto-detects your GPU, builds everything, and runs the full benchmark suite.
 
+## Findings Summary (April 2026)
+
+### End-to-end performance — TPC-H lineitem external sort
+
+| GPU | Memory | Largest SF that fits | Best wall time | Throughput |
+|---|---|---|---|---|
+| Quadro RTX 6000 | 24 GB | SF100 (72 GB) | 3.74 s | ~19 GB/s |
+| Quadro P5000 | 16 GB | SF50 (36 GB) | 7.72 s | 4.66 GB/s |
+| RTX 2080 | 8 GB | SF20 (14 GB) | 2.76 s | 5.21 GB/s |
+
+The "largest SF that fits" column is the real story: scaling is bounded by GPU memory, not throughput. The merge-phase arena allocates `num_records × 24 bytes` plus key buffers; for SF100 that's ~14 GB just for the arena, which doesn't fit on anything below 24 GB.
+
+### Where the time actually goes
+
+For SF100 on the RTX 6000, the kernel-time breakdown of the full pipeline:
+
+| Phase | % of wall time |
+|---|---|
+| Key encoding (CPU) | 55% |
+| PCIe H→D upload | 29% |
+| GPU radix sort kernel | 9% |
+| Permutation gather | 7% |
+
+The actual sort is 9%. PCIe + encoding is 84%. This is what motivates the compression work.
+
+### Compression headroom on TPC-H sort key
+
+Per-column FOR + bit-packing ratios from [`scripts/a3_codec_ratios.py`](scripts/a3_codec_ratios.py):
+
+| Column | Raw bytes | FOR+bitpack | Ratio |
+|---|---|---|---|
+| l_returnflag | 1 | 0.625 | 1.6× |
+| l_linestatus | 1 | 0.5 | 2.0× |
+| l_shipdate | 4 | 1.5 | 2.67× |
+| l_commitdate | 4 | 1.5 | 2.67× |
+| l_receiptdate | 4 | 1.5 | 2.67× |
+| l_extendedprice | 8 | 3.0 | 2.67× |
+| l_discount | 8 | 0.5 | **16×** |
+| l_tax | 8 | 0.5 | **16×** |
+| l_quantity | 8 | 1.625 | 4.9× |
+| l_orderkey | 8 | 3.25 | 2.46× |
+| l_partkey | 4 | 2.625 | 1.52× |
+| l_suppkey | 4 | 2.125 | 1.88× |
+| l_linenumber | 4 | 0.375 | 10.7× |
+| **Total** | **66** | **~19.6** | **3.36×** |
+
+Compact-key scan (drop invariant bytes) already gets us 88 → 32. Layering FOR+bitpack on top projects to ~10 byte keys end-to-end.
+
+### GPU codec throughput is far above PCIe
+
+From [`scripts/b_codec_benchmarks.cu`](scripts/b_codec_benchmarks.cu) on the RTX 6000:
+
+| Codec | Width | Decode throughput |
+|---|---|---|
+| FOR | 1 byte | 466 GB/s |
+| FOR | 2 byte | 546 GB/s |
+| FOR | 4 byte | 568 GB/s |
+| Bit-pack | 8 bits/value | 451 GB/s |
+| Bit-pack | 24 bits/value | 562 GB/s |
+
+PCIe 3.0 caps at ~12 GB/s. Decode is ~40-50× faster than data can arrive, so a "compress on host, decode on device" pipeline is cheap.
+
+### Direct sort on smaller keys
+
+From [`scripts/b_codec_benchmarks.cu`](scripts/b_codec_benchmarks.cu), 100 M record sort time as key width drops:
+
+| Key width | Time | Throughput |
+|---|---|---|
+| 32 B | 21.48 ms | 37.3 GB/s |
+| 24 B | 18.35 ms | 43.6 GB/s |
+| 20 B | 18.36 ms | 43.6 GB/s |
+| 16 B | 12.45 ms | **64.3 GB/s** |
+| 8 B | 6.56 ms | **122.0 GB/s** |
+
+Smaller keys are faster to sort (one fewer radix pass per byte). The compression work compounds: smaller keys both move faster across PCIe and sort faster on device.
+
+### K-way merge cost grows fast in K
+
+From [`scripts/d1_merge_profile.py`](scripts/d1_merge_profile.py) (CPU K-way merge, 100 M rows):
+
+| K | Throughput | Slowdown vs K=2 |
+|---|---|---|
+| 2 | 172 Mrows/s | 1.00× |
+| 4 | 194 Mrows/s | 0.89× |
+| 8 | 153 Mrows/s | 1.12× |
+| 16 | 71 Mrows/s | **2.42×** |
+
+This is the cost the upcoming GPU sample-sort path is meant to eliminate. At K=16 the CPU merge is the dominant phase.
+
+### What this points to
+
+1. The PCIe bottleneck is the dominant cost on every GPU we tested. Compression directly attacks it. The codec building blocks (FOR, bit-pack) are ready in [`scripts/b_codec_benchmarks.cu`](scripts/b_codec_benchmarks.cu).
+2. Smaller GPU memory (P5000 16 GB, 2080 8 GB) caps the achievable scale because the merge-phase arena scales with total record count, not chunk size. Compression should also extend the envelope by reducing arena size.
+3. K-way merge cost is real and grows with K. Replacing it with GPU sample-sort is the next big architectural change.
+
+Detailed breakdown in [`results/related_accelerators.md`](../results/related_accelerators.md) and [`results/overnight_experiments.md`](../results/overnight_experiments.md).
+
 ## What This Is
 
 An external merge sort for GPUs that handles datasets from megabytes to larger-than-HBM. The core pipeline:
