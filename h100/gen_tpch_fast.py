@@ -113,34 +113,44 @@ def main():
         return
 
     work_dir = output_path + ".tmp_parquet"
-    parquet_path = gen_via_tpchgen(sf, work_dir)
+    try:
+        parquet_path = gen_via_tpchgen(sf, work_dir)
+    except subprocess.CalledProcessError as e:
+        print(f"[!] tpchgen-cli failed ({e}), falling back to duckdb")
+        shutil.rmtree(work_dir, ignore_errors=True)
+        gen_via_duckdb(sf, output_path)
+        return
 
-    print(f"  [encode] reading parquet + encoding to {output_path}")
-    t0 = time.time()
-    df = pl.read_parquet(parquet_path)
-    n = len(df)
-    print(f"  [encode] {n:,} rows, allocating {n * RECORD_SIZE / 1e9:.2f} GB output")
+    try:
+        print(f"  [encode] reading parquet + encoding to {output_path}")
+        t0 = time.time()
+        df = pl.read_parquet(parquet_path)
+        n = len(df)
+        print(f"  [encode] {n:,} rows, allocating {n * RECORD_SIZE / 1e9:.2f} GB output")
 
-    output_buf = bytearray(n * RECORD_SIZE)
-    # Process in chunks for memory friendliness
-    CHUNK = 5_000_000
-    for off in range(0, n, CHUNK):
-        end = min(off + CHUNK, n)
-        chunk = df.slice(off, end - off)
-        encode_lineitem_chunk(chunk, output_buf, off * RECORD_SIZE)
-        if off % (CHUNK * 4) == 0:
-            print(f"    {off/n*100:.1f}%")
+        output_buf = bytearray(n * RECORD_SIZE)
+        # Process in chunks for memory friendliness
+        CHUNK = 5_000_000
+        for off in range(0, n, CHUNK):
+            end = min(off + CHUNK, n)
+            chunk = df.slice(off, end - off)
+            encode_lineitem_chunk(chunk, output_buf, off * RECORD_SIZE)
+            if off % (CHUNK * 4) == 0:
+                print(f"    {off/n*100:.1f}%")
 
-    print(f"  [encode] writing {output_path}...")
-    with open(output_path, "wb") as f:
-        f.write(output_buf)
+        print(f"  [encode] writing {output_path}...")
+        with open(output_path, "wb") as f:
+            f.write(output_buf)
 
-    # Cleanup parquet
-    shutil.rmtree(work_dir, ignore_errors=True)
-
-    elapsed = time.time() - t0
-    gb = n * RECORD_SIZE / 1e9
-    print(f"  Done: {n:,} records, {gb:.2f} GB, {elapsed:.1f}s ({gb/elapsed:.2f} GB/s encode rate)")
+        elapsed = time.time() - t0
+        gb = n * RECORD_SIZE / 1e9
+        print(f"  Done: {n:,} records, {gb:.2f} GB, {elapsed:.1f}s ({gb/elapsed:.2f} GB/s encode rate)")
+    except Exception as e:
+        print(f"[!] fast encode failed ({e}), falling back to duckdb")
+        gen_via_duckdb(sf, output_path)
+    finally:
+        # Cleanup parquet
+        shutil.rmtree(work_dir, ignore_errors=True)
 
 if __name__ == "__main__":
     main()
