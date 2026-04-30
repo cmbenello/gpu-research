@@ -40,6 +40,15 @@ Both verified PASS (correctness preserved). Wall time roughly flat at these scal
 
 The merge phase allocates `num_records × 24 bytes` ≈ 10.6 GB atomically (d_pfx_alt + d_perm_save + d_perm_alt + CUB scratch). With ~5 GB free at that point, it won't fit on 16 GB. **Compression alone doesn't unlock SF100 on the P5000** — we'd need to chunk the merge phase too, which is real engineering (~1-2 days).
 
+### 5. Same test on the RTX 2080 (8 GB) at SF30 — same wall
+
+| Configuration | Result |
+|---|---|
+| SF30 baseline | OOM at merge arena (line 2489) |
+| SF30 + USE_BITPACK | **same OOM** at merge arena |
+
+Two different GPUs, two different scales (SF100 on 16 GB, SF30 on 8 GB), same architectural wall. The merge arena ceiling is real and scale-invariant in the codec dimension. This is now H100 queue item Tier 3.2 (chunked merge phase).
+
 ## What this proved
 
 1. The infrastructure for compression integration is in place. `BitPackConfig` works correctly end-to-end, the FOR + bit-pack codec actually delivers 25% PCIe reduction, and verification passes.
