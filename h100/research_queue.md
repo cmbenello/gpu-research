@@ -10,6 +10,8 @@ Status legend:
 
 The loop is allowed to **add new experiments** at the bottom when findings warrant.
 
+**Pacing for the H100 week:** Tiers 0-3 are the must-haves (sanity, scale envelope, compression validation, architecture). Tiers 4-7 are the publication baselines and writeup. Tiers 8-14 are research depth — the loop should reach them only after the must-haves are done. If a Tier 8+ experiment takes more than 2 hours of engineering work to set up, the loop should **mark it `[!]` with reason "out of session scope"** and move on rather than block.
+
 ## Tier 0 — Sanity (run first, fast)
 
 - [ ] **0.1 baseline_smoke** — 1M synthetic + SF10 with verify (already in setup, just record numbers).
@@ -65,6 +67,59 @@ The loop is allowed to **add new experiments** at the bottom when findings warra
 - [ ] **7.1 final_charts** — regenerate the PI-progress chart pack with H100 numbers.
 - [ ] **7.2 weekly_writeup** — `results/weekly_progress_h100.md` with all findings, formatted for the PI.
 - [ ] **7.3 paper_intro_outline** — outline of the VLDB / DaMoN submission based on the H100 numbers.
+
+## Tier 8 — Codec breadth (when does which compressor win?)
+
+- [ ] **8.1 codec_matrix_tpch** — for SF50 + SF100, measure per-column ratio for every codec we support: FOR, FOR+bitpack, dictionary (full alphabet), dictionary (top-256 + escape), RLE, plain. Save as a heatmap. Reveals which codec wins per column type.
+- [ ] **8.2 dict_encoding_path** — implement and integrate a CPU-side dictionary encoder for the low-cardinality columns (l_returnflag, l_linestatus). Compare end-to-end vs FOR+bitpack alone.
+- [ ] **8.3 rle_for_sorted_prefix** — when input is partially pre-sorted, run-length-encode the long-run prefix bytes. Measure on `time-series-sorted` data.
+- [ ] **8.4 codec_per_column_choice** — automatic per-column codec selection based on the entropy scan (Tier 8.1 results). Pick the best codec per column, then pack.
+- [ ] **8.5 hope_style_codec** — try a HOPE-style (Zhang SIGMOD 2020) order-preserving dictionary on the string columns. Compare to fixed-width padded UTF-8.
+
+## Tier 9 — Workload diversity (the data itself, not the codec)
+
+- [ ] **9.1 skewed_zipf** — synthesise 100M records where one sort key follows Zipf(α=1.5). Sort + measure. Tests how compact-key + bitpack handle high-skew distributions.
+- [ ] **9.2 already_sorted** — run the sort on input that's already in sorted order. Tests the best case (radix sort still does N work but PCIe is just a copy).
+- [ ] **9.3 reverse_sorted** — input in reverse order. Worst case for naive insertion sort, no different for radix.
+- [ ] **9.4 nearly_sorted** — 99% sorted with 1% random shuffle. Common real-world pattern.
+- [ ] **9.5 wide_records** — synthesise 256 B records (vs TPC-H 120 B). Tests gather phase scaling with record width.
+- [ ] **9.6 string_heavy** — 100M records where the sort key is a 64 B variable-length string. Tests the string-padding path and exposes if string sort hits a different bottleneck.
+
+## Tier 10 — Cross-library baselines
+
+- [ ] **10.1 cudf_sort_values** — RAPIDS cuDF `sort_values()` on the same data. Direct GPU-to-GPU comparison. If cuDF wins, we have a problem; if we win, that's the paper.
+- [ ] **10.2 thrust_sort** — `thrust::sort` direct call (the "naive" GPU sort). Establishes the ceiling for what an off-the-shelf algorithm gets.
+- [ ] **10.3 cub_devicesort_keys_only** — straight CUB `DeviceRadixSort::SortKeys` on byte-comparable keys. Removes any framework overhead. The pure-codec story comes through here.
+- [ ] **10.4 nccl_singlegpu_sanity** — NCCL allreduce sanity (sets up the multi-GPU baseline if H100 is dual).
+
+## Tier 11 — Adversarial / robustness
+
+- [ ] **11.1 with_nulls** — TPC-H with synthetic NULL values in numeric columns. Verify our encoding handles them.
+- [ ] **11.2 stability_test** — sort with intentional duplicate keys (e.g. take SF10 and replicate keys 10×). Measure if the sort is stable (preserves original record order for equal keys).
+- [ ] **11.3 mixed_asc_desc** — composite key with some columns ascending, some descending. Tests the encode path that requires bit-flipping for descending order.
+- [ ] **11.4 oom_recovery** — intentionally request a sort that won't fit. Verify the OOM path is graceful (not a crash, not a kernel hang).
+- [ ] **11.5 power_throttle_check** — sort SF100 in a tight loop for 30 minutes. Measure GPU clock + temperature drift. If throttling is real, document it.
+
+## Tier 12 — System integration
+
+- [ ] **12.1 postgres_create_index** — write a Postgres `CREATE INDEX` extension that calls `gpu_crocsort` for `tuplesort_performsort()`. Measure CREATE INDEX wall-time on SF50 vs Postgres native.
+- [ ] **12.2 sqlite_vacuum_index** — same but for SQLite.
+- [ ] **12.3 duckdb_external_operator** — retry the DuckDB custom operator now that we have compression: maybe the smaller key compensates for the column→row serialization overhead this time.
+- [ ] **12.4 sort_merge_join** — implement sort-merge join on TPC-H using our sort. Compare to DuckDB's hash-join for queries Q3, Q9.
+- [ ] **12.5 spark_sort** — if PySpark is installable, sort SF50 in Spark single-node. Mostly to have a coordinator-style baseline.
+
+## Tier 13 — Algorithm extensions
+
+- [ ] **13.1 top_k_selection** — implement top-K (where K = 1M out of 100M). Don't need full sort. Compare to current sort + truncate.
+- [ ] **13.2 sample_sort_with_learned_splitters** — instead of random sample for splitters, learn them from a tiny model. Reduces sample variance.
+- [ ] **13.3 sort_aggregate_fusion** — sort + group-by aggregate as a single pass. Skips materializing the full sorted output.
+- [ ] **13.4 streaming_sort** — process input larger than disk by streaming runs through GPU + writing back to NVMe.
+
+## Tier 14 — Energy / efficiency
+
+- [ ] **14.1 joule_per_sorted_gb** — measure power draw during SF100 sort with `nvidia-smi --query-gpu=power.draw`. Compute J/GB. Compare to MendSort's published numbers.
+- [ ] **14.2 hbm3_vs_pcie5_balance** — at what record count does HBM3 bandwidth, not PCIe5, become the bottleneck on H100?
+- [ ] **14.3 compression_pareto** — pareto curve of compression ratio vs encode CPU cost. Helps choose the right codec for a given workload.
 
 ---
 
