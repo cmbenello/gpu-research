@@ -945,14 +945,13 @@ ExternalGpuSort::generate_runs_pipelined(
         int* d_bp_bits = nullptr;
         uint8_t* d_bp_mins = nullptr;
         uint8_t* d_packed_buf = nullptr;  // separate packed buffer on GPU
-        if (bitpack.active) {
+        // CPU pre-pack mode: bitpack happens on host before upload.
+        //   The legacy GPU bitpack path is therefore skipped (CPU pre-pack already produced
+        //   bitpack.padded_size keys; we just sort them directly).
+        if (false) {
             CUDA_CHECK(cudaMalloc(&d_bp_bit_offsets, 26 * sizeof(int)));
             CUDA_CHECK(cudaMalloc(&d_bp_bits, 26 * sizeof(int)));
             CUDA_CHECK(cudaMalloc(&d_bp_mins, 26));
-            CUDA_CHECK(cudaMemcpy(d_bp_bit_offsets, bitpack.bit_offsets, 26*sizeof(int), cudaMemcpyHostToDevice));
-            CUDA_CHECK(cudaMemcpy(d_bp_bits, bitpack.bits, 26*sizeof(int), cudaMemcpyHostToDevice));
-            CUDA_CHECK(cudaMemcpy(d_bp_mins, bitpack.mins, 26, cudaMemcpyHostToDevice));
-            // Allocate packed buffer (smaller stride than d_compact)
             CUDA_CHECK(cudaMalloc(&d_packed_buf, buf_records * eff_size));
         }
 
@@ -966,11 +965,19 @@ ExternalGpuSort::generate_runs_pipelined(
             for (int t = 0; t < hw; t++) {
                 threads.emplace_back([&, t, offset, cur_n, ping, rcsize, nvary]() {
                     uint64_t lo = t * per_t, hi = std::min(lo + per_t, cur_n);
-                    for (uint64_t j = lo; j < hi; j++) {
-                        const uint8_t* rec = h_data + (offset + j) * RECORD_SIZE;
-                        uint8_t* ck = h_compact[ping] + j * rcsize;
-                        for (int b = 0; b < nvary; b++) ck[b] = rec[runtime_cmap[b]];
-                        for (int b = nvary; b < rcsize; b++) ck[b] = 0;
+                    if (bitpack.active) {
+                        for (uint64_t j = lo; j < hi; j++) {
+                            const uint8_t* rec = h_data + (offset + j) * RECORD_SIZE;
+                            uint8_t* ck = h_compact[ping] + j * rcsize;
+                            bitpack.pack(rec, runtime_cmap, ck);
+                        }
+                    } else {
+                        for (uint64_t j = lo; j < hi; j++) {
+                            const uint8_t* rec = h_data + (offset + j) * RECORD_SIZE;
+                            uint8_t* ck = h_compact[ping] + j * rcsize;
+                            for (int b = 0; b < nvary; b++) ck[b] = rec[runtime_cmap[b]];
+                            for (int b = nvary; b < rcsize; b++) ck[b] = 0;
+                        }
                     }
                 });
             }
@@ -1006,7 +1013,8 @@ ExternalGpuSort::generate_runs_pipelined(
 
             // GPU-side bitpacking: 32B compact → packed keys in d_packed_buf
             uint8_t* sort_compact_src = sort_ws.d_compact;
-            if (bitpack.active && d_packed_buf) {
+            // CPU pre-packed → skip GPU bitpack
+            if (false && bitpack.active && d_packed_buf) {
                 int bp_threads = 256;
                 int bp_blocks = (cur_n + bp_threads - 1) / bp_threads;
                 bitpack_compact_keys_kernel<<<bp_blocks, bp_threads, 0, streams[1]>>>(
@@ -1479,6 +1487,18 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
         runtime_compact_size = ((num_varying + 7) / 8) * 8;  // pad to 8B
         effective_compact_size = runtime_compact_size;
 
+        // BITPACK: analyse data + decide whether to bitpack
+        if (getenv("USE_BITPACK")) {
+            bitpack.compute(h_data, num_records, runtime_cmap);
+            if (bitpack.active) {
+                runtime_compact_size = bitpack.padded_size;
+                effective_compact_size = bitpack.padded_size;
+                printf("  CPU PREPACK active: uploading %dB packed keys (vs %dB unpacked)\n",
+                       bitpack.padded_size,
+                       ((num_varying + 7) / 8) * 8);
+            }
+        }
+
         printf("== Step 1+2: Key Upload ==\n");
         printf("  Runtime compact map: %d/%d bytes vary, %dB compact key (%d LSD passes)\n",
                num_varying, (int)KEY_SIZE, runtime_compact_size, (runtime_compact_size + 7) / 8);
@@ -1764,9 +1784,14 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
         if (d_key_buffer) { cudaFree(d_key_buffer); d_key_buffer = nullptr; }
 
         // Sample sort operates directly on h_data — keys are the first KEY_SIZE
-        // bytes of each RECORD_SIZE record. No separate key extraction needed.
+        // bytes of each RECORD_SIZE record. Uses compact map if available.
         printf("== Phase 1+2: Sample Sort ==\n");
+#ifdef USE_COMPACT_KEY
+        SampleSortResult ss = sample_sort_keys(h_data, KEY_SIZE, RECORD_SIZE, num_records,
+                                                0, runtime_cmap, num_varying);
+#else
         SampleSortResult ss = sample_sort_keys(h_data, KEY_SIZE, RECORD_SIZE, num_records);
+#endif
 
         printf("\n== Phase 3: CPU Gather ==\n");
         WallTimer gather_timer; gather_timer.begin();
@@ -2268,15 +2293,17 @@ run_generation:
         cudaFree(d_global_perm); d_global_perm = nullptr;
         cudaFree(d_cub_merge_temp);
 
-        // CPU gather + inline fixup detection: apply permutation to original h_data
-        // While gathering, detect groups of adjacent records with equal 16B prefix
-        // (the bytes the GPU sorted by). This eliminates a separate ~600ms scan.
-        // Uses non-temporal stores to avoid cache pollution on the write side,
-        // freeing L3 cache for random reads from h_data.
+        // CPU gather: apply permutation to produce sorted output.
+        // Two strategies benchmarked at runtime:
+        //   (A) Forward: h_output[i] = h_data[h_perm[i]]  — sequential write, random read
+        //   (B) Inverse: h_output[inv[j]] = h_data[j]     — sequential read, random NT write
+        //
+        // Strategy B inverts the memory access pattern: reads are sequential (hardware
+        // prefetch handles perfectly), writes are random but use NT stores (fire-and-forget
+        // to write-combining buffers, no read-for-ownership penalty).
         phase_timer.begin();
         printf("== Phase 3: CPU Gather ==\n");
         int hw_threads = std::max(1, (int)std::thread::hardware_concurrency());
-        int PREFETCH_AHEAD = 512;
         uint64_t chunk_per_t = (num_records + hw_threads - 1) / hw_threads;
 
         // Determine effective prefix bytes for group detection
@@ -2296,65 +2323,73 @@ run_generation:
 #endif
         if (KEY_SIZE <= 16) need_fixup = false;
 
+        double gather_ms = 0;
+        {
+            // Forward gather: random reads from h_data, sequential NT writes to h_output.
+            // Prefetch 128 records ahead — optimal from sweep (128×120B=15KB fits L1 TLB,
+            // larger distances thrash TLB and hurt: 512→19.7 GB/s, 128→20.2 GB/s).
+            constexpr int PF_AHEAD = 128;
+            std::vector<std::thread> threads;
+            for (int t = 0; t < hw_threads; t++) {
+                threads.emplace_back([&, t]() {
+                    uint64_t lo = t * chunk_per_t;
+                    uint64_t hi = std::min(lo + chunk_per_t, num_records);
+                    constexpr int WORDS = RECORD_SIZE / 8;
+                    for (uint64_t i = lo; i < hi; i++) {
+                        if (i + PF_AHEAD < hi)
+                            __builtin_prefetch(h_data + (uint64_t)h_perm[i+PF_AHEAD] * RECORD_SIZE, 0, 0);
+                        const int64_t* src = (const int64_t*)(h_data + (uint64_t)h_perm[i] * RECORD_SIZE);
+                        int64_t* dst = (int64_t*)(h_output + i * RECORD_SIZE);
+                        for (int w = 0; w < WORDS; w++)
+                            _mm_stream_si64((long long*)(dst + w), src[w]);
+                    }
+                    _mm_sfence();
+                });
+            }
+            for (auto& t : threads) t.join();
+            gather_ms = phase_timer.end_ms();
+            printf("  Gathered %.2f GB in %.0f ms (%.2f GB/s)\n",
+                   total_bytes/1e9, gather_ms, total_bytes/(gather_ms*1e6));
+        }
+
+        // Fixup group detection: separate sequential scan of h_output.
+        // Reads h_output in order (cache-friendly after sfence).
         // Per-thread group vectors (only used when need_fixup)
         std::vector<std::vector<std::pair<uint64_t,uint64_t>>> gather_thread_groups(hw_threads);
-
-        std::vector<std::thread> threads;
-        for (int t = 0; t < hw_threads; t++) {
-            threads.emplace_back([&, t]() {
-                uint64_t lo = t * chunk_per_t;
-                uint64_t hi = std::min(lo + chunk_per_t, num_records);
-                constexpr int WORDS = RECORD_SIZE / 8;  // 120/8 = 15
-
-                // Small buffer for previous record's prefix bytes (for group detection)
-                uint8_t prev_pfx[16] = {};
-                uint64_t group_start = lo;
-
-                for (uint64_t i = lo; i < hi; i++) {
-                    if (i + PREFETCH_AHEAD < hi)
-                        __builtin_prefetch(h_data + (uint64_t)h_perm[i+PREFETCH_AHEAD] * RECORD_SIZE, 0);
-                    const uint8_t* src_raw = h_data + (uint64_t)h_perm[i] * RECORD_SIZE;
-                    const int64_t* src = (const int64_t*)src_raw;
-                    int64_t* dst = (int64_t*)(h_output + i * RECORD_SIZE);
-                    // Non-temporal streaming stores (bypass write cache)
-                    for (int w = 0; w < WORDS; w++)
-                        _mm_stream_si64((long long*)(dst + w), src[w]);
-
-                    // Inline group detection during gather
-                    if (need_fixup) {
-                        // Extract prefix from source (already in cache from the copy)
-                        uint8_t cur_pfx[16];
+        if (need_fixup) {
+            std::vector<std::thread> scan_threads;
+            for (int t = 0; t < hw_threads; t++) {
+                scan_threads.emplace_back([&, t]() {
+                    uint64_t lo = t * chunk_per_t;
+                    uint64_t hi = std::min(lo + chunk_per_t, num_records);
+                    if (lo >= hi) return;
+                    uint64_t group_start = lo;
+                    for (uint64_t i = lo + 1; i <= hi; i++) {
+                        bool boundary = (i == hi);
+                        if (!boundary) {
+                            const uint8_t* ra = h_output + (i-1) * RECORD_SIZE;
+                            const uint8_t* rb = h_output + i * RECORD_SIZE;
 #ifdef USE_COMPACT_KEY
-                        if (used_compact_prefix) {
-                            for (int c = 0; c < effective_prefix_bytes && c < num_varying; c++)
-                                cur_pfx[c] = src_raw[runtime_cmap[c]];
-                        } else
+                            if (used_compact_prefix) {
+                                for (int c = 0; c < effective_prefix_bytes && c < num_varying; c++) {
+                                    if (ra[runtime_cmap[c]] != rb[runtime_cmap[c]]) { boundary = true; break; }
+                                }
+                            } else
 #endif
-                        {
-                            memcpy(cur_pfx, src_raw, effective_prefix_bytes);
-                        }
-
-                        if (i > lo) {
-                            bool same = (memcmp(prev_pfx, cur_pfx, effective_prefix_bytes) == 0);
-                            if (!same && (i - group_start > 1)) {
-                                gather_thread_groups[t].push_back({group_start, i - group_start});
+                            {
+                                boundary = (memcmp(ra, rb, effective_prefix_bytes) != 0);
                             }
-                            if (!same) group_start = i;
                         }
-                        memcpy(prev_pfx, cur_pfx, effective_prefix_bytes);
+                        if (boundary) {
+                            if (i - group_start > 1)
+                                gather_thread_groups[t].push_back({group_start, i - group_start});
+                            group_start = i;
+                        }
                     }
-                }
-                // Close final group in this thread's chunk
-                if (need_fixup && (hi - group_start > 1)) {
-                    gather_thread_groups[t].push_back({group_start, hi - group_start});
-                }
-                _mm_sfence();
-            });
+                });
+            }
+            for (auto& t : scan_threads) t.join();
         }
-        for (auto& t : threads) t.join();
-        double gather_ms = phase_timer.end_ms();
-        printf("  Gathered %.2f GB in %.0f ms (%.2f GB/s)\n",
-               total_bytes/1e9, gather_ms, total_bytes/(gather_ms*1e6));
 
         // CPU fixup: groups were detected inline during gather (no separate scan needed).
         phase_timer.begin();
@@ -2672,13 +2707,38 @@ int main(int argc, char** argv) {
 
     printf("Allocating %.2f GB pinned host memory...\n", total_bytes/1e9);
     uint8_t* h_data;
-    cudaError_t alloc_err = cudaMallocHost(&h_data, total_bytes);
-    if (alloc_err != cudaSuccess) {
-        printf("  cudaMallocHost failed, falling back to malloc\n");
-        h_data = (uint8_t*)malloc(total_bytes);
+    bool h_data_is_mmap = false;
+
+    // Try mmap + huge pages first: reduces TLB pressure for random gather reads
+    // (36GB / 4KB = 9M page table entries → 36GB / 2MB = 18K with huge pages)
+    h_data = (uint8_t*)mmap(nullptr, total_bytes, PROT_READ|PROT_WRITE,
+                            MAP_PRIVATE|MAP_ANONYMOUS|MAP_POPULATE, -1, 0);
+    if (h_data != MAP_FAILED) {
+        madvise(h_data, total_bytes, MADV_HUGEPAGE);
+        // Pin for GPU DMA access (equivalent to cudaMallocHost but keeps huge pages)
+        cudaError_t reg_err = cudaHostRegister(h_data, total_bytes, cudaHostRegisterDefault);
+        if (reg_err != cudaSuccess) {
+            printf("  cudaHostRegister failed (%s), falling back to cudaMallocHost\n",
+                   cudaGetErrorString(reg_err));
+            munmap(h_data, total_bytes);
+            h_data = nullptr;
+        } else {
+            h_data_is_mmap = true;
+            printf("  Using mmap + huge pages + cudaHostRegister\n");
+        }
+    } else {
+        h_data = nullptr;
+    }
+
+    if (!h_data) {
+        cudaError_t alloc_err = cudaMallocHost(&h_data, total_bytes);
+        if (alloc_err != cudaSuccess) {
+            printf("  cudaMallocHost failed, falling back to malloc\n");
+            h_data = (uint8_t*)malloc(total_bytes);
+        }
+        if (h_data) madvise(h_data, total_bytes, MADV_HUGEPAGE);
     }
     if (!h_data) { fprintf(stderr,"allocation failed\n"); return 1; }
-    madvise(h_data, total_bytes, MADV_HUGEPAGE);
 
     if (input_file) {
         printf("Loading from %s...\n", input_file);
@@ -2756,8 +2816,12 @@ int main(int argc, char** argv) {
                (result.pcie_h2d_gb + result.pcie_d2h_gb) / (total_bytes/1e9));
     }
 
-    if (alloc_err == cudaSuccess) cudaFreeHost(h_data);
-    else free(h_data);
+    if (h_data_is_mmap) {
+        cudaHostUnregister(h_data);
+        munmap(h_data, total_bytes);
+    } else {
+        cudaFreeHost(h_data);
+    }
     return 0;
 }
 #endif
