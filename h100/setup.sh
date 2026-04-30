@@ -70,6 +70,21 @@ if ! command -v claude >/dev/null; then
 fi
 log "Claude version: $(claude --version 2>&1 || echo 'NOT INSTALLED')"
 
+# ── 4b. tpchgen-cli (10-17x faster TPC-H gen than DuckDB dbgen) ───────────────
+if ! command -v tpchgen-cli >/dev/null; then
+    log "Installing tpchgen-cli (Rust)..."
+    if ! command -v cargo >/dev/null; then
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable >/dev/null 2>&1 \
+            || log "  rustup install failed (non-fatal — duckdb fallback will be used)"
+        # shellcheck disable=SC1091
+        [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+    fi
+    if command -v cargo >/dev/null; then
+        cargo install tpchgen-cli 2>&1 | tail -3
+    fi
+fi
+log "tpchgen-cli: $(tpchgen-cli --version 2>&1 | head -1 || echo 'NOT INSTALLED — duckdb fallback will be used')"
+
 # ── 5. Clone or update repo ──────────────────────────────────────────────────
 if [ ! -d "$WORK_DIR/.git" ]; then
     log "Cloning $REPO_URL → $WORK_DIR"
@@ -117,9 +132,9 @@ log "Smoke test: 1M synthetic int32 sort..."
 
 # ── 9. Generate small TPC-H seed (SF10) ──────────────────────────────────────
 if [ ! -f "$DATA_DIR/lineitem_sf10.bin" ]; then
-    log "Generating TPC-H SF10 (~7 GB) for verification..."
+    log "Generating TPC-H SF10 (~7 GB) for verification (using fast generator)..."
     cd "$DATA_DIR"
-    python3 "$WORK_DIR/gpu_crocsort/gen_tpch_normalized.py" 10 lineitem_sf10.bin 2>&1 | tail -3
+    python3 "$WORK_DIR/h100/gen_tpch_fast.py" 10 lineitem_sf10.bin 2>&1 | tail -3
 fi
 
 # ── 10. End-to-end verify ────────────────────────────────────────────────────
