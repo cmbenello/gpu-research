@@ -53,29 +53,41 @@ def save(fig, name):
 # Figure 1: DuckDB vs CrocSort wall time per machine
 # ─────────────────────────────────────────────────────────────
 def fig_duckdb_vs_crocsort():
-    # Pulled from baselines + GPU runs.
+    # Pulled from baselines + GPU runs (real measured numbers, best of 3 warm).
     data = [
-        # (machine, gpu_color, sf, gpu_s, duckdb_s)
-        ("RTX 2080 (8 GB)",  AMBER,  "SF10", 1.81,   8.41),
-        ("RTX 2080 (8 GB)",  AMBER,  "SF20", 2.76,  21.74),
-        ("P5000 (16 GB)",    PURPLE, "SF10", 2.66,   7.81),
-        ("P5000 (16 GB)",    PURPLE, "SF50", 7.72, 223.64),
+        # (machine, sf, gpu_s, duckdb_s, polars_s_or_None)
+        ("RTX 2080\n8 GB",  "SF10",  1.81,   8.41,  13.42),
+        ("RTX 2080\n8 GB",  "SF20",  2.76,  21.74,  27.61),
+        ("P5000\n16 GB",    "SF10",  2.66,   7.81,  13.34),
+        ("P5000\n16 GB",    "SF20",  5.54,  19.19,  28.67),
+        ("P5000\n16 GB",    "SF50",  7.72, 223.64,  None),  # Polars OOM
     ]
-    fig, ax = plt.subplots(figsize=(10, 5.2))
+    fig, ax = plt.subplots(figsize=(11, 5.5))
     x = np.arange(len(data))
-    w = 0.36
-    duck = [d[4] for d in data]
-    croc = [d[3] for d in data]
-    labels = [f"{d[0]}\n{d[2]}" for d in data]
-    speedups = [d[4]/d[3] for d in data]
+    w = 0.27
+    duck = [d[3] for d in data]
+    polars = [d[4] if d[4] else 0 for d in data]
+    croc = [d[2] for d in data]
+    labels = [f"{d[0]}\n{d[1]}" for d in data]
 
-    ax.bar(x - w/2, duck, w, label="DuckDB",  color=CPU, alpha=0.85)
-    ax.bar(x + w/2, croc, w, label="CrocSort", color=GPU, alpha=0.85)
+    ax.bar(x - w, duck,   w, label="DuckDB",   color=CPU,    alpha=0.85)
+    ax.bar(x,     polars, w, label="Polars",   color=PURPLE, alpha=0.85)
+    ax.bar(x + w, croc,   w, label="CrocSort", color=GPU,    alpha=0.85)
 
-    for i, (d, c, s) in enumerate(zip(duck, croc, speedups)):
-        ax.text(i + w/2, c + max(duck)*0.012, f"{s:.1f}×",
+    for i, (d, p, c) in enumerate(zip(duck, polars, croc)):
+        # Speedup vs DuckDB above CrocSort bar
+        s_d = d / c
+        ax.text(i + w, c + max(duck)*0.015, f"{s_d:.1f}×",
                 ha="center", fontsize=11, fontweight="bold", color=GPU)
-        ax.text(i - w/2, d + max(duck)*0.012, f"{d:.1f}s",
+        # Polars bar value (when present)
+        if polars[i] > 0:
+            ax.text(i, p + max(duck)*0.015, f"{p:.1f}s",
+                    ha="center", fontsize=8.5, color=GRAY)
+        else:
+            ax.text(i, 1.0, "Polars\nOOM", ha="center", fontsize=8,
+                    color=PURPLE, style="italic")
+        # DuckDB bar value
+        ax.text(i - w, d + max(duck)*0.015, f"{d:.1f}s",
                 ha="center", fontsize=8.5, color=GRAY)
 
     ax.set_xticks(x); ax.set_xticklabels(labels, fontsize=9)
@@ -84,8 +96,8 @@ def fig_duckdb_vs_crocsort():
     ax.set_ylim(0.5, 500)
     ax.legend(loc="upper left", frameon=False)
     ax.grid(True, axis="y", alpha=0.2, zorder=0)
-    title(ax, "DuckDB vs CrocSort — TPC-H ORDER BY",
-          "Best of 3 warm runs · log scale · CPU baseline DuckDB on the same machine")
+    title(ax, "DuckDB and Polars vs CrocSort — TPC-H ORDER BY",
+          "Best of 3 warm runs · log scale · CPU baselines + GPU on the same machine")
     save(fig, "f1_duckdb_vs_crocsort")
 
 # ─────────────────────────────────────────────────────────────
