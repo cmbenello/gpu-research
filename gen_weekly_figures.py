@@ -296,6 +296,56 @@ def fig_time_breakdown():
     save(fig, "f7_time_breakdown")
 
 # ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
+# Figure 8: bitpack pipeline integration — measured PCIe + chunks
+# ─────────────────────────────────────────────────────────────
+def fig_bitpack_integration():
+    # Measured 2026-04-30 on the actual sort path
+    rows = [
+        # (machine, scale, label, baseline_pcie_gb, bitpack_pcie_gb, baseline_chunks, bitpack_chunks)
+        ("RTX 2080\n8 GB",  "SF20\n14 GB", 3.84, 2.88, 3, 2),
+        ("P5000\n16 GB",    "SF50\n36 GB", 9.60, 7.20, 3, 2),
+    ]
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4.6))
+
+    # Left: PCIe bytes
+    labels = [f"{r[0]}\n{r[1]}" for r in rows]
+    base   = [r[2] for r in rows]
+    bp     = [r[3] for r in rows]
+    x = np.arange(len(rows)); w = 0.35
+    ax1.bar(x - w/2, base, w, color=CPU,  alpha=0.85, label="baseline")
+    ax1.bar(x + w/2, bp,   w, color=GPU,  alpha=0.85, label="USE_BITPACK")
+    for i, (b, p) in enumerate(zip(base, bp)):
+        ratio = b/p if p > 0 else 0
+        ax1.text(i, max(b, p) + 0.4, f"{(1-p/b)*100:.0f}% less PCIe",
+                 ha="center", fontsize=10, fontweight="bold", color=GPU)
+    ax1.set_xticks(x); ax1.set_xticklabels(labels, fontsize=10)
+    ax1.set_ylabel("H→D PCIe bytes (GB)")
+    ax1.set_ylim(0, max(base) * 1.30)
+    ax1.legend(loc="upper left", frameon=False)
+    ax1.grid(True, axis="y", alpha=0.2, zorder=0)
+    title(ax1, "PCIe bytes uploaded — actual measurement",
+          "CPU FOR + bit-pack → ~25% fewer bytes on the wire")
+
+    # Right: chunks
+    base_c = [r[4] for r in rows]
+    bp_c   = [r[5] for r in rows]
+    ax2.bar(x - w/2, base_c, w, color=CPU,  alpha=0.85, label="baseline")
+    ax2.bar(x + w/2, bp_c,   w, color=GPU,  alpha=0.85, label="USE_BITPACK")
+    for i, (b, p) in enumerate(zip(base_c, bp_c)):
+        ax2.text(i - w/2, b + 0.05, str(b), ha="center", fontsize=10)
+        ax2.text(i + w/2, p + 0.05, str(p), ha="center", fontsize=10,
+                 fontweight="bold", color=GPU)
+    ax2.set_xticks(x); ax2.set_xticklabels(labels, fontsize=10)
+    ax2.set_ylabel("Number of chunks")
+    ax2.set_ylim(0, max(base_c) + 1.5)
+    ax2.legend(loc="upper right", frameon=False)
+    ax2.grid(True, axis="y", alpha=0.2, zorder=0)
+    title(ax2, "Chunk count drops too",
+          "Smaller keys → more records fit per GPU chunk")
+    save(fig, "f8_bitpack_pipeline")
+
 print("Generating weekly figures...")
 fig_duckdb_vs_crocsort()
 fig_memory_envelope()
@@ -304,4 +354,5 @@ fig_decode_bw()
 fig_sort_vs_keywidth()
 fig_kway_merge()
 fig_time_breakdown()
+fig_bitpack_integration()
 print(f"\nAll charts → {OUT}/")
