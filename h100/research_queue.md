@@ -121,6 +121,55 @@ The loop is allowed to **add new experiments** at the bottom when findings warra
 - [ ] **14.2 hbm3_vs_pcie5_balance** — at what record count does HBM3 bandwidth, not PCIe5, become the bottleneck on H100?
 - [ ] **14.3 compression_pareto** — pareto curve of compression ratio vs encode CPU cost. Helps choose the right codec for a given workload.
 
+## Tier 15 — Multi-GPU + scale-out (only if H100 box has ≥2 GPUs)
+
+- [ ] **15.1 detect_multigpu** — `nvidia-smi -L`. If only 1 GPU, mark all of Tier 15 `[!]` "single-GPU host" and skip.
+- [ ] **15.2 nvlink_bandwidth** — `p2pBandwidthLatencyTest` to measure NVLink p2p between GPU pairs. Establishes the upper bound for multi-GPU sort.
+- [ ] **15.3 partition_then_sort** — partition input by sample-sort splitters, send partition i to GPU i, sort independently, concatenate. SF100 across 2 GPUs.
+- [ ] **15.4 nccl_all_to_all** — proper distributed sort: each GPU has 1/N of input, NCCL all-to-all to redistribute by global splitter, sort locally. SF300 across N GPUs.
+- [ ] **15.5 multigpu_scaling** — sort throughput vs GPU count for 1, 2, 4, 8 GPUs. Plot scaling efficiency.
+- [ ] **15.6 multinode_sort** — if multiple H100 boxes are available, sort across nodes via NCCL.
+
+## Tier 16 — Sort in real systems (the "why anyone cares" experiments)
+
+- [ ] **16.1 sort_groupby_aggregate** — implement `SELECT col, SUM(x) FROM t GROUP BY col ORDER BY col` end-to-end with our sort. Measure wall time vs DuckDB's hash aggregate + sort.
+- [ ] **16.2 sort_window_lag** — `LAG(price) OVER (PARTITION BY ticker ORDER BY ts)` requires a sorted partition. Time-series workload.
+- [ ] **16.3 sort_percentile** — sort + index for arbitrary percentile lookup. Useful for monitoring/alerting use cases.
+- [ ] **16.4 sort_dedup** — sort + adjacent-equal detection for distinct count. Compare to hash-based DISTINCT.
+- [ ] **16.5 sort_for_compression** — sorting data first then compressing it (Parquet, ORC). Measure compression ratio improvement post-sort. Quantifies sort-as-preprocessing value.
+- [ ] **16.6 join_throughput** — sort-merge join Q3 + Q9 of TPC-H end-to-end. Compare to DuckDB hash-join.
+
+## Tier 17 — Theoretical / roofline model
+
+- [ ] **17.1 roofline_h100** — given (HBM3 = 3.35 TB/s, PCIe5 = 32 GB/s, FP32 = 67 TFLOPS), compute the roofline ceiling for radix sort. Compare measured throughput.
+- [ ] **17.2 fit_scaling_law** — fit `time = α·N·log(N) + β·N` (encode + sort) and `time = γ·bytes_pcie / 12` (PCIe-bound) to measured numbers across SF10–SF1000. Predicts SF10000.
+- [ ] **17.3 codec_compression_model** — given (column entropy, range, n_distinct), predict which codec wins. Closed-form vs measured Tier 8.1 heatmap.
+- [ ] **17.4 amdahl_for_compression** — Amdahl-style: if PCIe is X% of wall time, max speedup from compressing PCIe to 0 is 1/(1-X). Validates how much compression CAN ever help.
+
+## Tier 18 — Numeric edge cases + correctness
+
+- [ ] **18.1 nan_handling** — synthetic float dataset with NaN values. Verify they sort to a consistent position (top or bottom), don't crash.
+- [ ] **18.2 negative_zero** — float dataset with -0.0 and +0.0 mixed. Verify they're treated as equal under our encoding (or document if they're not).
+- [ ] **18.3 infinity_handling** — float dataset with +∞, -∞. Verify byte encoding maintains order.
+- [ ] **18.4 unicode_strings** — non-ASCII strings (UTF-8 multi-byte). Verify the byte-comparable encoding still gives correct lex order.
+- [ ] **18.5 date_overflow** — dates around year 2038 (uint32 epoch overflow), year 9999 (TPC-H date max). Confirm encoding doesn't wrap.
+- [ ] **18.6 huge_keys** — key size larger than typical: 256 B, 1024 B keys. Tests the radix-pass-count scaling.
+
+## Tier 19 — Reproducibility + artifact
+
+- [ ] **19.1 docker_image** — Dockerfile that builds the entire stack. `docker run sortbench gpu_crocsort --input ...` should Just Work.
+- [ ] **19.2 paper_repro_script** — single shell script that regenerates every figure in the paper with one command.
+- [ ] **19.3 dataset_download** — `download_datasets.sh` that fetches NYC Taxi, BTC blockchain, etc. with checksums.
+- [ ] **19.4 cite_check** — list of citations the paper needs (Merrill+Grimshaw, Stehle+Jacobsen, Nicholson DaMoN, Zhang HOPE, Liu MOPD, Boncz FSST, ...). Verified against actual experiments.
+- [ ] **19.5 hardware_inventory** — script that records exact GPU model, driver, CUDA version, PCIe gen/lanes, CPU, RAM, OS, kernel. One-shot machine fingerprint for reproducibility.
+
+## Tier 20 — Stretch / "if everything else is done"
+
+- [ ] **20.1 learned_codec** — fit a tiny per-column NN to learn an order-preserving compression. Probably worse than FOR but interesting.
+- [ ] **20.2 sort_as_service** — wrap as a gRPC service. Measure tail latency (p50/p99/p999) over a workload of small + large sorts.
+- [ ] **20.3 streaming_top_k** — given an unbounded stream, maintain the top K elements in real time using GPU.
+- [ ] **20.4 sort_explanation** — for a given sort result, output a "compression report" explaining what each codec did and why. Aids debugging + paper figures.
+
 ---
 
 ## Running notes (loop appends to this section)
