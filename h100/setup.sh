@@ -144,7 +144,15 @@ fi
 # ── 10. End-to-end verify ────────────────────────────────────────────────────
 log "End-to-end SF10 sort verify..."
 cd "$WORK_DIR/gpu_crocsort"
-./external_sort_tpch_compact --input "$DATA_DIR/lineitem_sf10.bin" 2>&1 | grep -E "PASS|FAIL|GB/s|^CSV" | head -5
+# Pass --runs 1 explicitly so the compact binary RUNS its verifier — without
+# it, fast-path silent FAILs (see h100/results/0.1) get hidden behind a clean
+# exit code. 0.1.1 follow-up.
+./external_sort_tpch_compact --input "$DATA_DIR/lineitem_sf10.bin" --runs 1 2>&1 \
+    | grep -E "PASS|FAIL|VIOLATION at|GB/s|^CSV" | head -8 \
+    | tee /tmp/setup_verify_sf10.log
+if grep -qE "FAIL|VIOLATION at" /tmp/setup_verify_sf10.log; then
+    fail "SF10 compact verify failed — see /tmp/setup_verify_sf10.log"
+fi
 
 log ""
 log "════════════════════════════════════════════════════════════════"
