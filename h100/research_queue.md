@@ -25,7 +25,7 @@ The loop is allowed to **add new experiments** at the bottom when findings warra
 - [x] **1.3 generate_sf500** — Generated 360 GB in 2623 s (43.7 min), peak RSS 686 GB. → [`results/h100_runs/1.3_generate_sf500.md`](../results/h100_runs/1.3_generate_sf500.md). **WARNING:** the same code path projects to peak RSS ~1.2 TB at SF1000 — won't fit on this box; gate 1.5/1.6 on chunked-encoder fix (1.1.1).
 - [!] **1.4 sf500_baseline** — **FAIL OOM at SF500 on single H100 NVL.** d_keys_10byte = 198 GB > 94 GB HBM; the OVC fallback also doesn't fit (102.5 GB > 84 GB available). Motivates 15.4 (4-GPU). → [`results/h100_runs/1.4_sf500_baseline.md`](../results/h100_runs/1.4_sf500_baseline.md)
 - [x] **1.5 generate_sf1000** — Generated 720 GB in 60.3 min via the just-landed chunked encoder (1.1.1). Peak RSS 594 GB (vs projected 1.4 TB without chunking). → [`results/h100_runs/1.5_generate_sf1000.md`](../results/h100_runs/1.5_generate_sf1000.md)
-- [ ] **1.6 sf1000_baseline** — sort SF1000.
+- [~] **1.6 sf1000_baseline** — sort SF1000. Started 2026-05-02 23:18 UTC.
 - [ ] **1.7 envelope_chart** — plot wall-time and GB/s vs scale on H100.
 - [ ] **1.8 generate_sf1500** — Generate SF1500 (~1.08 TB lineitem). 3.3 TB free on /mnt/data, so this fits even with parallel intermediates. Watch df during gen.
 - [ ] **1.9 sf1500_baseline** — sort SF1500 single-GPU. Almost certainly out-of-HBM; tests the streaming/host-staging path under pressure.
