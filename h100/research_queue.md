@@ -14,7 +14,7 @@ The loop is allowed to **add new experiments** at the bottom when findings warra
 
 ## Tier 0 — Sanity (run first, fast)
 
-- [~] **0.1 baseline_smoke** — 1M synthetic + SF10 with verify (already in setup, just record numbers). Started 2026-05-02 19:09 UTC.
+- [x] **0.1 baseline_smoke** — 1M synthetic + SF10 PASS after fixing two real bugs (non-compact build, compact fast-path silent FAIL). 352 ms, 20.4 GB/s effective on SF10 compact. → [`results/h100_runs/0.1_baseline_smoke.md`](../results/h100_runs/0.1_baseline_smoke.md)
 - [ ] **0.2 sf50_baseline** — TPC-H SF50, 5 warm runs, baseline + USE_BITPACK. Confirms the patch works on H100.
 - [ ] **0.3 sf100_baseline** — TPC-H SF100, 5 warm runs, baseline + USE_BITPACK. The headline number — should beat the RTX 6000's 3.74 s by a wide margin.
 
@@ -196,3 +196,16 @@ Total aggregate HBM: 376 GB — SF500 (~360 GB) fits entirely in aggregate HBM; 
 - **CUDA arch:** sm_90 (Hopper)
 
 ## Running notes (loop appends to this section)
+
+### 2026-05-02 — 0.1 surfaced two bugs
+
+- **Build:** `external-sort-tpch` and `external-sort` had a 2-error compile failure (COMPACT_KEY_SIZE / runtime_compact_size unconditionally referenced). Fixed in 1944409.
+- **Correctness:** `external_sort_tpch_compact` had a silent FAIL on the data-fits-in-GPU fast path (NULL cmap → sorted garbage). Fixed in dc42168.
+- **Implication:** any prior SF10/SF20/SF30 compact numbers in `results/` that went through the fast path are suspect. Need to re-baseline.
+
+### Proposed follow-up items (from 0.1)
+
+- **0.1.1 verify_in_bootstrap** — add `--runs 1` to setup.sh's compact smoke step so future bootstraps catch silent verifier FAILs.
+- **0.1.2 fastpath_slowpath_boundary** — pick a size right at `buf_records` (~179 M on H100) and run `--runs 3` to confirm fast and slow paths produce identical output.
+- **0.1.3 rebaseline_pre_dc42168** — re-run any prior compact-path SF10/SF20/SF30 numbers; results before dc42168 used incorrect compact keys.
+
