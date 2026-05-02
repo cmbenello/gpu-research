@@ -565,7 +565,13 @@ struct SortWorkspace {
 
     int compact_stride = 0;  // actual compact key stride used for allocation
 
-    void allocate(uint64_t max_records, int compact_key_size = COMPACT_KEY_SIZE) {
+    void allocate(uint64_t max_records, int compact_key_size =
+#ifdef USE_COMPACT_KEY
+        COMPACT_KEY_SIZE
+#else
+        0
+#endif
+    ) {
         if (capacity >= max_records && (!compact_key_size || compact_stride >= compact_key_size)) return;
         free();
         capacity = max_records;
@@ -2129,7 +2135,13 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
             }
             buf_records = ovc_buf_records;
             buf_bytes = ovc_buf_bytes;
-            sort_ws.allocate(buf_records, runtime_compact_size);
+            sort_ws.allocate(buf_records,
+#ifdef USE_COMPACT_KEY
+                runtime_compact_size
+#else
+                0
+#endif
+            );
         }
 run_generation:
 
