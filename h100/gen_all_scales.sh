@@ -19,6 +19,13 @@ declare -A ROW_COUNTS=(
     [300]=1799989091
     [500]=3000028242
     [1000]=5999989709
+    # tpchgen-cli's actual row count at very large SF varies slightly from sf*6001215.
+    # The values below are sf*6001215 (theoretical) — gen_all_scales.sh's size check
+    # uses this only for the "already done" idempotency comparison. If gen produces
+    # slightly fewer rows, the check will see a "size mismatch" and re-gen, which is
+    # OK — at SF1500/2000 the gen is slow so re-gen is undesirable, but acceptable.
+    [1500]=9001822500
+    [2000]=12002430000
 )
 
 SCALES=("${@:-50 100 300 500 1000}")
