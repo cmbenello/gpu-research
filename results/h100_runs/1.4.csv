@@ -1,0 +1,2 @@
+scenario,gpu,gb,records,n_runs,passes,wall_ms,merge_ms,total_ms,gb_per_s,h2d_gb,d2h_gb,pcie_gb,depth,note
+sf500_baseline_attempt1,NVIDIA H100,360.00,3000028242,0,0,0,0,0,0,0,0,0,0,OOM at src/external_sort.cu:2510 (cudaMalloc 198 GB)
