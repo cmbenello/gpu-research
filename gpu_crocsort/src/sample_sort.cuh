@@ -68,8 +68,11 @@ static SampleSortResult sample_sort_keys(
     uint32_t key_size,           // meaningful key bytes per record
     uint32_t record_stride,      // stride between records (>= key_size)
     uint64_t num_records,
-    int target_partitions = 0    // 0 = auto
+    int target_partitions = 0,   // 0 = auto
+    const int* runtime_cmap = nullptr,  // varying-byte positions; reserved for cmap-aware sample sort
+    int num_varying = 0          // count of varying positions
 ) {
+    (void)runtime_cmap; (void)num_varying;  // currently unused; threaded through for future cmap-aware path
     SampleSortResult result = {};
 
     auto now = []() { return std::chrono::high_resolution_clock::now(); };

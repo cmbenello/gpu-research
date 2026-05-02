@@ -31,6 +31,9 @@ export CUDA_HOME="/usr/local/$CUDA_VER"
 log "Using $CUDA_HOME"
 
 # Hopper compute capability
+# (multi-GPU box: `nvidia-smi | head -1` closes the pipe early → SIGPIPE on
+# nvidia-smi → set -o pipefail kills the script. Disable pipefail locally.)
+set +o pipefail
 GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)
 case "$GPU_NAME" in
     *H100*|*H800*) ARCH="sm_90" ;;
@@ -41,6 +44,7 @@ case "$GPU_NAME" in
     *P100*|*P5000*|*Pascal*) ARCH="sm_60" ;;
     *) ARCH=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -1 | tr -d '.' | sed 's/^/sm_/') ;;
 esac
+set -o pipefail
 log "GPU: $GPU_NAME → $ARCH"
 
 # ── 2. System packages ───────────────────────────────────────────────────────
