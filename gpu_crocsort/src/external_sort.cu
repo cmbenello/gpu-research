@@ -772,10 +772,15 @@ ExternalGpuSort::ExternalGpuSort() {
     printf("[ExternalSort] Triple-buffer: %d × %.2f GB (%.0f M records each)\n",
            NBUFS, buf_bytes/1e9, buf_records/1e6);
 
-    // Allocate host pinned buffers and streams/events (not GPU buffers yet — lazy alloc)
+    // Allocate streams/events; defer GPU buffers AND h_pin pinned host buffers
+    // until they're actually needed (the slow chunked OVC path is the only
+    // consumer of h_pin). Keeping them in the constructor was fatal at SF1000:
+    // after pinning 720 GB of input, cudaMallocHost for an extra 21 GB ×
+    // NBUFS triple-buffer slot returned "invalid argument" because the kernel
+    // couldn't find that much additional pinnable memory.
     for (int i = 0; i < NBUFS; i++) {
-        d_buf[i] = nullptr;  // allocated lazily in sort()
-        CUDA_CHECK(cudaMallocHost(&h_pin[i], buf_bytes));
+        d_buf[i] = nullptr;   // lazy in sort()
+        h_pin[i] = nullptr;   // lazy in generate_runs_pipelined() (compact-upload)
         CUDA_CHECK(cudaStreamCreate(&streams[i]));
         CUDA_CHECK(cudaEventCreate(&events[i]));
     }
@@ -783,7 +788,7 @@ ExternalGpuSort::ExternalGpuSort() {
 
 ExternalGpuSort::~ExternalGpuSort() {
     for (int i = 0; i < NBUFS; i++) {
-        cudaFreeHost(h_pin[i]);
+        if (h_pin[i]) cudaFreeHost(h_pin[i]);
         cudaFree(d_buf[i]);
         cudaStreamDestroy(streams[i]);
         cudaEventDestroy(events[i]);
@@ -936,6 +941,15 @@ ExternalGpuSort::generate_runs_pipelined(
     bool use_compact_upload = (d_ovc_buffer && sort_ws.d_compact);
     if (use_compact_upload) {
         const int eff_size = effective_compact_size;  // runtime_compact_size (set by detect)
+
+        // Lazy-allocate the pinned staging buffers if the constructor skipped them
+        // (1.6.1 — defer to actual point of use so pinning doesn't fail at SF1000+
+        // where the input is already 720 GB pinned).
+        for (int i = 0; i < 2; i++) {
+            if (!h_pin[i]) {
+                CUDA_CHECK(cudaMallocHost(&h_pin[i], buf_bytes));
+            }
+        }
 
         // Use h_pin[0] and h_pin[1] as double-buffered staging for compact keys.
         uint8_t* h_compact[2] = { h_pin[0], h_pin[1] };
@@ -1898,6 +1912,13 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
             // For compact keys: h_pin capacity = buf_bytes / COMPACT_KEY_SIZE per buffer.
             uint64_t orig_buf_bytes = ((gpu_budget / NBUFS) / RECORD_SIZE) * (uint64_t)RECORD_SIZE;
             uint64_t pin_cap = orig_buf_bytes / COMPACT_KEY_SIZE;  // records per h_pin
+
+            // Lazy-allocate the pinned staging (1.6.1 — see constructor)
+            for (int i = 0; i < 2; i++) {
+                if (!h_pin[i]) {
+                    CUDA_CHECK(cudaMallocHost(&h_pin[i], buf_bytes));
+                }
+            }
 
             printf("== Phase 1: CPU Extract + H2D Compact Keys ==\n");
             WallTimer sp_timer; sp_timer.begin();
