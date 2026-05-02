@@ -15,7 +15,7 @@ The loop is allowed to **add new experiments** at the bottom when findings warra
 ## Tier 0 — Sanity (run first, fast)
 
 - [x] **0.1 baseline_smoke** — 1M synthetic + SF10 PASS after fixing two real bugs (non-compact build, compact fast-path silent FAIL). 352 ms, 20.4 GB/s effective on SF10 compact. → [`results/h100_runs/0.1_baseline_smoke.md`](../results/h100_runs/0.1_baseline_smoke.md)
-- [~] **0.2 sf50_baseline** — TPC-H SF50, 5 warm runs, baseline + USE_BITPACK. Confirms the patch works on H100. Started 2026-05-02 19:35 UTC.
+- [x] **0.2 sf50_baseline** — TPC-H SF50, 5 warm runs each, baseline (12.7 GB/s warm median) + USE_BITPACK (12.8 GB/s). Bitpack ≈ no-op at SF50; the prepack cost cancels the LSD-pass savings. → [`results/h100_runs/0.2_sf50_baseline.md`](../results/h100_runs/0.2_sf50_baseline.md)
 - [ ] **0.3 sf100_baseline** — TPC-H SF100, 5 warm runs, baseline + USE_BITPACK. The headline number — should beat the RTX 6000's 3.74 s by a wide margin.
 
 ## Tier 1 — Scale envelope (push the H100's 80 GB)
