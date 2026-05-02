@@ -1,0 +1,10 @@
+scale,gb,records,config,best_warm_ms,best_warm_gb_per_s,pcie_gb,status,note
+SF10,7.20,59986052,compact_baseline,352.20,20.44,14.40,PASS,fast-path single-chunk
+SF50,36.00,300005811,compact_baseline,2624.99,13.71,21.00,PASS,slow-path key-only
+SF50,36.00,300005811,compact_bitpack,2788.86,12.91,21.00,PASS,bitpack no-op at this scale
+SF100,72.00,600037902,compact_baseline,4501.33,16.00,42.00,PASS,slow-path uploads full 66B keys
+SF100,72.00,600037902,compact_bitpack,4783.28,15.05,42.00,PASS,bitpack no-op at this scale
+SF300,216.00,1799989091,compact_baseline,10100.62,21.38,64.80,PASS,OVC architecture engaged
+SF300,216.00,1799989091,compact_bitpack,8942.76,24.15,50.40,PASS,bitpack +13% throughput
+SF500,360.00,3000028242,compact_baseline,0,0,0,FAIL,GPU OOM 198 GB key buffer > 94 GB HBM
+SF1000,720.00,5999989709,compact_baseline,0,0,0,FAIL,host pin OOM (triple-buffer after 720 GB input pin)
