@@ -206,8 +206,14 @@ def main():
                                  mm, byte_off + off_in_rg * RECORD_SIZE)
                 row_off += n_rg
                 byte_off += n_rg * RECORD_SIZE
-                # Drop the row-group so the next pq.read_row_group starts fresh
+                # Drop the row-group so the next pq.read_row_group starts fresh.
+                # gc.collect() forces pyarrow's internal buffer chunks to release —
+                # without it RSS still drifts up to ~600 GB at SF1000 because Python
+                # GC is generational and has no urgency to reclaim huge buffers
+                # while the heap looks "fine" by its own bookkeeping (1.5.1).
+                import gc as _gc
                 del df_rg, tbl
+                _gc.collect()
                 pct = row_off / n * 100
                 if pct - last_print_pct >= 10:
                     print(f"    {pct:5.1f}% ({row_off:,}/{n:,}, rg {rg+1}/{pf.num_row_groups})",
