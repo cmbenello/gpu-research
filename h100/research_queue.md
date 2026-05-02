@@ -14,7 +14,7 @@ The loop is allowed to **add new experiments** at the bottom when findings warra
 
 ## Tier 0 — Sanity (run first, fast)
 
-- [ ] **0.1 baseline_smoke** — 1M synthetic + SF10 with verify (already in setup, just record numbers).
+- [~] **0.1 baseline_smoke** — 1M synthetic + SF10 with verify (already in setup, just record numbers). Started 2026-05-02 19:09 UTC.
 - [ ] **0.2 sf50_baseline** — TPC-H SF50, 5 warm runs, baseline + USE_BITPACK. Confirms the patch works on H100.
 - [ ] **0.3 sf100_baseline** — TPC-H SF100, 5 warm runs, baseline + USE_BITPACK. The headline number — should beat the RTX 6000's 3.74 s by a wide margin.
 
