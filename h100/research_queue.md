@@ -27,6 +27,12 @@ The loop is allowed to **add new experiments** at the bottom when findings warra
 - [ ] **1.5 generate_sf1000** — Generate SF1000 (~720 GB), if disk has space.
 - [ ] **1.6 sf1000_baseline** — sort SF1000.
 - [ ] **1.7 envelope_chart** — plot wall-time and GB/s vs scale on H100.
+- [ ] **1.8 generate_sf1500** — Generate SF1500 (~1.08 TB lineitem). 3.3 TB free on /mnt/data, so this fits even with parallel intermediates. Watch df during gen.
+- [ ] **1.9 sf1500_baseline** — sort SF1500 single-GPU. Almost certainly out-of-HBM; tests the streaming/host-staging path under pressure.
+- [ ] **1.10 generate_sf2000** — Generate SF2000 (~1.44 TB lineitem). Right at ~50% of disk; abort if df < 25% free mid-gen.
+- [ ] **1.11 sf2000_baseline** — sort SF2000. The single-GPU upper bound for this box; if it doesn't fit, that's the multi-GPU motivation in print.
+- [ ] **1.12 host_ram_staging_sf1000** — exploit the 1 TB host RAM: pre-load SF1000 (~720 GB) entirely into pinned host memory, then sort GPU-staged out of RAM. Compare to NVMe-staged numbers from 1.6. Should isolate "PCIe + sort" from "NVMe read".
+- [ ] **1.13 host_ram_staging_sf1500** — same trick at SF1500 (~1.08 TB) — slightly exceeds 1 TB RAM after overhead, so probably falls back to mixed RAM+NVMe. Useful data point.
 
 ## Tier 2 — Compression validation at scale
 
@@ -121,14 +127,21 @@ The loop is allowed to **add new experiments** at the bottom when findings warra
 - [ ] **14.2 hbm3_vs_pcie5_balance** — at what record count does HBM3 bandwidth, not PCIe5, become the bottleneck on H100?
 - [ ] **14.3 compression_pareto** — pareto curve of compression ratio vs encode CPU cost. Helps choose the right codec for a given workload.
 
-## Tier 15 — Multi-GPU + scale-out (only if H100 box has ≥2 GPUs)
+## Tier 15 — Multi-GPU + scale-out
 
-- [ ] **15.1 detect_multigpu** — `nvidia-smi -L`. If only 1 GPU, mark all of Tier 15 `[!]` "single-GPU host" and skip.
-- [ ] **15.2 nvlink_bandwidth** — `p2pBandwidthLatencyTest` to measure NVLink p2p between GPU pairs. Establishes the upper bound for multi-GPU sort.
-- [ ] **15.3 partition_then_sort** — partition input by sample-sort splitters, send partition i to GPU i, sort independently, concatenate. SF100 across 2 GPUs.
-- [ ] **15.4 nccl_all_to_all** — proper distributed sort: each GPU has 1/N of input, NCCL all-to-all to redistribute by global splitter, sort locally. SF300 across N GPUs.
-- [ ] **15.5 multigpu_scaling** — sort throughput vs GPU count for 1, 2, 4, 8 GPUs. Plot scaling efficiency.
-- [ ] **15.6 multinode_sort** — if multiple H100 boxes are available, sort across nodes via NCCL.
+This box: **4× H100 NVL (94 GB each), all-to-all NV6 NVLink** (verified via `nvidia-smi topo -m` 2026-05-02).
+GPU0/1 share NUMA node 0 (CPU 0-10 even); GPU2/3 share NUMA node 1.
+Total aggregate HBM: 376 GB — SF500 (~360 GB) fits entirely in aggregate HBM; SF1000 needs streaming.
+
+- [x] **15.1 detect_multigpu** — confirmed: 4 GPUs, all NV6 (6-link NVLink) between every pair → see results/h100_runs/15.1_topology_2026-05-02.md (recorded inline in this commit).
+- [ ] **15.2 nvlink_bandwidth** — build CUDA samples' `p2pBandwidthLatencyTest` (or roll a small p2p memcpy bench). Measure pair-wise NVLink b/w. Expected: ~300 GB/s per direction with NV6 (50 GB/s × 6).
+- [ ] **15.3 partition_then_sort_2gpu** — partition input by sample splitters, send half to GPU0 / half to GPU1, sort independently, merge. SF100 across 2 GPUs (same-NUMA pair).
+- [ ] **15.4 partition_then_sort_4gpu** — same as 15.3 but 4-way across all 4 GPUs. SF100 + SF300 + SF500. SF500 case is the headline because it fits entirely in 4×94 GB aggregate HBM.
+- [ ] **15.5 dataparallel_meta_merge_sf1000** — shard SF1000 into 4 chunks (~SF250 each), sort each chunk on its own GPU concurrently, then meta-merge sorted runs on host (or via NVLink-streamed merger). The "effective SF1000 with 4× peak HBM" plan.
+- [ ] **15.6 nccl_all_to_all_sort** — proper distributed sort: each GPU starts with 1/4 of input, NCCL all-to-all to redistribute by global splitter, sort locally. SF300 + SF500.
+- [ ] **15.7 multigpu_scaling_curve** — sort throughput vs GPU count for 1, 2, 4 GPUs (SF100 + SF300 + SF500). Plot scaling efficiency. Strong-scaling at fixed problem; weak-scaling at fixed per-GPU problem.
+- [ ] **15.8 numa_aware_pair** — compare 2-GPU runs that pair across NUMA (GPU0+GPU2) vs same-NUMA (GPU0+GPU1). Quantifies host-side NUMA cost when GPUs talk through host.
+- [ ] **15.9 sf2000_4gpu** — push the 4-GPU + host-RAM-staging combo to SF2000 (~1.44 TB). Combines 1.10 + 15.5 — likely the largest single-machine sort number we'll have on this box.
 
 ## Tier 16 — Sort in real systems (the "why anyone cares" experiments)
 
@@ -171,5 +184,15 @@ The loop is allowed to **add new experiments** at the bottom when findings warra
 - [ ] **20.4 sort_explanation** — for a given sort result, output a "compression report" explaining what each codec did and why. Aids debugging + paper figures.
 
 ---
+
+## Hardware profile (2026-05-02, sorting-h100)
+
+- **GPUs:** 4× NVIDIA H100 NVL, 95830 MiB HBM each (aggregate 376 GB), driver 550.163.01, CUDA 12.4
+- **Interconnect:** NV6 between every GPU pair (full all-to-all NVLink). GPU0+GPU1 share NUMA node 0; GPU2+GPU3 share NUMA node 1.
+- **CPU:** 192 cores
+- **Host RAM:** 1024 GiB (≈1014 GiB MemAvailable at boot)
+- **Boot disk:** 419 GB at `/` (do NOT generate data here)
+- **Data disk:** 3.5 TB ext4 at `/mnt/data` (3.3 TB free at start). All gen + intermediate writes go here.
+- **CUDA arch:** sm_90 (Hopper)
 
 ## Running notes (loop appends to this section)
