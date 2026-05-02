@@ -20,7 +20,7 @@ The loop is allowed to **add new experiments** at the bottom when findings warra
 
 ## Tier 1 — Scale envelope (push the H100's 80 GB)
 
-- [ ] **1.1 generate_sf300** — Generate SF300 lineitem (~216 GB) on local NVMe.
+- [~] **1.1 generate_sf300** — Generate SF300 lineitem (~216 GB) on local NVMe. Started 2026-05-02 19:55 UTC.
 - [ ] **1.2 sf300_baseline** — sort SF300, baseline + USE_BITPACK, 3 runs each.
 - [ ] **1.3 generate_sf500** — Generate SF500 (~360 GB) if disk allows.
 - [ ] **1.4 sf500_baseline** — sort SF500, baseline + USE_BITPACK.
