@@ -1440,25 +1440,13 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
             CUDA_CHECK(cudaMalloc(&d_buf[i], buf_bytes));
     }
 
-    // Fast path: fits in one buffer
-    if (num_records <= buf_records) {
-        printf("  Data fits in GPU — single-chunk sort\n");
-        sort_ws.allocate(num_records);
-        WallTimer t; t.begin();
-        CUDA_CHECK(cudaMemcpy(d_buf[0], h_data, total_bytes, cudaMemcpyHostToDevice));
-        sort_chunk_on_gpu(d_buf[0], d_buf[1], num_records, streams[0]);
-        CUDA_CHECK(cudaMemcpy(h_data, d_buf[0], total_bytes, cudaMemcpyDeviceToHost));
-        r.total_ms = r.run_gen_ms = t.end_ms();
-        r.num_runs = 1;
-        r.pcie_h2d_gb = r.pcie_d2h_gb = total_bytes / 1e9;
-        r.sorted_output = nullptr; // sorted in-place in h_data
-        return r;
-    }
-
 #ifdef USE_COMPACT_KEY
     // ── Runtime varying-byte detection ──
-    // Scan a sample of records to find which key bytes actually vary.
-    // The compact map must include ALL varying positions to preserve lex ordering.
+    // Scan all records to find which key bytes actually vary, build the compact
+    // map, and upload it to the device. MUST happen before the fast path because
+    // sort_chunk_on_gpu's compact-key kernel reads d_runtime_cmap/num_varying.
+    // Skipping this caused silent FAIL on small inputs (compact keys built from
+    // a NULL cmap → CUB sorted garbage, output unsorted, verifier flagged it).
     {
         uint64_t sample_n = num_records;  // scan ALL records for varying bytes
         bool byte_varies[KEY_SIZE] = {};
@@ -1518,6 +1506,27 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
         sort_ws.free();
     }
 #endif
+
+    // Fast path: fits in one buffer
+    if (num_records <= buf_records) {
+        printf("  Data fits in GPU — single-chunk sort\n");
+        sort_ws.allocate(num_records,
+#ifdef USE_COMPACT_KEY
+            runtime_compact_size > 0 ? runtime_compact_size : COMPACT_KEY_SIZE
+#else
+            0
+#endif
+        );
+        WallTimer t; t.begin();
+        CUDA_CHECK(cudaMemcpy(d_buf[0], h_data, total_bytes, cudaMemcpyHostToDevice));
+        sort_chunk_on_gpu(d_buf[0], d_buf[1], num_records, streams[0]);
+        CUDA_CHECK(cudaMemcpy(h_data, d_buf[0], total_bytes, cudaMemcpyDeviceToHost));
+        r.total_ms = r.run_gen_ms = t.end_ms();
+        r.num_runs = 1;
+        r.pcie_h2d_gb = r.pcie_d2h_gb = total_bytes / 1e9;
+        r.sorted_output = nullptr; // sorted in-place in h_data
+        return r;
+    }
 
     // ════════════════════════════════════════════════════════════════
     // KEY-ONLY SORT: extract keys on CPU → upload compact → GPU sort → download perm → CPU gather
