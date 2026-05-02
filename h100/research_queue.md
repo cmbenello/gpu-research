@@ -24,7 +24,7 @@ The loop is allowed to **add new experiments** at the bottom when findings warra
 - [x] **1.2 sf300_baseline** — SF300 baseline best 10.10 s / 21.4 GB/s warm; bitpack best 8.94 s / 24.2 GB/s warm (+13%). RTX 6000 OOMs at this scale. **First clean H100 win.** OVC architecture engages here, compact upload PCIe = 50.4 GB (5× compression). → [`results/h100_runs/1.2_sf300_baseline.md`](../results/h100_runs/1.2_sf300_baseline.md)
 - [x] **1.3 generate_sf500** — Generated 360 GB in 2623 s (43.7 min), peak RSS 686 GB. → [`results/h100_runs/1.3_generate_sf500.md`](../results/h100_runs/1.3_generate_sf500.md). **WARNING:** the same code path projects to peak RSS ~1.2 TB at SF1000 — won't fit on this box; gate 1.5/1.6 on chunked-encoder fix (1.1.1).
 - [!] **1.4 sf500_baseline** — **FAIL OOM at SF500 on single H100 NVL.** d_keys_10byte = 198 GB > 94 GB HBM; the OVC fallback also doesn't fit (102.5 GB > 84 GB available). Motivates 15.4 (4-GPU). → [`results/h100_runs/1.4_sf500_baseline.md`](../results/h100_runs/1.4_sf500_baseline.md)
-- [ ] **1.5 generate_sf1000** — Generate SF1000 (~720 GB), if disk has space.
+- [~] **1.5 generate_sf1000** — Generate SF1000 (~720 GB), if disk has space. Started 2026-05-02 22:08 UTC, gated on chunked encoder (1.1.1, just landed).
 - [ ] **1.6 sf1000_baseline** — sort SF1000.
 - [ ] **1.7 envelope_chart** — plot wall-time and GB/s vs scale on H100.
 - [ ] **1.8 generate_sf1500** — Generate SF1500 (~1.08 TB lineitem). 3.3 TB free on /mnt/data, so this fits even with parallel intermediates. Watch df during gen.
