@@ -170,31 +170,49 @@ def main():
         return
 
     try:
-        print(f"  [encode] reading parquet + encoding to {output_path}", flush=True)
+        # Stream parquet by row-group: holds at most one row group in RAM at
+        # a time. For SF500 the old read_all-at-once path peaked at ~686 GB
+        # RSS; this chunked path keeps RSS ~constant per row group (a few GB).
+        # Required to fit SF1000 on a 1 TB host.
+        import pyarrow.parquet as pq
+        import mmap as _mmap
+        print(f"  [encode] streaming parquet → {output_path}", flush=True)
         t0 = time.time()
-        df = pl.read_parquet(parquet_path)
-        n = len(df)
-        gb = n * RECORD_SIZE / 1e9
-        print(f"  [encode] {n:,} rows, allocating {gb:.2f} GB output buffer", flush=True)
 
-        # Pre-allocate the entire output buffer (mmap-backed if disk file)
+        pf = pq.ParquetFile(parquet_path)
+        n = pf.metadata.num_rows
+        gb = n * RECORD_SIZE / 1e9
+        print(f"  [encode] {n:,} rows in {pf.num_row_groups} row groups, "
+              f"output {gb:.2f} GB", flush=True)
+
         with open(output_path, "wb") as f:
             f.truncate(n * RECORD_SIZE)
 
-        # Encode in chunks for memory friendliness; mmap the output for in-place writes
-        import mmap
         with open(output_path, "r+b") as f:
-            mm = mmap.mmap(f.fileno(), 0)
-            CHUNK = 5_000_000
-            last_print = 0
-            for off_rows in range(0, n, CHUNK):
-                end = min(off_rows + CHUNK, n)
-                chunk = df.slice(off_rows, end - off_rows)
-                encode_chunk(chunk, mm, off_rows * RECORD_SIZE)
-                pct = off_rows / n * 100
-                if pct - last_print >= 10:
-                    print(f"    {pct:5.1f}% ({off_rows:,}/{n:,})", flush=True)
-                    last_print = pct
+            mm = _mmap.mmap(f.fileno(), 0)
+            row_off = 0
+            byte_off = 0
+            last_print_pct = -10
+            for rg in range(pf.num_row_groups):
+                tbl = pf.read_row_group(rg)
+                df_rg = pl.from_arrow(tbl)
+                n_rg = len(df_rg)
+                # Sub-chunk inside the row group to bound encode_chunk memory
+                # (encode_chunk's intermediates scale with chunk size).
+                CHUNK = 5_000_000
+                for off_in_rg in range(0, n_rg, CHUNK):
+                    end = min(off_in_rg + CHUNK, n_rg)
+                    encode_chunk(df_rg.slice(off_in_rg, end - off_in_rg),
+                                 mm, byte_off + off_in_rg * RECORD_SIZE)
+                row_off += n_rg
+                byte_off += n_rg * RECORD_SIZE
+                # Drop the row-group so the next pq.read_row_group starts fresh
+                del df_rg, tbl
+                pct = row_off / n * 100
+                if pct - last_print_pct >= 10:
+                    print(f"    {pct:5.1f}% ({row_off:,}/{n:,}, rg {rg+1}/{pf.num_row_groups})",
+                          flush=True)
+                    last_print_pct = pct
             mm.flush(); mm.close()
 
         elapsed = time.time() - t0
