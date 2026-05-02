@@ -26,7 +26,7 @@ The loop is allowed to **add new experiments** at the bottom when findings warra
 - [!] **1.4 sf500_baseline** — **FAIL OOM at SF500 on single H100 NVL.** d_keys_10byte = 198 GB > 94 GB HBM; the OVC fallback also doesn't fit (102.5 GB > 84 GB available). Motivates 15.4 (4-GPU). → [`results/h100_runs/1.4_sf500_baseline.md`](../results/h100_runs/1.4_sf500_baseline.md)
 - [x] **1.5 generate_sf1000** — Generated 720 GB in 60.3 min via the just-landed chunked encoder (1.1.1). Peak RSS 594 GB (vs projected 1.4 TB without chunking). → [`results/h100_runs/1.5_generate_sf1000.md`](../results/h100_runs/1.5_generate_sf1000.md)
 - [!] **1.6 sf1000_baseline** — **FAIL pinned-host-memory exhausted.** `cudaMallocHost` for triple-buffer fails after the 720 GB input is already pinned. Triple-buffer is constructor-allocated unconditionally — fix is to make it lazy (1.6.1). → [`results/h100_runs/1.6_sf1000_baseline.md`](../results/h100_runs/1.6_sf1000_baseline.md)
-- [ ] **1.7 envelope_chart** — plot wall-time and GB/s vs scale on H100.
+- [~] **1.7 envelope_chart** — plot wall-time and GB/s vs scale on H100. Started 2026-05-02 23:25 UTC.
 - [ ] **1.8 generate_sf1500** — Generate SF1500 (~1.08 TB lineitem). 3.3 TB free on /mnt/data, so this fits even with parallel intermediates. Watch df during gen.
 - [ ] **1.9 sf1500_baseline** — sort SF1500 single-GPU. Almost certainly out-of-HBM; tests the streaming/host-staging path under pressure.
 - [ ] **1.10 generate_sf2000** — Generate SF2000 (~1.44 TB lineitem). Right at ~50% of disk; abort if df < 25% free mid-gen.
