@@ -1631,6 +1631,13 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
         uint64_t already_resident = total_bytes; // pinned input
         uint64_t headroom = 64ULL * 1024 * 1024 * 1024; // 64 GB
         bool use_populate = (already_resident + total_bytes + headroom < host_ram_bytes);
+        // Override: NO_MAP_POPULATE=1 forces lazy faulting. Useful when
+        // multiple sort processes share the host (the per-process check
+        // above can't see the others; with 4 procs each populating
+        // 178 GB, we hit the 1 TB host wall).
+        if (getenv("NO_MAP_POPULATE") && atoi(getenv("NO_MAP_POPULATE"))) {
+            use_populate = false;
+        }
         int mmap_flags = MAP_PRIVATE | MAP_ANONYMOUS | (use_populate ? MAP_POPULATE : 0);
         printf("  Output buffer mmap: %s (input %.0f GB + output %.0f GB + 64 GB headroom %s host RAM %.0f GB)\n",
                use_populate ? "MAP_POPULATE (eager)" : "lazy fault",
