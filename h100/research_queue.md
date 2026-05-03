@@ -51,7 +51,7 @@ The loop is allowed to **add new experiments** at the bottom when findings warra
 ## Tier 4 — Cross-validation against published baselines
 
 - [x] **4.1 duckdb_at_scale** — DuckDB SF50: 33.0 s @ 1.09 GB/s (gpu_crocsort 21.9× faster); SF100: 106 s @ 0.68 GB/s (gpu_crocsort 35.1× faster — gap widens with scale). SF300 not measured (would take >30 min for dbgen).
-- [ ] **4.2 polars_at_scale** — Polars sort at SF100, SF300.
+- [x] **4.2 polars_at_scale** — Polars SF50 14.5 s @ 2.48 GB/s, SF100 28.6 s @ 2.52 GB/s. **gpu_crocsort 9.5-9.6× faster.** Polars is 3.7-9.6× faster than DuckDB. → results in `4.1_duckdb_baseline.csv`
 - [ ] **4.3 cudf_baseline** — cuDF sort_values on the same data. RAPIDS comparison.
 - [ ] **4.4 mendsort_position** — verify our GB/s position relative to MendSort (JouleSort 2023).
 - [ ] **4.5 gensort_100gb** — official GenSort 100 GB benchmark, head-to-head with published numbers.
