@@ -716,6 +716,12 @@ class ExternalGpuSort {
     uint64_t h_output_persistent_size = 0;
     bool     h_output_persistent_is_mmap = false;
 
+    // (0.3.1) Persistent pinned staging buffers for the slow-path compact
+    // upload pipeline. Avoids cudaMallocHost + cudaFreeHost per run (2 × 1 GB
+    // pinned alloc adds ~1 s per iteration if not amortized).
+    uint8_t* h_stage_persistent[2] = {nullptr, nullptr};
+    uint64_t h_stage_persistent_size = 0;
+
     // Track whether compact key prefixes were used (for CPU fixup grouping)
     bool used_compact_prefix;
 #ifdef USE_COMPACT_KEY
@@ -808,6 +814,12 @@ ExternalGpuSort::~ExternalGpuSort() {
         if (h_output_persistent_is_mmap) munmap(h_output_persistent, h_output_persistent_size);
         else free(h_output_persistent);
         h_output_persistent = nullptr;
+    }
+    for (int i = 0; i < 2; i++) {
+        if (h_stage_persistent[i]) {
+            cudaFreeHost(h_stage_persistent[i]);
+            h_stage_persistent[i] = nullptr;
+        }
     }
     for (int i = 0; i < NBUFS; i++) {
         if (h_pin[i]) cudaFreeHost(h_pin[i]);
@@ -2605,14 +2617,111 @@ run_generation:
         return r;
     }
 
-    // Strided DMA: extract only KEY_SIZE bytes per record from host
-    CUDA_CHECK(cudaMalloc(&d_keys_10byte, total_keys_bytes));
-    CUDA_CHECK(cudaMemcpy2DAsync(
-        d_keys_10byte, KEY_SIZE,
-        h_data, RECORD_SIZE,
-        KEY_SIZE, num_records,
-        cudaMemcpyHostToDevice, streams[0]));
-    r.pcie_h2d_gb = total_keys_bytes / 1e9;
+    // (0.3.1) Slow-path key upload — compact-key path when USE_COMPACT_KEY
+    // is on AND the runtime cmap detection has identified the varying bytes.
+    // Saves ~50% PCIe (66 B → 32 B per record) and cuts LSD pass count from 9
+    // to 4. Falls back to the original strided-66B upload if the cmap isn't
+    // populated (e.g. early code paths).
+#ifdef USE_COMPACT_KEY
+    int sort_key_stride = (num_varying > 0 && runtime_compact_size > 0)
+                          ? runtime_compact_size : (int)KEY_SIZE;
+    bool use_compact_keys = (sort_key_stride < (int)KEY_SIZE);
+#else
+    int sort_key_stride = (int)KEY_SIZE;
+    bool use_compact_keys = false;
+#endif
+
+    uint64_t sort_keys_bytes = (uint64_t)num_records * (uint64_t)sort_key_stride;
+
+    if (use_compact_keys) {
+        printf("  (0.3.1) Compact key upload: %d B/record (%d B varying) instead of %d B → "
+               "%.1f GB H2D vs %.1f GB; %d LSD passes vs %d\n",
+               sort_key_stride, num_varying, (int)KEY_SIZE,
+               sort_keys_bytes/1e9, total_keys_bytes/1e9,
+               (sort_key_stride+7)/8, ((int)KEY_SIZE+7)/8);
+
+        // Pipelined CPU extract → H2D using two pinned staging buffers
+        // (ping-pong). While the GPU DMAs chunk N, the CPU extracts chunk
+        // N+1 into the other buffer. Hides CPU extract behind PCIe.
+        // Chunk size sized to hold 32 M records of compact keys (~1 GB) —
+        // small enough that 2 chunks fit easily, large enough that DMA
+        // launch overhead doesn't dominate.
+        const uint64_t CHUNK_RECORDS = 32 * 1024 * 1024;  // 32 M records / chunk
+        const int eff = sort_key_stride;
+        const int nv = num_varying;
+        const uint64_t chunk_bytes_max = CHUNK_RECORDS * (uint64_t)eff;
+        // Reuse persistent pinned stage buffers across --runs iterations
+        // (avoids cudaMallocHost + cudaFreeHost cost ~1 s per run).
+        if (h_stage_persistent_size != chunk_bytes_max) {
+            for (int i = 0; i < 2; i++) {
+                if (h_stage_persistent[i]) {
+                    cudaFreeHost(h_stage_persistent[i]);
+                    h_stage_persistent[i] = nullptr;
+                }
+            }
+            CUDA_CHECK(cudaMallocHost(&h_stage_persistent[0], chunk_bytes_max));
+            CUDA_CHECK(cudaMallocHost(&h_stage_persistent[1], chunk_bytes_max));
+            h_stage_persistent_size = chunk_bytes_max;
+        }
+        uint8_t* h_stage[2] = { h_stage_persistent[0], h_stage_persistent[1] };
+
+        CUDA_CHECK(cudaMalloc(&d_keys_10byte, sort_keys_bytes));
+
+        cudaEvent_t copy_done[2];
+        CUDA_CHECK(cudaEventCreate(&copy_done[0]));
+        CUDA_CHECK(cudaEventCreate(&copy_done[1]));
+
+        WallTimer pipeline_timer; pipeline_timer.begin();
+        int hw = std::max(1, (int)std::thread::hardware_concurrency());
+        for (uint64_t off = 0; off < num_records; off += CHUNK_RECORDS) {
+            uint64_t this_n = std::min(CHUNK_RECORDS, num_records - off);
+            int ping = (off / CHUNK_RECORDS) & 1;
+            // Wait for the PREVIOUS H2D using THIS buffer to finish
+            CUDA_CHECK(cudaEventSynchronize(copy_done[ping]));
+            // CPU extract into h_stage[ping]
+            uint64_t per_t = (this_n + hw - 1) / hw;
+            std::vector<std::thread> et;
+            uint8_t* dst_buf = h_stage[ping];
+            for (int t = 0; t < hw; t++) {
+                et.emplace_back([&, t]() {
+                    uint64_t lo = (uint64_t)t * per_t;
+                    uint64_t hi = std::min(lo + per_t, this_n);
+                    for (uint64_t i = lo; i < hi; i++) {
+                        const uint8_t* rec = h_data + (off + i) * RECORD_SIZE;
+                        uint8_t* dst = dst_buf + i * (uint64_t)eff;
+                        for (int b = 0; b < nv; b++) dst[b] = rec[runtime_cmap[b]];
+                        for (int b = nv; b < eff; b++) dst[b] = 0;
+                    }
+                });
+            }
+            for (auto& t : et) t.join();
+            // Launch async H2D, record event so the next iteration knows when
+            // this buffer is free again.
+            CUDA_CHECK(cudaMemcpyAsync(d_keys_10byte + off * (uint64_t)eff, dst_buf,
+                                        this_n * (uint64_t)eff,
+                                        cudaMemcpyHostToDevice, streams[0]));
+            CUDA_CHECK(cudaEventRecord(copy_done[ping], streams[0]));
+        }
+        CUDA_CHECK(cudaStreamSynchronize(streams[0]));
+        double pipeline_ms = pipeline_timer.end_ms();
+        printf("  Pipelined extract+H2D: %.0f ms (%.2f GB/s effective vs raw record traffic)\n",
+               pipeline_ms,
+               (double)num_records * RECORD_SIZE / (pipeline_ms * 1e6));
+
+        // Don't cudaFreeHost — h_stage[0/1] are persistent across --runs.
+        cudaEventDestroy(copy_done[0]);
+        cudaEventDestroy(copy_done[1]);
+        r.pcie_h2d_gb = sort_keys_bytes / 1e9;
+    } else {
+        // Original full-key strided DMA path
+        CUDA_CHECK(cudaMalloc(&d_keys_10byte, sort_keys_bytes));
+        CUDA_CHECK(cudaMemcpy2DAsync(
+            d_keys_10byte, KEY_SIZE,
+            h_data, RECORD_SIZE,
+            KEY_SIZE, num_records,
+            cudaMemcpyHostToDevice, streams[0]));
+        r.pcie_h2d_gb = sort_keys_bytes / 1e9;
+    }
 
     // Allocate arena for CUB sort: uint64 keys + uint32 perm + CUB temp
     size_t cub_temp_bytes = 0;
@@ -2632,8 +2741,9 @@ run_generation:
     void* d_temp = (void*)(d_perm_out + num_records);
 
     double upload_ms = phase_timer.end_ms();
-    printf("  Uploaded %.2f GB keys (strided, GPU-direct) in %.0f ms (%.2f GB/s effective)\n",
-           total_keys_bytes/1e9, upload_ms, total_bytes/(upload_ms*1e6));
+    printf("  Uploaded %.2f GB keys (%s) in %.0f ms (%.2f GB/s effective)\n",
+           sort_keys_bytes/1e9, use_compact_keys ? "compact CPU-extract+H2D" : "strided DMA",
+           upload_ms, total_bytes/(upload_ms*1e6));
 
     // ── Step 3: GPU sort (extract uint64, init perm, CUB radix sort) ──
     printf("== Step 3: GPU CUB Radix Sort ==\n");
@@ -2641,28 +2751,37 @@ run_generation:
 
     int nthreads = 256, nblks = (num_records + nthreads - 1) / nthreads;
 
-    // ── LSD Multi-Pass Radix Sort for full KEY_SIZE correctness ──
+    // ── LSD Multi-Pass Radix Sort for full sort_key_stride correctness ──
     // Sort from least significant 8-byte chunk to most significant.
-    // For KEY_SIZE=10: 2 passes (bytes 8-9, then bytes 0-7)
-    // For KEY_SIZE=88: 11 passes (bytes 80-87, 72-79, ..., 0-7)
     // CUB radix sort is stable, so LSD ordering is correct.
 
     init_identity_kernel<<<nblks, nthreads, 0, streams[0]>>>(d_perm_in, num_records);
 
-    int num_chunks = (KEY_SIZE + 7) / 8;  // ceil(KEY_SIZE / 8)
-    printf("  LSD sort: %d passes for %d-byte key\n", num_chunks, KEY_SIZE);
+    int num_chunks = (sort_key_stride + 7) / 8;
+    printf("  LSD sort: %d passes for %d-byte key (%s)\n",
+           num_chunks, sort_key_stride,
+           use_compact_keys ? "compact" : "full");
 
     GpuTimer pass_timer;
     for (int chunk = num_chunks - 1; chunk >= 0; chunk--) {
         int byte_offset = chunk * 8;
-        int chunk_bytes = std::min(8, KEY_SIZE - byte_offset);
+        int chunk_bytes = std::min(8, sort_key_stride - byte_offset);
         pass_timer.begin();
 
-        // Extract uint64 from this chunk of the key (in permutation order)
-        // Use a kernel that reads key[perm[i]][byte_offset:byte_offset+8]
-        // For the FIRST pass (highest chunk idx), perm is identity → read directly
-        if (chunk == num_chunks - 1 && chunk_bytes <= 2) {
-            // Last chunk is ≤2 bytes — use uint16 sort (fewer radix passes)
+        if (use_compact_keys) {
+            // Compact-stride extract → uint64 → CUB radix sort
+            extract_uint64_from_compact_kernel<<<nblks, nthreads, 0, streams[0]>>>(
+                d_keys_10byte, d_perm_in, d_sort_keys, num_records,
+                byte_offset, chunk_bytes, sort_key_stride);
+
+            cub::DoubleBuffer<uint64_t> keys_buf(d_sort_keys, d_sort_keys_alt);
+            cub::DoubleBuffer<uint32_t> perm_buf(d_perm_in, d_perm_out);
+            cub::DeviceRadixSort::SortPairs(d_temp, cub_temp_bytes,
+                keys_buf, perm_buf, (int)num_records, 0, chunk_bytes * 8, streams[0]);
+            d_perm_in = perm_buf.Current();
+            d_perm_out = perm_buf.Alternate();
+        } else if (chunk == num_chunks - 1 && chunk_bytes <= 2) {
+            // Original tiebreaker fast-path for small last chunk
             uint16_t* d_tie = reinterpret_cast<uint16_t*>(d_sort_keys);
             uint16_t* d_tie_alt = reinterpret_cast<uint16_t*>(d_sort_keys_alt);
             extract_tiebreaker_kernel<<<nblks, nthreads, 0, streams[0]>>>(
@@ -2675,8 +2794,6 @@ run_generation:
             d_perm_in = perm_buf.Current();
             d_perm_out = perm_buf.Alternate();
         } else {
-            // Extract uint64 for this chunk, in current permutation order
-            // Kernel: d_sort_keys[i] = big-endian uint64 from key[perm[i]][byte_offset:+8]
             extract_uint64_chunk_kernel<<<nblks, nthreads, 0, streams[0]>>>(
                 d_keys_10byte, d_perm_in, d_sort_keys, num_records, byte_offset, chunk_bytes);
 
@@ -2691,6 +2808,12 @@ run_generation:
         printf("    Pass %d (bytes %d-%d): %.1f ms\n", num_chunks - chunk, byte_offset, byte_offset + chunk_bytes - 1, pass_ms);
     }
     CUDA_CHECK(cudaStreamSynchronize(streams[0]));
+
+    // (0.3.1) used_compact_prefix toggles fixup-grouping logic in Phase 4.
+    // After a compact-key sort the gather-output groups are detected by
+    // comparing varying bytes (via runtime_cmap), not the raw 16-byte
+    // record prefix. Set this BEFORE the gather/fixup phases see it.
+    used_compact_prefix = use_compact_keys;
 
     cudaFree(d_keys_10byte);
 
