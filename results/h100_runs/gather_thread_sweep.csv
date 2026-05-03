@@ -1,0 +1,12 @@
+scale,gb,threads,best_gather_ms,gather_gb_per_s,wall_total_ms,note
+SF100,72,16,3314,21.7,4842,
+SF100,72,32,1295,55.6,2790,← 32 is sweet spot at SF100
+SF100,72,48,11688,6.2,13320,outlier — possible scheduling issue
+SF100,72,64,2892,24.9,4714,prior default
+SF100,72,96,3670,19.6,5300,
+SF100,72,128,3703,19.4,5174,
+SF300,216,16,9011,24.0,13083,from earlier sweep
+SF300,216,32,6705,32.2,10756,
+SF300,216,64,4342,49.8,8665,← 64 is sweet spot at SF300
+SF300,216,128,4443,48.6,9260,
+SF300,216,192,5174,41.7,9478,
