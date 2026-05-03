@@ -1400,7 +1400,12 @@ uint8_t* ExternalGpuSort::streaming_merge(
 
     // While perm downloads: allocate gather output buffer + free GPU memory
     // These are CPU operations that run concurrently with the D2H DMA
-    int num_threads = std::min(48, (int)std::thread::hardware_concurrency());
+    // 17.2 sweep: 32 threads peaks at SF100 (41 GB/s) on Xeon 8468; 64+
+    // regresses due to TLB + memory channel contention. Honor env override.
+    int hwc_g = std::max(1, (int)std::thread::hardware_concurrency());
+    const char* gt_env_g = getenv("GATHER_THREADS");
+    int num_threads = gt_env_g ? std::min(hwc_g, std::max(1, atoi(gt_env_g)))
+                                : std::min(hwc_g, 64);
     printf("  CPU value gather (%.2f GB, %d threads)...\n", total_bytes/1e9, num_threads);
 
     // Use pre-allocated output buffer if available (allocated before run gen)
@@ -1919,7 +1924,11 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
 
         printf("\n== Phase 3: CPU Gather ==\n");
         WallTimer gather_timer; gather_timer.begin();
-        int num_threads = std::min(48, (int)std::thread::hardware_concurrency());
+        // 17.2 sweep: 32 peaks at SF100; honor env override.
+        int hwc_ss = std::max(1, (int)std::thread::hardware_concurrency());
+        const char* gt_env_ss = getenv("GATHER_THREADS");
+        int num_threads = gt_env_ss ? std::min(hwc_ss, std::max(1, atoi(gt_env_ss)))
+                                     : std::min(hwc_ss, 64);
         uint8_t* h_output_ss = h_output;
         uint64_t chunk_g = (num_records + num_threads - 1) / num_threads;
         std::vector<std::thread> gather_threads;
