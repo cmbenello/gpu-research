@@ -36,6 +36,15 @@
 #include <emmintrin.h> // _mm_stream_si64, _mm_sfence
 #include "sample_sort.cuh"
 
+// Note: NUMA-pinning the gather threads (Bottleneck #1A from BOTTLENECKS.md)
+// was tried both at single-core granularity and at NUMA-node granularity.
+// Both made the warm gather phase 3-4× SLOWER than the unpinned default
+// (16-17 s vs 5.2 s at SF300). The unpinned default lets the OS scheduler
+// balance threads across both nodes based on actual buffer location;
+// explicit pinning forces remote-NUMA access for whichever pair of node ↔
+// buffer doesn't match. To make pinning win, the input/output buffers
+// must also be NUMA-partitioned — a larger refactor (Tier B work).
+
 // Forward-declare the in-HBM sort from host_sort.cu
 enum MergeStrategy { STRATEGY_2WAY, STRATEGY_KWAY };
 void gpu_crocsort_in_hbm(uint8_t* d_data, uint64_t num_records,
@@ -1561,15 +1570,32 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
     uint32_t* h_perm = nullptr;
     cudaMallocHost(&h_perm, total_perm_bytes);
     // Pre-allocate gather output buffer.
-    // 1.12.1: dropped MAP_POPULATE so the pages fault lazily as the gather
-    // kernel writes them. With MAP_POPULATE on a 720 GB SF1000 sort, the
-    // process needed 720 GB pinned input + 720 GB resident output = 1.44 TB,
-    // exceeding the 1024 GB host. Without MAP_POPULATE the gather pays a
-    // small minor-fault cost (~few µs/page) while the kernel can evict
-    // input pages to make room. MADV_HUGEPAGE still asks for 2 MiB pages
-    // when they fault.
+    // 1.12.1 v2: MAP_POPULATE conditional on output size + free RAM.
+    //   - Small outputs (fit comfortably): use MAP_POPULATE so pages are
+    //     allocated up-front by the main thread on a single NUMA node.
+    //     Without this the gather phase ran ~3× slower at SF300 because
+    //     the 192 gather threads first-touched output pages on whichever
+    //     NUMA node they happened to be running on, scattering pages
+    //     and causing remote-NUMA traffic on subsequent reads/writes.
+    //   - Large outputs (would push us over host RAM): skip MAP_POPULATE
+    //     so SF1000+ can use lazy faulting.
+    // Threshold: enable POPULATE when input + output + 64 GB headroom
+    // < total host RAM. Conservative — better to err toward POPULATE
+    // since the gather speedup is large.
+    long phys_pages = sysconf(_SC_PHYS_PAGES);
+    long page_sz    = sysconf(_SC_PAGE_SIZE);
+    uint64_t host_ram_bytes = (uint64_t)phys_pages * (uint64_t)page_sz;
+    uint64_t already_resident = total_bytes; // pinned input
+    uint64_t headroom = 64ULL * 1024 * 1024 * 1024; // 64 GB
+    bool use_populate = (already_resident + total_bytes + headroom < host_ram_bytes);
+    int mmap_flags = MAP_PRIVATE | MAP_ANONYMOUS | (use_populate ? MAP_POPULATE : 0);
+    printf("  Output buffer mmap: %s (input %.0f GB + output %.0f GB + 64 GB headroom %s host RAM %.0f GB)\n",
+           use_populate ? "MAP_POPULATE (eager)" : "lazy fault",
+           total_bytes/1e9, total_bytes/1e9,
+           use_populate ? "<" : ">",
+           host_ram_bytes/1e9);
     uint8_t* h_output = (uint8_t*)mmap(nullptr, total_bytes, PROT_READ|PROT_WRITE,
-                                        MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+                                        mmap_flags, -1, 0);
     if (h_output == MAP_FAILED) h_output = nullptr;
     if (h_output) madvise(h_output, total_bytes, MADV_HUGEPAGE);
     bool h_output_is_mmap = (h_output != nullptr);
