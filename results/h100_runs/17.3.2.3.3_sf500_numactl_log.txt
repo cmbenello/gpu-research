@@ -1,0 +1,28 @@
+21:38:11 — start
+=== Step 1: partition (CPU, no numactl) ===
+Input: /mnt/data/lineitem_sf500.bin, 3000028242 records (360.00 GB)
+Sample + sort + splitters: 514 ms
+Pass 1 (count): 65557 ms
+  bucket[0]: 738825021 records (88.66 GB)
+  bucket[1]: 756099566 records (90.73 GB)
+  bucket[2]: 763273398 records (91.59 GB)
+  bucket[3]: 741830257 records (89.02 GB)
+Pass 2 (route): 43713 ms (8.24 GB/s)
+Total partition wall: 119941 ms (3.00 GB/s end-to-end)
+CSV,partition_by_range,records=3000028242,K=4,sample_ms=514,pass1_ms=65557,pass2_ms=43713,total_ms=119941,gb_per_s=3.00
+21:40:10 — partitioned
+tmpfs           504G  336G  169G  67% /dev/shm
+=== Step 2: numactl-wrapped paired-concurrent sorts ===
+21:40:10 — pair A start
+21:42:38 — pair A done
+tmpfs           504G  336G  169G  67% /dev/shm
+21:42:38 — pair B start
+21:44:58 — pair B done
+tmpfs           504G  336G  169G  67% /dev/shm
+=== Step 3: per-bucket times ===
+bucket 0: CSV,NVIDIA H100,88.66,738825021,1,1,2179.61,4316.19,6495.80,13.6487,23.64,2.96,26.60,0.3
+bucket 1: CSV,NVIDIA H100,90.73,756099566,1,1,3279.21,3322.13,6601.34,13.7445,24.20,3.02,27.22,0.3
+bucket 2: CSV,NVIDIA H100,91.59,763273398,1,1,2679.55,1793.10,4472.65,20.4784,24.42,3.05,27.48,0.3
+bucket 3: CSV,NVIDIA H100,89.02,741830257,1,1,2108.72,2103.55,4212.26,21.1334,23.74,2.97,26.71,0.3
+=== Step 4: cleanup ===
+21:45:21 — done
