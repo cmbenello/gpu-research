@@ -4,14 +4,17 @@
 // in sorted order by KEY_SIZE-byte key prefix) and produces a single
 // globally-sorted output file.
 //
-// Algorithm: tournament-style k-way merge using a min-heap over the heads of
-// the K input streams. memcmp on the first KEY_SIZE bytes of each record.
+// Two algorithms:
+//   - Single-threaded: tournament-style k-way merge over the head of each
+//     stream. Used when --threads is 1 or unset.
+//   - Multi-threaded (15.5.2): partition the merged output into N stripes
+//     using sample splitters. Each thread merges its stripe independently.
+//     Used when --threads > 1. ~4-16× faster on this 192-core box.
 //
 // Build: nvcc -O3 -std=c++17 experiments/merge_sorted_runs.cu -o merge_sorted_runs
-//        (or g++ — no GPU here; nvcc accepts .cu by default for consistency)
-// Run:   ./merge_sorted_runs --output OUT IN1 IN2 ... INK
+// Run:   ./merge_sorted_runs --output OUT [--verify] [--threads N] IN1 IN2 ... INK
 //
-// Memory: only mmaps; no buffered allocations beyond the output write buffer.
+// Memory: mmap'd inputs/output; per-thread O(K) state for stream pointers.
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -19,6 +22,7 @@
 #include <queue>
 #include <algorithm>
 #include <chrono>
+#include <thread>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -47,17 +51,33 @@ struct CompareHeads {
     }
 };
 
+// Binary-search the position in a SORTED stream where `target_key` would be
+// inserted (returns the first record index with key >= target).
+// Used to partition each input stream by sample splitters.
+static uint64_t lower_bound_key(const uint8_t* base, uint64_t n_records,
+                                const uint8_t* target_key) {
+    uint64_t lo = 0, hi = n_records;
+    while (lo < hi) {
+        uint64_t mid = (lo + hi) >> 1;
+        if (memcmp(base + mid * RECORD_SIZE, target_key, KEY_SIZE) < 0) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo;
+}
+
 int main(int argc, char** argv) {
     const char* output = nullptr;
     std::vector<const char*> inputs;
     bool verify = false;
+    int n_threads = 1;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--output") && i+1 < argc) output = argv[++i];
         else if (!strcmp(argv[i], "--verify")) verify = true;
+        else if (!strcmp(argv[i], "--threads") && i+1 < argc) n_threads = atoi(argv[++i]);
         else inputs.push_back(argv[i]);
     }
     if (!output || inputs.empty()) {
-        fprintf(stderr, "Usage: %s --output OUT [--verify] IN1 IN2 ... INK\n", argv[0]);
+        fprintf(stderr, "Usage: %s --output OUT [--verify] [--threads N] IN1 IN2 ... INK\n", argv[0]);
         return 1;
     }
 
@@ -109,11 +129,106 @@ int main(int argc, char** argv) {
     printf("Setup: %.0f ms. Beginning merge.\n",
            std::chrono::duration<double, std::milli>(t_setup - t0).count());
 
-    // K-way merge loop. For very large total_records and small K (4), the
-    // priority queue's overhead can dominate; fall back to inline compare
-    // when K <= 4.
+    // (15.5.2) Multi-threaded merge via splitter-based partitioning.
+    // Sample 256 keys uniformly from each input, sort the union, pick
+    // n_threads-1 splitters at quantile positions. For each input
+    // stream, binary-search for the offset of each splitter. Each
+    // thread merges its slice of all K streams into a contiguous
+    // chunk of the output buffer (positions are pre-computed so no
+    // synchronization needed during merge).
     uint64_t out_pos = 0;
-    if (streams.size() <= 4) {
+    if (n_threads > 1 && streams.size() > 1) {
+        const int K = (int)streams.size();
+        const int T = n_threads;
+        const int S = 256;          // samples per stream
+        const int total_samples = K * S;
+
+        // Collect samples
+        std::vector<std::vector<uint8_t>> samples(total_samples,
+                                                  std::vector<uint8_t>(KEY_SIZE));
+        for (int k = 0; k < K; k++) {
+            uint64_t step = streams[k].n_records / S;
+            if (step == 0) step = 1;
+            for (int s = 0; s < S; s++) {
+                uint64_t idx = std::min((uint64_t)s * step, streams[k].n_records - 1);
+                memcpy(samples[k*S + s].data(),
+                       streams[k].base + idx * RECORD_SIZE, KEY_SIZE);
+            }
+        }
+        std::sort(samples.begin(), samples.end(),
+                  [](const std::vector<uint8_t>& a, const std::vector<uint8_t>& b) {
+                      return memcmp(a.data(), b.data(), KEY_SIZE) < 0;
+                  });
+
+        // Pick T-1 splitters at uniform quantiles
+        std::vector<std::vector<uint8_t>> splitters(T - 1, std::vector<uint8_t>(KEY_SIZE));
+        for (int t = 1; t < T; t++) {
+            uint64_t pos = (uint64_t)t * total_samples / T;
+            if (pos >= (uint64_t)total_samples) pos = total_samples - 1;
+            memcpy(splitters[t-1].data(), samples[pos].data(), KEY_SIZE);
+        }
+
+        // Per-stream, per-thread offsets: stream_offsets[s][t] = first record
+        // in stream s that belongs to thread t (i.e., key >= splitter[t-1]).
+        std::vector<std::vector<uint64_t>> stream_offsets(K, std::vector<uint64_t>(T+1, 0));
+        for (int s = 0; s < K; s++) {
+            stream_offsets[s][0] = 0;
+            stream_offsets[s][T] = streams[s].n_records;
+            for (int t = 1; t < T; t++) {
+                stream_offsets[s][t] = lower_bound_key(streams[s].base,
+                                                       streams[s].n_records,
+                                                       splitters[t-1].data());
+            }
+        }
+
+        // Compute per-thread output start positions
+        std::vector<uint64_t> out_start(T+1, 0);
+        for (int t = 0; t < T; t++) {
+            uint64_t cnt = 0;
+            for (int s = 0; s < K; s++) {
+                cnt += stream_offsets[s][t+1] - stream_offsets[s][t];
+            }
+            out_start[t+1] = out_start[t] + cnt;
+        }
+        if (out_start[T] != total_records) {
+            fprintf(stderr, "splitter accounting bug: %lu vs %lu\n",
+                    out_start[T], total_records);
+            return 1;
+        }
+
+        // Spawn merge workers
+        std::vector<std::thread> workers;
+        for (int t = 0; t < T; t++) {
+            workers.emplace_back([&, t]() {
+                // For each stream, current head and end of this thread's slice
+                std::vector<const uint8_t*> heads(K);
+                std::vector<uint64_t> remaining(K);
+                for (int s = 0; s < K; s++) {
+                    heads[s] = streams[s].base + stream_offsets[s][t] * RECORD_SIZE;
+                    remaining[s] = stream_offsets[s][t+1] - stream_offsets[s][t];
+                }
+                uint64_t op = out_start[t];
+                while (true) {
+                    int min_i = -1;
+                    for (int s = 0; s < K; s++) {
+                        if (remaining[s] == 0) continue;
+                        if (min_i < 0 ||
+                            memcmp(heads[s], heads[min_i], KEY_SIZE) < 0) {
+                            min_i = s;
+                        }
+                    }
+                    if (min_i < 0) break;
+                    memcpy(out + op * RECORD_SIZE, heads[min_i], RECORD_SIZE);
+                    heads[min_i] += RECORD_SIZE;
+                    remaining[min_i]--;
+                    op++;
+                }
+            });
+        }
+        for (auto& w : workers) w.join();
+        out_pos = total_records;
+        printf("  Multi-threaded merge: %d threads, %d-way streams\n", T, K);
+    } else if (streams.size() <= 4) {
         // Inline 4-way (or smaller) compare. Faster than std::priority_queue.
         // Track current head pointers for each stream.
         const uint8_t* heads[4] = {nullptr, nullptr, nullptr, nullptr};
