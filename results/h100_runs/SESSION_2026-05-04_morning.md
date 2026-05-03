@@ -77,14 +77,56 @@ numactl cold takes 3097 ms. The 14.7× cold ratio is much larger than
 the 1.84× warm ratio because cold runs hit the worst-case page-faulting
 behavior.
 
+### 6. Multi-GPU NUMA results — 17.3.2.3 + 17.3.2.3.2 + 17.3.2.3.3
+
+| Config | Aggregate GB/s | Scaling efficiency |
+|--------|-----------------|---------------------|
+| 1 GPU SF300 numactl | 27.7 | (baseline) |
+| **2 GPU one-per-node SF300** | **50.8** | **92% efficient (1.83×)** |
+| 4 GPU two-per-node SF500 | 65.7 | 59% efficient (2.37×) |
+
+When each GPU has its own NUMA node, scaling is near-perfect. Pairing
+2 GPUs per node loses 33% to memory channel contention.
+
+15.5.3 distributed SF500 (globally sorted): 7m36s → **7m10s** with
+numactl wrap (+6%). Partition phase (119 sec) is now the bottleneck.
+
+### 7. nsys profile — 6.1
+
+SF50 warm run (1.4 s) breakdown: gather is **42% of wall**, GPU
+compute only 12%. H2D upload is fragmented (20 transfers at
+960 MB each = 28 GB/s realized vs 55 peak). Cold setup costs
+2.7 sec (cudaHostRegister + cudaHostAlloc).
+
+### 8. Other negative results
+
+- **6.2.2 multi-stream HBM**: no concurrency win, 2191 GB/s is
+  the practical user-mode ceiling.
+- **6.3.1 PCIe NUMA**: no effect, cudaMemcpy DMA bypasses CPU NUMA.
+  PCIe gets 55 GB/s (86% of 2× PCIe5 x16 spec).
+
+## Updated headline numbers
+
+| Workload | Pre-numactl | Post-numactl | Speedup |
+|----------|-------------|---------------|---------|
+| SF50 single-GPU | 1.51 s | **1.41 s** | 1.07× |
+| SF100 single-GPU | 3.02 s | **2.95 s** | 1.02× |
+| SF300 single-GPU | 8.65 s | **7.78 s** | 1.11× |
+| SF500 4-GPU partition | 6.77 s @ 53.2 GB/s | **5.48 s @ 65.7 GB/s** | 1.23× |
+| SF500 4-GPU distributed | 7m36s @ 0.79 GB/s | **7m10s @ 0.84 GB/s** | 1.06× |
+
+(The "warm best" prior numbers were already cherry-picked best-of-5.
+The numactl numbers are tightly clustered medians, much more
+reproducible — see 17.3.2.1 for variance proof.)
+
 ## Open follow-ups (not landed this session)
 
-- **17.3.2.2** — re-baseline SF50 + SF300 + SF1000 under numactl
-  (in flight at session end)
-- **17.3.2.3** — multi-GPU NUMA spread (GPU 0/1 → node 0,
-  GPU 2/3 → node 1). Should give same ~1.8× per GPU.
 - **17.3.2.4** — implement libnuma binding inside the sort binary
-  (no wrapper requirement).
+  (no wrapper requirement). Needs libnuma-dev (sudo).
+- **17.3.2.5** — disable kernel.numa_balancing and re-test (sudo).
+- **17.3.2.5.2** — repeat sweeps to bound CIs (3+ sweeps each scale).
+- **17.3.2.3.3.2** — parallelize the 119-sec partition step.
+- **6.1.2** — nvtx ranges in source for clean per-warm timeline.
 
 ## Key commits this session
 
