@@ -188,7 +188,7 @@ Total aggregate HBM: 376 GB — SF500 (~360 GB) fits entirely in aggregate HBM; 
 ### Tier C add-ons (2026-05-03)
 
 - [x] **15.5.3 sample_partition_then_sort** — Range-partition input into K=4 buckets via sample sort; each GPU sorts one bucket; concatenation in bucket order = globally sorted (no merge needed). Verified PASS at SF10/SF100/SF500. End-to-end ~14 min for SF500, comparable to 15.5 merge approach but produces "iteratable" output. → [`results/h100_runs/15.5.3_sample_partition.md`](../results/h100_runs/15.5.3_sample_partition.md)
-- [ ] **15.5.3.1 paired_sorts** — Run 2 GPUs at a time (instead of 4 concurrent or 4 sequential) to balance memory pressure with parallelism. Predicted 8 min wall at SF500.
+- [x] **15.5.3.1 paired_sorts** — Run 2 GPUs at a time. **SF500 wall: 7 min 36 s — 37% faster than 15.5 merge approach.** First sub-10-minute SF500 globally-sorted result on this hardware.
 
 ## Hardware profile (2026-05-02, sorting-h100)
 
