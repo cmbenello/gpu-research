@@ -187,8 +187,9 @@ Total aggregate HBM: 376 GB — SF500 (~360 GB) fits entirely in aggregate HBM; 
 
 ### Tier C add-ons (2026-05-03)
 
-- [x] **15.5.3 sample_partition_then_sort** — Range-partition input into K=4 buckets via sample sort; each GPU sorts one bucket; concatenation in bucket order = globally sorted (no merge needed). Verified PASS at SF10/SF100/SF500. End-to-end ~14 min for SF500, comparable to 15.5 merge approach but produces "iteratable" output. → [`results/h100_runs/15.5.3_sample_partition.md`](../results/h100_runs/15.5.3_sample_partition.md)
-- [x] **15.5.3.1 paired_sorts** — Run 2 GPUs at a time. **SF500 wall: 7 min 36 s — 37% faster than 15.5 merge approach.** First sub-10-minute SF500 globally-sorted result on this hardware.
+- [x] **15.5.3 sample_partition_then_sort** — Range-partition input into K=4 buckets via sample sort; each GPU sorts one bucket; concatenation in bucket order = globally sorted (no merge needed). Verified PASS at SF10/SF100/SF500. → [`results/h100_runs/15.5.3_sample_partition.md`](../results/h100_runs/15.5.3_sample_partition.md)
+- [x] **15.5.3.1 paired_sorts** — Run 2 GPUs at a time. SF500 wall: 7 min 36 s — 37% faster than 15.5 merge approach.
+- [x] **15.5.3.5 SF1000 distributed** — **6 BILLION records (720 GB) globally sorted in 22m40s.** First ever on this hardware. Required NO_MAP_POPULATE=1 to avoid OOM cascade with 2 concurrent sorts each handling 180 GB buckets. → [`results/h100_runs/15.5.3_sf1000_PASS.md`](../results/h100_runs/15.5.3_sf1000_PASS.md)
 
 ## Hardware profile (2026-05-02, sorting-h100)
 
