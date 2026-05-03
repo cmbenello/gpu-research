@@ -1,0 +1,107 @@
+[slice] file has 1799989091 records (216.00 GB); sorting [899994545, 1799989091) = 899994546 records (108.00 GB)
+════════════════════════════════════════════════════
+  GPU External Merge Sort — Streaming Benchmark
+════════════════════════════════════════════════════
+GPU: NVIDIA H100 (99.9 GB HBM, 132 SMs, 2447 GB/s BW)
+Data: 108.00 GB (899994546 records × 120 bytes) (from file)
+
+Allocating 108.00 GB pinned host memory...
+  Using mmap + huge pages + cudaHostRegister
+Loading from /mnt/data/lineitem_sf300.bin (offset slice)...
+  Loaded 108.00 GB in 41086 ms (2.63 GB/s)
+
+[ExternalSort] GPU: 99.10 GB free, budget: 64.41 GB
+[ExternalSort] Triple-buffer: 3 × 21.47 GB (179 M records each)
+
+══════════ Experiment run 1/3 ══════════
+[ExternalSort] Sorting 899994546 records (108.00 GB)
+
+== Step 1+2: Key Upload ==
+  Runtime compact map: 27/66 bytes vary, 32B compact key (4 LSD passes)
+  Output buffer mmap: MAP_POPULATE (eager) (input 108 GB + output 108 GB + 64 GB headroom < host RAM 1082 GB)
+== Step 1+2: Key Upload ==
+  (0.3.1) Compact key upload: 32 B/record (27 B varying) instead of 66 B → 28.8 GB H2D vs 59.4 GB; 4 LSD passes vs 9
+  Pipelined extract+H2D: 876 ms (123.22 GB/s effective vs raw record traffic)
+  Uploaded 28.80 GB keys (compact CPU-extract+H2D) in 1532 ms (70.50 GB/s effective)
+== Step 3: GPU CUB Radix Sort ==
+  LSD sort: 4 passes for 32-byte key (compact)
+    Pass 1 (bytes 24-31): 110.3 ms
+    Pass 2 (bytes 16-23): 147.2 ms
+    Pass 3 (bytes 8-15): 116.3 ms
+    Pass 4 (bytes 0-7): 141.9 ms
+  Sorted 899994546 keys in 527 ms
+== Step 4: Download Permutation ==
+  Downloaded 3.60 GB perm in 72 ms
+== Step 5: CPU Gather ==
+  Gathered 108.00 GB in 2237 ms (48.28 GB/s)
+
+[ExternalSort] ═══════════════════════════════════════
+  DONE: 4368 ms (gen: 2131 + merge: 2237)
+  Throughput: 24.73 GB/s
+  Runs: 1 | Merge passes: 1
+  PCIe: 28.8 GB H2D + 3.6 GB D2H = 32.4 GB total (0.3x amplification)
+═══════════════════════════════════════════════════════
+
+CSV,NVIDIA H100,108.00,899994546,1,1,2130.83,2236.80,4367.62,24.7273,28.80,3.60,32.40,0.3
+
+══════════ Experiment run 2/3 ══════════
+[ExternalSort] Sorting 899994546 records (108.00 GB)
+
+== Step 1+2: Key Upload ==
+  Runtime compact map: 27/66 bytes vary, 32B compact key (4 LSD passes)
+  Output buffer: reusing persistent 108 GB buffer from prior run
+== Step 1+2: Key Upload ==
+  (0.3.1) Compact key upload: 32 B/record (27 B varying) instead of 66 B → 28.8 GB H2D vs 59.4 GB; 4 LSD passes vs 9
+  Pipelined extract+H2D: 1006 ms (107.36 GB/s effective vs raw record traffic)
+  Uploaded 28.80 GB keys (compact CPU-extract+H2D) in 1449 ms (74.55 GB/s effective)
+== Step 3: GPU CUB Radix Sort ==
+  LSD sort: 4 passes for 32-byte key (compact)
+    Pass 1 (bytes 24-31): 110.3 ms
+    Pass 2 (bytes 16-23): 147.4 ms
+    Pass 3 (bytes 8-15): 116.3 ms
+    Pass 4 (bytes 0-7): 141.8 ms
+  Sorted 899994546 keys in 528 ms
+== Step 4: Download Permutation ==
+  Downloaded 3.60 GB perm in 72 ms
+== Step 5: CPU Gather ==
+  Gathered 108.00 GB in 2202 ms (49.05 GB/s)
+
+[ExternalSort] ═══════════════════════════════════════
+  DONE: 4250 ms (gen: 2049 + merge: 2202)
+  Throughput: 25.41 GB/s
+  Runs: 1 | Merge passes: 1
+  PCIe: 28.8 GB H2D + 3.6 GB D2H = 32.4 GB total (0.3x amplification)
+═══════════════════════════════════════════════════════
+
+CSV,NVIDIA H100,108.00,899994546,1,1,2048.62,2201.79,4250.41,25.4092,28.80,3.60,32.40,0.3
+
+══════════ Experiment run 3/3 ══════════
+[ExternalSort] Sorting 899994546 records (108.00 GB)
+
+== Step 1+2: Key Upload ==
+  Runtime compact map: 27/66 bytes vary, 32B compact key (4 LSD passes)
+  Output buffer: reusing persistent 108 GB buffer from prior run
+== Step 1+2: Key Upload ==
+  (0.3.1) Compact key upload: 32 B/record (27 B varying) instead of 66 B → 28.8 GB H2D vs 59.4 GB; 4 LSD passes vs 9
+  Pipelined extract+H2D: 975 ms (110.74 GB/s effective vs raw record traffic)
+  Uploaded 28.80 GB keys (compact CPU-extract+H2D) in 1476 ms (73.16 GB/s effective)
+== Step 3: GPU CUB Radix Sort ==
+  LSD sort: 4 passes for 32-byte key (compact)
+    Pass 1 (bytes 24-31): 110.3 ms
+    Pass 2 (bytes 16-23): 147.4 ms
+    Pass 3 (bytes 8-15): 116.3 ms
+    Pass 4 (bytes 0-7): 141.9 ms
+  Sorted 899994546 keys in 528 ms
+== Step 4: Download Permutation ==
+  Downloaded 3.60 GB perm in 72 ms
+== Step 5: CPU Gather ==
+  Gathered 108.00 GB in 2235 ms (48.32 GB/s)
+
+[ExternalSort] ═══════════════════════════════════════
+  DONE: 4311 ms (gen: 2076 + merge: 2235)
+  Throughput: 25.05 GB/s
+  Runs: 1 | Merge passes: 1
+  PCIe: 28.8 GB H2D + 3.6 GB D2H = 32.4 GB total (0.3x amplification)
+═══════════════════════════════════════════════════════
+
+CSV,NVIDIA H100,108.00,899994546,1,1,2076.02,2235.29,4311.32,25.0502,28.80,3.60,32.40,0.3
