@@ -1552,10 +1552,16 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
     // Pre-allocate host perm buffer (pinned for fast D2H)
     uint32_t* h_perm = nullptr;
     cudaMallocHost(&h_perm, total_perm_bytes);
-    // Pre-allocate gather output buffer
-    // Use mmap + MAP_POPULATE for pre-faulted pages (avoids page faults during gather)
+    // Pre-allocate gather output buffer.
+    // 1.12.1: dropped MAP_POPULATE so the pages fault lazily as the gather
+    // kernel writes them. With MAP_POPULATE on a 720 GB SF1000 sort, the
+    // process needed 720 GB pinned input + 720 GB resident output = 1.44 TB,
+    // exceeding the 1024 GB host. Without MAP_POPULATE the gather pays a
+    // small minor-fault cost (~few µs/page) while the kernel can evict
+    // input pages to make room. MADV_HUGEPAGE still asks for 2 MiB pages
+    // when they fault.
     uint8_t* h_output = (uint8_t*)mmap(nullptr, total_bytes, PROT_READ|PROT_WRITE,
-                                        MAP_PRIVATE|MAP_ANONYMOUS|MAP_POPULATE, -1, 0);
+                                        MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
     if (h_output == MAP_FAILED) h_output = nullptr;
     if (h_output) madvise(h_output, total_bytes, MADV_HUGEPAGE);
     bool h_output_is_mmap = (h_output != nullptr);
