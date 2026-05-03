@@ -2922,7 +2922,13 @@ run_generation:
     phase_timer.begin();
 
     {
-        int num_threads = std::min(48, (int)std::thread::hardware_concurrency());
+        // Honor GATHER_THREADS env var (default 64 — same as OVC gather).
+        // Old default was 48 which left memory channels under-saturated;
+        // 64 matches the empirical sweet spot from 15.5.2 / gather sweep.
+        int hwc = std::max(1, (int)std::thread::hardware_concurrency());
+        const char* gt_env = getenv("GATHER_THREADS");
+        int num_threads = gt_env ? std::min(hwc, std::max(1, atoi(gt_env)))
+                                 : std::min(hwc, 64);
         std::vector<std::thread> threads;
         uint64_t chunk = (num_records + num_threads - 1) / num_threads;
         for (int t = 0; t < num_threads; t++) {
