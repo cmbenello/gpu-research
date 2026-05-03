@@ -135,7 +135,7 @@ Total aggregate HBM: 376 GB — SF500 (~360 GB) fits entirely in aggregate HBM; 
 
 - [x] **15.1 detect_multigpu** — confirmed: 4 GPUs, all NV6 (6-link NVLink) between every pair → see results/h100_runs/15.1_topology_2026-05-02.md (recorded inline in this commit).
 - [x] **15.2 nvlink_bandwidth** — Measured 133.3 GB/s/direction *uniformly* across all 4×3 pairs (89% of NV6 theoretical 150 GB/s). Intra-GPU memcpy 994 GB/s. Aggregate inter-GPU 533 GB/s — 17× PCIe5 ceiling. → [`results/h100_runs/15.2_nvlink_bandwidth.md`](../results/h100_runs/15.2_nvlink_bandwidth.md)
-- [ ] **15.3 partition_then_sort_2gpu** — partition input by sample splitters, send half to GPU0 / half to GPU1, sort independently, merge. SF100 across 2 GPUs (same-NUMA pair).
+- [~] **15.3 partition_then_sort_2gpu** — interpreting as "weak-scaling baseline": 4 concurrent independent SF100 sorts (one per GPU). True partition-then-sort with merge is multi-day; this validates concurrency first. Started 2026-05-03 07:15 UTC.
 - [ ] **15.4 partition_then_sort_4gpu** — same as 15.3 but 4-way across all 4 GPUs. SF100 + SF300 + SF500. SF500 case is the headline because it fits entirely in 4×94 GB aggregate HBM.
 - [ ] **15.5 dataparallel_meta_merge_sf1000** — shard SF1000 into 4 chunks (~SF250 each), sort each chunk on its own GPU concurrently, then meta-merge sorted runs on host (or via NVLink-streamed merger). The "effective SF1000 with 4× peak HBM" plan.
 - [ ] **15.6 nccl_all_to_all_sort** — proper distributed sort: each GPU starts with 1/4 of input, NCCL all-to-all to redistribute by global splitter, sort locally. SF300 + SF500.
