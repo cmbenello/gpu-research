@@ -2463,7 +2463,70 @@ run_generation:
         if (KEY_SIZE <= 16) need_fixup = false;
 
         double gather_ms = 0;
-        {
+        if (getenv("TWO_PASS_GATHER") && atoi(getenv("TWO_PASS_GATHER")) > 0) {
+            // (Tier B-NEGATIVE) Two-pass gather:
+            //   Pass 1: build inv_perm[h_perm[i]] = i (random writes to a 4 B/record array)
+            //   Pass 2: for s in 0..N: read h_data[s] sequentially, write to h_output[inv_perm[s]]
+            //
+            // PREDICTED 2-3× win per the roofline (sequential reads >> random reads).
+            // MEASURED: 2-4× SLOWER at SF300. Hypothesis: random NT writes over
+            // a 216 GB output buffer thrash the TLB worse than random reads
+            // do. NT stores tolerate write-combining at the cache-line level,
+            // but each write to a new 4 KB page is still a page-walk on TLB
+            // miss. With 54 M output pages and 16 K TLB entries, every write
+            // is essentially a TLB miss.
+            //
+            // Kept opt-in via env var for future investigation. To win, would
+            // need to bucket the writes by 2 MB output region (use huge-page
+            // TLB at 0.5 K entries to cover a 64 GB working set) — multi-day
+            // refactor.
+            uint32_t* inv_perm = (uint32_t*)mmap(nullptr, num_records * sizeof(uint32_t),
+                                                  PROT_READ|PROT_WRITE,
+                                                  MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+            if (inv_perm == MAP_FAILED) inv_perm = (uint32_t*)malloc(num_records * sizeof(uint32_t));
+            madvise(inv_perm, num_records * sizeof(uint32_t), MADV_HUGEPAGE);
+
+            WallTimer p1; p1.begin();
+            std::vector<std::thread> p1_threads;
+            for (int t = 0; t < hw_threads; t++) {
+                p1_threads.emplace_back([&, t]() {
+                    uint64_t lo = t * chunk_per_t;
+                    uint64_t hi = std::min(lo + chunk_per_t, num_records);
+                    for (uint64_t i = lo; i < hi; i++) {
+                        inv_perm[h_perm[i]] = (uint32_t)i;
+                    }
+                });
+            }
+            for (auto& t : p1_threads) t.join();
+            double p1_ms = p1.end_ms();
+            printf("  Two-pass gather P1 (build inv_perm): %.0f ms\n", p1_ms);
+
+            WallTimer p2; p2.begin();
+            std::vector<std::thread> p2_threads;
+            for (int t = 0; t < hw_threads; t++) {
+                p2_threads.emplace_back([&, t]() {
+                    uint64_t lo = t * chunk_per_t;
+                    uint64_t hi = std::min(lo + chunk_per_t, num_records);
+                    constexpr int WORDS = RECORD_SIZE / 8;
+                    for (uint64_t s = lo; s < hi; s++) {
+                        uint32_t out_idx = inv_perm[s];
+                        const int64_t* src = (const int64_t*)(h_data + s * RECORD_SIZE);
+                        int64_t* dst = (int64_t*)(h_output + (uint64_t)out_idx * RECORD_SIZE);
+                        for (int w = 0; w < WORDS; w++)
+                            _mm_stream_si64((long long*)(dst + w), src[w]);
+                    }
+                    _mm_sfence();
+                });
+            }
+            for (auto& t : p2_threads) t.join();
+            double p2_ms = p2.end_ms();
+            printf("  Two-pass gather P2 (sequential read + scattered NT write): %.0f ms\n", p2_ms);
+
+            munmap(inv_perm, num_records * sizeof(uint32_t));
+            gather_ms = phase_timer.end_ms();
+            printf("  Gathered %.2f GB in %.0f ms (%.2f GB/s) — TWO_PASS\n",
+                   total_bytes/1e9, gather_ms, total_bytes/(gather_ms*1e6));
+        } else {
             // Forward gather: random reads from h_data, sequential NT writes to h_output.
             // Prefetch 128 records ahead — optimal from sweep (128×120B=15KB fits L1 TLB,
             // larger distances thrash TLB and hurt: 512→19.7 GB/s, 128→20.2 GB/s).
