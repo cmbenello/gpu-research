@@ -154,7 +154,7 @@ Total aggregate HBM: 376 GB — SF500 (~360 GB) fits entirely in aggregate HBM; 
 
 ## Tier 17 — Theoretical / roofline model
 
-- [ ] **17.1 roofline_h100** — given (HBM3 = 3.35 TB/s, PCIe5 = 32 GB/s, FP32 = 67 TFLOPS), compute the roofline ceiling for radix sort. Compare measured throughput.
+- [x] **17.1 roofline_h100** — Single-GPU sort at ~30% of theoretical machine peak at SF300; biggest gap is Phase 3 CPU gather at 11% efficiency. 2-2.5× headroom on single-GPU, 7× on multi-GPU. → [`results/h100_runs/17.1_roofline.md`](../results/h100_runs/17.1_roofline.md)
 - [ ] **17.2 fit_scaling_law** — fit `time = α·N·log(N) + β·N` (encode + sort) and `time = γ·bytes_pcie / 12` (PCIe-bound) to measured numbers across SF10–SF1000. Predicts SF10000.
 - [ ] **17.3 codec_compression_model** — given (column entropy, range, n_distinct), predict which codec wins. Closed-form vs measured Tier 8.1 heatmap.
 - [ ] **17.4 amdahl_for_compression** — Amdahl-style: if PCIe is X% of wall time, max speedup from compressing PCIe to 0 is 1/(1-X). Validates how much compression CAN ever help.
