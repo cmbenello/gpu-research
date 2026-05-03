@@ -96,12 +96,21 @@ int main(int argc, char** argv) {
     std::mt19937 rng(42);
     std::shuffle(perm.begin(), perm.end(), rng);
 
-    fprintf(stderr, "# warmup gather (1 thread)...\n");
-    run_gather(in, out, perm.data(), num_records, 1, BLOCK);
+    // Warmup: only on small sets where it's cheap (< 1 GB equivalent).
+    // For larger sets, skip — page tables get warmed by the first measurement.
+    if (total_bytes < 8ULL * 1024 * 1024 * 1024) {
+        fprintf(stderr, "# warmup gather (1 thread)...\n");
+        run_gather(in, out, perm.data(), num_records, 1, BLOCK);
+    } else {
+        fprintf(stderr, "# skipping warmup (working set too large)\n");
+    }
+
+    bool large = total_bytes >= 8ULL * 1024 * 1024 * 1024;
 
     auto bench_at = [&](int T) {
-        // Drop output buffer cache by overwriting once
-        std::memset(out, 0, total_bytes);
+        // Skip the cleanup memset on large sets (gather overwrites every byte
+        // anyway; memset just thrashes the page cache).
+        if (!large) std::memset(out, 0, total_bytes);
         double t0 = now_ms();
         run_gather(in, out, perm.data(), num_records, T, BLOCK);
         double dt = now_ms() - t0;
@@ -114,8 +123,12 @@ int main(int argc, char** argv) {
     if (num_threads > 0) {
         bench_at(num_threads);
     } else {
-        for (int T : {1, 2, 4, 8, 16, 32, 48, 64, 96, 128}) {
-            bench_at(T);
+        // For large sweeps, skip the slow 1/2/4 thread points (each takes
+        // many minutes at SF300). The interesting range is 16-128.
+        if (large) {
+            for (int T : {8, 16, 32, 48, 64, 96, 128}) bench_at(T);
+        } else {
+            for (int T : {1, 2, 4, 8, 16, 32, 48, 64, 96, 128}) bench_at(T);
         }
     }
     return 0;
