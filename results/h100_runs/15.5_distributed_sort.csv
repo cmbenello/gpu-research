@@ -1,0 +1,20 @@
+phase,workload,gpu,wall_ms,bytes,gb_per_s,note
+sort_phase1,sf100_part_each,0,887,18000000000,20.30,sort 18 GB chunk on GPU 0 (cold)
+sort_phase1,sf100_part_each,1,887,18000000000,20.30,sort 18 GB chunk on GPU 1
+sort_phase1,sf100_part_each,2,884,18000000000,20.37,sort 18 GB chunk on GPU 2
+sort_phase1,sf100_part_each,3,895,18000000000,20.11,sort 18 GB chunk on GPU 3
+write_phase1,sf100_part_each,0,14521,18000000000,1.24,write 18 GB to NVMe (4 procs sharing)
+write_phase1,sf100_part_each,1,20678,18000000000,0.87,
+write_phase1,sf100_part_each,2,16992,18000000000,1.06,
+write_phase1,sf100_part_each,3,15683,18000000000,1.15,
+merge,sf100_4way,host,97100,72000000000,0.74,4-way k-merge on host
+sort_phase1,sf500_part_each,0,5050,90000000000,17.82,
+sort_phase1,sf500_part_each,1,20687,90000000000,4.35,
+sort_phase1,sf500_part_each,2,41639,90000000000,2.16,
+sort_phase1,sf500_part_each,3,22904,90000000000,3.93,
+write_phase1,sf500_part_each,0,93186,90000000000,0.97,
+write_phase1,sf500_part_each,1,90451,90000000000,1.00,
+write_phase1,sf500_part_each,2,93228,90000000000,0.97,
+write_phase1,sf500_part_each,3,90608,90000000000,0.99,
+merge,sf500_4way,host,528633,360000000000,0.68,
+end_to_end,sf500_4way,all,670000,360000000000,0.54,distributed sort with global merge — first SF500 globally sorted result on this hardware
