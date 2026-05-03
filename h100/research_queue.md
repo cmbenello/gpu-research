@@ -29,8 +29,8 @@ The loop is allowed to **add new experiments** at the bottom when findings warra
 - [x] **1.7 envelope_chart** — Charts rendered for SF10/50/100/300 (PASS) + SF500/1000 (FAIL annotations). Throughput curve is non-monotonic — SF300 OVC path beats SF50/100 slow-path. → [`results/h100_runs/1.7_envelope_chart.md`](../results/h100_runs/1.7_envelope_chart.md)
 - [x] **1.8 generate_sf1500** — Generated 1.08 TB in 90.7 min via chunked encoder. Disk peak 2.6 TB / 3.5 TB during gen (under 80% cap). Actual row count 9.000 B (vs theoretical 9.002 B). → [`results/h100_runs/1.8_generate_sf1500.md`](../results/h100_runs/1.8_generate_sf1500.md)
 - [!] **1.9 sf1500_baseline** — **FAIL: kernel OOM kill at 1.05 TB resident.** Pinning 1080 GB input is infeasible on a 1024 GB host. Out of single-host envelope. Filed 1.9.1 (streaming input). → [`results/h100_runs/1.9_sf1500_baseline.md`](../results/h100_runs/1.9_sf1500_baseline.md)
-- [ ] **1.10 generate_sf2000** — Generate SF2000 (~1.44 TB lineitem). Right at ~50% of disk; abort if df < 25% free mid-gen.
-- [ ] **1.11 sf2000_baseline** — sort SF2000. The single-GPU upper bound for this box; if it doesn't fit, that's the multi-GPU motivation in print.
+- [!] **1.10 generate_sf2000** — **SKIPPED: insufficient disk.** Need 1.44 TB binary + ~530 GB parquet temp = 1.97 TB; have 1021 GB free after SF1500. Would need to delete SF50/SF100/SF1000 (~770 GB) to fit, but the prompt forbids data deletion without explicit instruction. → [`results/h100_runs/1.10_generate_sf2000.md`](../results/h100_runs/1.10_generate_sf2000.md)
+- [!] **1.11 sf2000_baseline** — **SKIPPED: no SF2000 input** (1.10 disk-capped, would also OOM-kill on 1024 GB host like 1.9 did at 1.08 TB). Same envelope conclusion as 1.9.
 - [ ] **1.12 host_ram_staging_sf1000** — exploit the 1 TB host RAM: pre-load SF1000 (~720 GB) entirely into pinned host memory, then sort GPU-staged out of RAM. Compare to NVMe-staged numbers from 1.6. Should isolate "PCIe + sort" from "NVMe read".
 - [ ] **1.13 host_ram_staging_sf1500** — same trick at SF1500 (~1.08 TB) — slightly exceeds 1 TB RAM after overhead, so probably falls back to mixed RAM+NVMe. Useful data point.
 
