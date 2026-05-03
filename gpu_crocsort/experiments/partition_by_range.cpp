@@ -66,7 +66,9 @@ int main(int argc, char** argv) {
     const uint8_t* input = (const uint8_t*)mmap(nullptr, total_bytes, PROT_READ, MAP_PRIVATE, fd, 0);
     close(fd);
     if (input == MAP_FAILED) { perror("mmap input"); return 1; }
-    madvise((void*)input, total_bytes, MADV_RANDOM);  // we'll do random sampling first
+    // We do a stride-sample first (each access is random within a span),
+    // then linear scan in passes 1+2. After sampling, hint sequential.
+    madvise((void*)input, total_bytes, MADV_RANDOM);
     printf("Input: %s, %lu records (%.2f GB)\n", input_path, total_records, total_bytes/1e9);
 
     // ── Sample N=8192 records uniformly ─────────────────────────────────
@@ -95,6 +97,10 @@ int main(int argc, char** argv) {
     auto t_sample_end = std::chrono::high_resolution_clock::now();
     double sample_ms = std::chrono::duration<double, std::milli>(t_sample_end - t_sample_start).count();
     printf("Sample + sort + splitters: %.0f ms\n", sample_ms);
+
+    // After sampling, switch hint to sequential — pass 1 + 2 stream through
+    // the input linearly within each thread's chunk.
+    madvise((void*)input, total_bytes, MADV_SEQUENTIAL);
 
     // ── Pass 1: count records per bucket (multi-threaded) ───────────────
     auto t_pass1_start = std::chrono::high_resolution_clock::now();
