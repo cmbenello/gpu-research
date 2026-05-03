@@ -2789,24 +2789,48 @@ int main(int argc, char** argv) {
     bool verify = true;
     const char* input_file = nullptr;
     int num_experiment_runs = 1;
+    int64_t offset_records = 0;
+    int64_t limit_records  = -1;  // -1 = "all from offset"
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i],"--total-gb") && i+1<argc) total_gb = atof(argv[++i]);
         else if (!strcmp(argv[i],"--input") && i+1<argc) input_file = argv[++i];
         else if (!strcmp(argv[i],"--no-verify")) verify = false;
         else if (!strcmp(argv[i],"--runs") && i+1<argc) num_experiment_runs = atoi(argv[++i]);
-        else { printf("Usage: %s [--total-gb N] [--input FILE] [--no-verify] [--runs N]\n",argv[0]); return 0; }
+        else if (!strcmp(argv[i],"--offset-records") && i+1<argc) offset_records = atoll(argv[++i]);
+        else if (!strcmp(argv[i],"--limit-records") && i+1<argc) limit_records = atoll(argv[++i]);
+        else { printf("Usage: %s [--total-gb N] [--input FILE] [--no-verify] [--runs N] "
+                      "[--offset-records X] [--limit-records N]\n",argv[0]); return 0; }
     }
 
     // Determine data size from file or --total-gb
     uint64_t num_records, total_bytes;
+    uint64_t file_total_records = 0;
+    uint64_t file_total_bytes   = 0;
     if (input_file) {
         FILE* f = fopen(input_file, "rb");
         if (!f) { fprintf(stderr, "Cannot open %s\n", input_file); return 1; }
         fseek(f, 0, SEEK_END);
-        total_bytes = ftell(f);
+        file_total_bytes = ftell(f);
         fclose(f);
-        num_records = total_bytes / RECORD_SIZE;
-        total_bytes = num_records * RECORD_SIZE; // round down
+        file_total_records = file_total_bytes / RECORD_SIZE;
+        file_total_bytes = file_total_records * RECORD_SIZE; // round down
+        // Apply offset / limit if requested. Otherwise sort the whole file.
+        if (offset_records < 0 || (uint64_t)offset_records > file_total_records) {
+            fprintf(stderr, "offset-records %ld out of range [0, %lu]\n",
+                    (long)offset_records, file_total_records);
+            return 1;
+        }
+        uint64_t avail = file_total_records - (uint64_t)offset_records;
+        if (limit_records < 0) num_records = avail;
+        else num_records = std::min(avail, (uint64_t)limit_records);
+        total_bytes = num_records * RECORD_SIZE;
+        if (offset_records != 0 || (uint64_t)limit_records != file_total_records) {
+            printf("[slice] file has %lu records (%.2f GB); sorting "
+                   "[%ld, %ld) = %lu records (%.2f GB)\n",
+                   file_total_records, file_total_bytes/1e9,
+                   (long)offset_records, (long)offset_records + (long)num_records,
+                   num_records, total_bytes/1e9);
+        }
     } else {
         num_records = (uint64_t)(total_gb * 1e9) / RECORD_SIZE;
         total_bytes = num_records * RECORD_SIZE;
@@ -2861,9 +2885,18 @@ int main(int argc, char** argv) {
     if (!h_data) { fprintf(stderr,"allocation failed\n"); return 1; }
 
     if (input_file) {
-        printf("Loading from %s...\n", input_file);
+        printf("Loading from %s%s...\n", input_file,
+               offset_records ? " (offset slice)" : "");
         WallTimer gt; gt.begin();
         FILE* f = fopen(input_file, "rb");
+        if (offset_records) {
+            // 64-bit safe seek to `offset_records * RECORD_SIZE`
+            int rc = fseeko(f, (off_t)offset_records * (off_t)RECORD_SIZE, SEEK_SET);
+            if (rc != 0) {
+                fprintf(stderr, "fseeko to offset %ld records failed\n", (long)offset_records);
+                return 1;
+            }
+        }
         size_t read = fread(h_data, 1, total_bytes, f);
         fclose(f);
         printf("  Loaded %.2f GB in %.0f ms (%.2f GB/s)\n\n",
