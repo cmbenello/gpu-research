@@ -31,8 +31,8 @@ The loop is allowed to **add new experiments** at the bottom when findings warra
 - [!] **1.9 sf1500_baseline** — **FAIL: kernel OOM kill at 1.05 TB resident.** Pinning 1080 GB input is infeasible on a 1024 GB host. Out of single-host envelope. Filed 1.9.1 (streaming input). → [`results/h100_runs/1.9_sf1500_baseline.md`](../results/h100_runs/1.9_sf1500_baseline.md)
 - [!] **1.10 generate_sf2000** — **SKIPPED: insufficient disk.** Need 1.44 TB binary + ~530 GB parquet temp = 1.97 TB; have 1021 GB free after SF1500. Would need to delete SF50/SF100/SF1000 (~770 GB) to fit, but the prompt forbids data deletion without explicit instruction. → [`results/h100_runs/1.10_generate_sf2000.md`](../results/h100_runs/1.10_generate_sf2000.md)
 - [!] **1.11 sf2000_baseline** — **SKIPPED: no SF2000 input** (1.10 disk-capped, would also OOM-kill on 1024 GB host like 1.9 did at 1.08 TB). Same envelope conclusion as 1.9.
-- [~] **1.12 host_ram_staging_sf1000** — exploit the 1 TB host RAM: pre-load SF1000 entirely into pinned host memory, then sort GPU-staged out of RAM. Compare to NVMe-staged numbers from 1.6. Should isolate "PCIe + sort" from "NVMe read". Started 2026-05-03 01:08 UTC, attempted with 1.6.1 lazy-h_pin fix.
-- [ ] **1.13 host_ram_staging_sf1500** — same trick at SF1500 (~1.08 TB) — slightly exceeds 1 TB RAM after overhead, so probably falls back to mixed RAM+NVMe. Useful data point.
+- [!] **1.12 host_ram_staging_sf1000** — **FAIL: input + MAP_POPULATE'd output both 720 GB → 1.44 TB > 1024 GB host.** 1.6.1 fix moved the OOM later but didn't unblock; the gather output buffer is forced resident by `MAP_POPULATE`. Filed 1.12.1 (drop MAP_POPULATE) + 1.6.2 (in-place gather). → [`results/h100_runs/1.12_host_ram_staging_sf1000.md`](../results/h100_runs/1.12_host_ram_staging_sf1000.md)
+- [!] **1.13 host_ram_staging_sf1500** — **SKIPPED: SF1500 input alone (1080 GB) > 1024 GB host.** Same root cause as 1.9 — host can't hold the input regardless of staging strategy. Need 1.12.1 + 1.9.1 + (multi-host or NVMe streaming) before this is meaningful.
 
 ## Tier 2 — Compression validation at scale
 
