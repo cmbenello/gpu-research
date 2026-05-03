@@ -50,7 +50,7 @@ The loop is allowed to **add new experiments** at the bottom when findings warra
 
 ## Tier 4 — Cross-validation against published baselines
 
-- [ ] **4.1 duckdb_at_scale** — DuckDB ORDER BY at SF100, SF300 if it completes. Compare wall-time.
+- [~] **4.1 duckdb_at_scale** — DuckDB ORDER BY at SF50/SF100/SF300. Started 2026-05-03 09:15 UTC.
 - [ ] **4.2 polars_at_scale** — Polars sort at SF100, SF300.
 - [ ] **4.3 cudf_baseline** — cuDF sort_values on the same data. RAPIDS comparison.
 - [ ] **4.4 mendsort_position** — verify our GB/s position relative to MendSort (JouleSort 2023).

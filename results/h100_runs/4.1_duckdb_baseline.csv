@@ -1,0 +1,5 @@
+tool,scale,gb,records,warm_best_ms,gb_per_s,note
+gpu_crocsort_post031,SF50,36.00,300005811,1507,23.89,from 0.3.1 writeup
+gpu_crocsort_post031,SF100,72.00,600037902,3024,23.81,from 0.3.1 writeup
+gpu_crocsort_post031,SF300,216.00,1799989091,8650,24.97,from 1.2 baseline (OVC path unaffected by 0.3.1)
+duckdb_1.3.2,SF50,36.00,300005811,33013,1.09,4.1 baseline -- 21.9x slower than gpu_crocsort
