@@ -7,19 +7,26 @@ All measurements on `sorting-h100`: 4× NVIDIA H100 NVL (94 GB HBM each),
 ## Single-GPU sort (warm best)
 
 **As of 2026-05-04: all numbers below are with `numactl --cpunodebind=0
---membind=0` wrap (17.3.2 finding — 1.52-1.84× wall reduction).**
+--preferred=0` wrap (17.3.2.7 finding — 1.71×-1.96× wall reduction).**
 
 | Scale | Records  | Bytes  | Wall (best warm) | Effective GB/s | PCIe GB | Notes |
 |-------|----------|--------|-------|----------------|---------|-------|
 | SF10  | 60 M     | 7.2 GB | 0.35 s | 20.4 | 14.4 | fast path |
-| SF50  | 300 M    | 36 GB  | **1.41 s** | **25.6** | 10.8 | numactl + post-0.3.1 |
+| SF50  | 300 M    | 36 GB  | **1.41 s** | **25.5** | 10.8 | numactl + post-0.3.1 |
 | SF100 | 600 M    | 72 GB  | **2.95 s** | **24.4** | 21.6 | numactl + post-0.3.1; first beats RTX 6000 |
-| SF300 | 1.8 B    | 216 GB | **7.78 s** | **27.8** | 64.8 | numactl + OVC path |
+| SF300 | 1.8 B    | 216 GB | **6.84 s** | **31.3** | 64.8 | numactl --preferred + OVC; **highest single-GPU throughput** |
 | SF500 | 3 B      | 360 GB | OOM    | —    | —    | exceeds 94 GB HBM |
 
 Pre-numactl (2026-05-03 evening): SF50 1.51, SF100 3.02, SF300 8.65 s.
-Numactl wall variance is also dramatically tighter (44 ms range at
-SF300 vs 7265 ms range without). See `17.3.2.2_numactl_headlines.md`.
+Numactl wall variance is also dramatically tighter (74 ms range at
+SF300 vs 7265 ms range without). See `17.3.2.2_numactl_headlines.md`
+and `17.3.2.7_preferred_vs_membind.md`.
+
+**Note: `--preferred=0` is strictly preferred over `--membind=0`** — at
+SF50/SF100 they perform identically; at SF300 `--preferred` is 13%
+faster because output buffer spills to node 1, getting 2× write
+bandwidth from both nodes' DDR5 channels. Strict --membind also
+intermittently OOMs at SF300 when node 0's free memory is tight.
 
 ## Multi-GPU 4×H100 sort (warm best)
 
