@@ -37,7 +37,7 @@ The loop is allowed to **add new experiments** at the bottom when findings warra
 ## Tier 2 — Compression validation at scale
 
 - [x] **2.1 codec_ratios_sf100** — Codec ratios scale-invariant across SF10→SF1500 (always pad to 24B / 3 LSD passes, total bits drift 154→180). Discount/tax 8× each, l_linenumber 4×. → [`results/h100_runs/2.1_codec_ratios.md`](../results/h100_runs/2.1_codec_ratios.md)
-- [~] **2.2 bitpack_pcie_sweep** — measure H→D PCIe bytes baseline vs USE_BITPACK across scales. Started 2026-05-03 01:18 UTC.
+- [x] **2.2 bitpack_pcie_sweep** — PCIe compression jumps from 1.71× (SF50/100 slow-path) to 3.33-4.29× (SF300+ OVC). Bitpack only contributes when OVC engages. → [`results/h100_runs/2.2_pcie_sweep.md`](../results/h100_runs/2.2_pcie_sweep.md)
 - [ ] **2.3 compounding_chart** — sort time vs key width chart on H100 (HBM3 bandwidth changes the curve).
 - [ ] **2.4 dictionary_codec** — implement and measure dictionary encoding for low-cardinality columns. Drop in slot for `pack()` style.
 

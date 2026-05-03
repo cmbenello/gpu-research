@@ -1,0 +1,10 @@
+scale,gb,records,config,h2d_gb,d2h_gb,pcie_total_gb,raw_record_gb,compression_ratio,best_warm_ms,gb_per_s,note
+SF10,7.20,59986052,baseline_compact,7.20,7.20,14.40,7.20,1.00,352.20,20.44,fast-path single-chunk uploads full records
+SF50,36.00,300005811,baseline_compact,19.80,1.20,21.00,36.00,1.71,2624.99,13.71,slow-path key-only upload of FULL 66B keys
+SF50,36.00,300005811,bitpack_compact,19.80,1.20,21.00,36.00,1.71,2788.86,12.91,bitpack 24B but H2D unchanged (slow path bug)
+SF100,72.00,600037902,baseline_compact,39.60,2.40,42.00,72.00,1.71,4501.33,16.00,slow-path uploads full 66B keys
+SF100,72.00,600037902,bitpack_compact,39.60,2.40,42.00,72.00,1.71,4783.28,15.05,bitpack again no PCIe win
+SF300,216.00,1799989091,baseline_compact,57.60,7.20,64.80,216.00,3.33,10100.62,21.38,OVC compact upload 32B keys
+SF300,216.00,1799989091,bitpack_compact,43.20,7.20,50.40,216.00,4.29,8942.76,24.15,OVC + bitpack 24B keys
+SF500,360.00,3000028242,baseline_compact,0,0,0,360.00,0,0,0,FAIL GPU OOM 198 GB key buffer
+SF1000,720.00,5999989709,baseline_compact,0,0,0,720.00,0,0,0,FAIL host pin OOM at MAP_POPULATE'd output
