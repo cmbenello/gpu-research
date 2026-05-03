@@ -50,7 +50,7 @@ The loop is allowed to **add new experiments** at the bottom when findings warra
 
 ## Tier 4 — Cross-validation against published baselines
 
-- [~] **4.1 duckdb_at_scale** — DuckDB ORDER BY at SF50/SF100/SF300. Started 2026-05-03 09:15 UTC.
+- [x] **4.1 duckdb_at_scale** — DuckDB SF50: 33.0 s @ 1.09 GB/s (gpu_crocsort 21.9× faster); SF100: 106 s @ 0.68 GB/s (gpu_crocsort 35.1× faster — gap widens with scale). SF300 not measured (would take >30 min for dbgen).
 - [ ] **4.2 polars_at_scale** — Polars sort at SF100, SF300.
 - [ ] **4.3 cudf_baseline** — cuDF sort_values on the same data. RAPIDS comparison.
 - [ ] **4.4 mendsort_position** — verify our GB/s position relative to MendSort (JouleSort 2023).
