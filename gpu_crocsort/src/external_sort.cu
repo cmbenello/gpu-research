@@ -2442,7 +2442,15 @@ run_generation:
         // to write-combining buffers, no read-for-ownership penalty).
         phase_timer.begin();
         printf("== Phase 3: CPU Gather ==\n");
-        int hw_threads = std::max(1, (int)std::thread::hardware_concurrency());
+        // (Tier B) Cap gather threads to GATHER_THREADS env var, default 64.
+        // 192 threads on the random-pattern gather over-saturated host
+        // memory channels (same regression observed for the merge phase
+        // — 64 threads was the sweet spot in 15.5.2). 64 threads ≈ 1/3
+        // of the 192 cores, matches the empirical memory-bandwidth saturation point.
+        int hw_threads_max = std::max(1, (int)std::thread::hardware_concurrency());
+        const char* gt_env = getenv("GATHER_THREADS");
+        int hw_threads = gt_env ? std::min(hw_threads_max, std::max(1, atoi(gt_env)))
+                                 : std::min(hw_threads_max, 64);
         uint64_t chunk_per_t = (num_records + hw_threads - 1) / hw_threads;
 
         // Determine effective prefix bytes for group detection
