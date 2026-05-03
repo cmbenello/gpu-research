@@ -26,7 +26,8 @@ gpu_crocsort_4g_partition = [
     ("SF500-4G-partition",  360.00, 6.77, 53.2),  # 15.4 sort phase only (no merge → not globally sorted)
 ]
 gpu_crocsort_4g_distributed = [
-    ("SF500-4G-distributed", 360.00, 456.0, 0.79),  # 15.5.3 paired, globally sorted
+    ("SF500-4G-distributed", 360.00, 456.0, 0.79),   # 15.5.3 paired, globally sorted
+    ("SF1000-4G-distributed", 720.00, 1360.0, 0.53), # 15.5.3 paired SF1000 22m40s
 ]
 duckdb_1g = [
     ("SF50",   36.00, 33.0, 1.09),
