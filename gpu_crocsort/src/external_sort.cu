@@ -2451,9 +2451,8 @@ run_generation:
         printf("== Phase 3: CPU Gather ==\n");
         // (Tier B) Cap gather threads to GATHER_THREADS env var, default 64.
         // 192 threads on the random-pattern gather over-saturated host
-        // memory channels (same regression observed for the merge phase
-        // — 64 threads was the sweet spot in 15.5.2). 64 threads ≈ 1/3
-        // of the 192 cores, matches the empirical memory-bandwidth saturation point.
+        // memory channels (same finding as 15.5.2 multi-thread merge).
+        // Override per-scale via GATHER_THREADS=N if needed.
         int hw_threads_max = std::max(1, (int)std::thread::hardware_concurrency());
         const char* gt_env = getenv("GATHER_THREADS");
         int hw_threads = gt_env ? std::min(hw_threads_max, std::max(1, atoi(gt_env)))
