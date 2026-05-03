@@ -1,0 +1,22 @@
+{
+  "host":          "sorting-h100",
+  "kernel":        "Linux 5.4.0-198-generic #218-Ubuntu SMP Fri Sep 27 20:18:53 UTC 2024",
+  "os":            "Ubuntu 20.04.6 LTS",
+  "cpu_model":     "Intel(R) Xeon(R) Platinum 8468",
+  "cpu_sockets":   "2",
+  "cpu_cores":     "48",
+  "cpu_threads":   "192",
+  "cpu_freq_mhz":  "3100.000",
+  "cpu_flags":     "fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush dts acpi mmx fxsr sse sse2 ss ht tm pbe syscall nx pdpe1gb rdtscp lm constant_tsc art arch_perfmon pebs bts rep_good nopl xtopology nonstop_tsc cpuid aperfmperf tsc_known_freq pni pclmulqdq dtes64 monitor ds_cpl vmx smx est tm2 ssse3 sdbg fma cx16 xtpr pdcm pcid dca sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand lahf_lm abm 3dnowprefetch cpuid_fault epb cat_l3 cat_l2 cdp_l3 invpcid_single cdp_l2 ssbd mba ibrs ibpb stibp ibrs_enhanced tpr_shadow vnmi flexpriority ept vpid ept_ad fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid cqm rdt_a avx512f avx512dq rdseed adx smap avx512ifma clflushopt clwb intel_pt avx512cd sha_ni avx512bw avx512vl xsaveopt xsavec xgetbv1 xsaves cqm_llc cqm_occup_llc cqm_mbm_total cqm_mbm_local avx512_bf16 wbnoinvd dtherm ida arat pln pts avx512vbmi umip pku ospke waitpkg avx512_vbmi2 gfni vaes vpclmulqdq avx512_vnni avx512_bitalg tme avx512_vpopcntdq rdpid cldemote movdiri movdir64b md_clear pconfig flush_l1d arch_capabilities",
+  "ram_total_gb":  "1007",
+  "ram_speed":     "5600 MT/s",
+  "numa_nodes":    "2",
+  "gpu_summary":   "NVIDIA H100, 95830 MiB, 550.163.01, 5, 16, 9.0\nNVIDIA H100, 95830 MiB, 550.163.01, 5, 16, 9.0\nNVIDIA H100, 95830 MiB, 550.163.01, 5, 16, 9.0\nNVIDIA H100, 95830 MiB, 550.163.01, 5, 16, 9.0",
+  "cuda_version":  "",
+  "nvidia_driver": "550.163.01",
+  "disk_root":     "419G used 19G avail 383G /dev/nvme0n1p3",
+  "disk_data":     "419G used 19G avail 383G /dev/nvme0n1p3",
+  "git_commit":    "8dda03a105dc9c6b1e8fe23f7893c4ea90c9b476",
+  "git_branch":    "h100/discoveries-2026-05-02",
+  "timestamp":     "2026-05-03T20:06:45Z"
+}
