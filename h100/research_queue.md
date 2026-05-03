@@ -36,7 +36,7 @@ The loop is allowed to **add new experiments** at the bottom when findings warra
 
 ## Tier 2 — Compression validation at scale
 
-- [ ] **2.1 codec_ratios_sf100** — run a3_codec_ratios on SF100 to confirm ratios are scale-invariant.
+- [~] **2.1 codec_ratios_sf100** — run codec ratio analysis on SF100. Started 2026-05-03 01:13 UTC.
 - [ ] **2.2 bitpack_pcie_sweep** — measure H→D PCIe bytes baseline vs USE_BITPACK at SF50/100/300/500/1000.
 - [ ] **2.3 compounding_chart** — sort time vs key width chart on H100 (HBM3 bandwidth changes the curve).
 - [ ] **2.4 dictionary_codec** — implement and measure dictionary encoding for low-cardinality columns. Drop in slot for `pack()` style.
