@@ -21,7 +21,7 @@ gpu_crocsort_1g = [
     ("SF10",    7.20, 0.352, 20.4),    # not yet retested under numactl
     ("SF50",   36.00, 1.41,  25.6),    # 17.3.2.2 numactl warm best
     ("SF100",  72.00, 2.95,  24.4),    # 17.3.2.2 numactl warm best
-    ("SF300", 216.00, 6.84,  31.3),    # 17.3.2.7 numactl --preferred best (was 7.78/27.8 with --membind)
+    ("SF300", 216.00, 6.59,  32.7),    # 17.3.2.7.2 numactl --preferred best of 8 warm
 ]
 gpu_crocsort_4g_partition = [
     ("SF500-4G-partition",  360.00, 5.48, 65.7),  # 17.3.2.3 numactl spread, run 2 best
