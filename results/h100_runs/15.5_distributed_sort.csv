@@ -18,3 +18,7 @@ write_phase1,sf500_part_each,2,93228,90000000000,0.97,
 write_phase1,sf500_part_each,3,90608,90000000000,0.99,
 merge,sf500_4way,host,528633,360000000000,0.68,
 end_to_end,sf500_4way,all,670000,360000000000,0.54,distributed sort with global merge — first SF500 globally sorted result on this hardware
+merge,sf300_4way_64t_shm,host,38508,216000000000,5.61,15.5.2 multi-thread merge in /dev/shm (input + output)
+merge,sf500_4way_64t_hybrid,host,253828,360000000000,1.42,15.5.2 64t merge with /dev/shm input + /mnt/data output (NVMe write bound)
+end_to_end,sf500_4way_15.5.2_hybrid,all,744000,360000000000,0.48,sort 268s + merge 254s + verify+msync ~220s. Same wall as 15.5 baseline; merge gains lost to NVMe output sync
+
