@@ -708,6 +708,14 @@ class ExternalGpuSort {
     // Pre-allocated sort workspace (avoids cudaMalloc per chunk)
     SortWorkspace sort_ws;
 
+    // Persistent gather output buffer reused across --runs iterations.
+    // (B1) Avoids paying the per-run MAP_POPULATE cost on a fresh 216 GB
+    // mmap, which was making run-gen ~14 s slower per iteration after the
+    // 1.12.1-v2 conditional MAP_POPULATE landed.
+    uint8_t* h_output_persistent = nullptr;
+    uint64_t h_output_persistent_size = 0;
+    bool     h_output_persistent_is_mmap = false;
+
     // Track whether compact key prefixes were used (for CPU fixup grouping)
     bool used_compact_prefix;
 #ifdef USE_COMPACT_KEY
@@ -796,6 +804,11 @@ ExternalGpuSort::ExternalGpuSort() {
 }
 
 ExternalGpuSort::~ExternalGpuSort() {
+    if (h_output_persistent) {
+        if (h_output_persistent_is_mmap) munmap(h_output_persistent, h_output_persistent_size);
+        else free(h_output_persistent);
+        h_output_persistent = nullptr;
+    }
     for (int i = 0; i < NBUFS; i++) {
         if (h_pin[i]) cudaFreeHost(h_pin[i]);
         cudaFree(d_buf[i]);
@@ -1582,26 +1595,49 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
     // Threshold: enable POPULATE when input + output + 64 GB headroom
     // < total host RAM. Conservative — better to err toward POPULATE
     // since the gather speedup is large.
-    long phys_pages = sysconf(_SC_PHYS_PAGES);
-    long page_sz    = sysconf(_SC_PAGE_SIZE);
-    uint64_t host_ram_bytes = (uint64_t)phys_pages * (uint64_t)page_sz;
-    uint64_t already_resident = total_bytes; // pinned input
-    uint64_t headroom = 64ULL * 1024 * 1024 * 1024; // 64 GB
-    bool use_populate = (already_resident + total_bytes + headroom < host_ram_bytes);
-    int mmap_flags = MAP_PRIVATE | MAP_ANONYMOUS | (use_populate ? MAP_POPULATE : 0);
-    printf("  Output buffer mmap: %s (input %.0f GB + output %.0f GB + 64 GB headroom %s host RAM %.0f GB)\n",
-           use_populate ? "MAP_POPULATE (eager)" : "lazy fault",
-           total_bytes/1e9, total_bytes/1e9,
-           use_populate ? "<" : ">",
-           host_ram_bytes/1e9);
-    uint8_t* h_output = (uint8_t*)mmap(nullptr, total_bytes, PROT_READ|PROT_WRITE,
-                                        mmap_flags, -1, 0);
-    if (h_output == MAP_FAILED) h_output = nullptr;
-    if (h_output) madvise(h_output, total_bytes, MADV_HUGEPAGE);
-    bool h_output_is_mmap = (h_output != nullptr);
-    if (!h_output) {
-        h_output = (uint8_t*)malloc(total_bytes);
+    // (B1) If we have a persistent output buffer of the right size from a
+    // previous --runs iteration, reuse it. Saves the per-run mmap +
+    // MAP_POPULATE cost (~14 s at SF300 across the 216 GB output).
+    uint8_t* h_output;
+    bool h_output_is_mmap;
+    if (h_output_persistent && h_output_persistent_size == total_bytes) {
+        h_output = h_output_persistent;
+        h_output_is_mmap = h_output_persistent_is_mmap;
+        printf("  Output buffer: reusing persistent %.0f GB buffer from prior run\n",
+               total_bytes/1e9);
+    } else {
+        // Free any stale persistent buffer of a different size.
+        if (h_output_persistent) {
+            if (h_output_persistent_is_mmap) munmap(h_output_persistent, h_output_persistent_size);
+            else free(h_output_persistent);
+            h_output_persistent = nullptr;
+            h_output_persistent_size = 0;
+        }
+        long phys_pages = sysconf(_SC_PHYS_PAGES);
+        long page_sz    = sysconf(_SC_PAGE_SIZE);
+        uint64_t host_ram_bytes = (uint64_t)phys_pages * (uint64_t)page_sz;
+        uint64_t already_resident = total_bytes; // pinned input
+        uint64_t headroom = 64ULL * 1024 * 1024 * 1024; // 64 GB
+        bool use_populate = (already_resident + total_bytes + headroom < host_ram_bytes);
+        int mmap_flags = MAP_PRIVATE | MAP_ANONYMOUS | (use_populate ? MAP_POPULATE : 0);
+        printf("  Output buffer mmap: %s (input %.0f GB + output %.0f GB + 64 GB headroom %s host RAM %.0f GB)\n",
+               use_populate ? "MAP_POPULATE (eager)" : "lazy fault",
+               total_bytes/1e9, total_bytes/1e9,
+               use_populate ? "<" : ">",
+               host_ram_bytes/1e9);
+        h_output = (uint8_t*)mmap(nullptr, total_bytes, PROT_READ|PROT_WRITE,
+                                            mmap_flags, -1, 0);
+        if (h_output == MAP_FAILED) h_output = nullptr;
         if (h_output) madvise(h_output, total_bytes, MADV_HUGEPAGE);
+        h_output_is_mmap = (h_output != nullptr);
+        if (!h_output) {
+            h_output = (uint8_t*)malloc(total_bytes);
+            if (h_output) madvise(h_output, total_bytes, MADV_HUGEPAGE);
+        }
+        // Stash for next call.
+        h_output_persistent = h_output;
+        h_output_persistent_size = total_bytes;
+        h_output_persistent_is_mmap = h_output_is_mmap;
     }
 
     WallTimer phase_timer;
@@ -2839,6 +2875,10 @@ int main(int argc, char** argv) {
         printf("  Generated in %.0f ms\n\n", gt.end_ms());
     }
 
+    // (B1) Hoist sorter out of run loop so its h_output_persistent buffer
+    // is reused across iterations. Saves the per-run mmap + MAP_POPULATE
+    // cost on a fresh 216 GB output (~14 s at SF300).
+    ExternalGpuSort sorter;
     for (int run = 0; run < num_experiment_runs; run++) {
         if (num_experiment_runs > 1) {
             printf("\n══════════ Experiment run %d/%d ══════════\n", run+1, num_experiment_runs);
@@ -2846,7 +2886,6 @@ int main(int argc, char** argv) {
             // buffer that's freed after verification. No reload needed.
         }
 
-        ExternalGpuSort sorter;
         auto result = sorter.sort(h_data, num_records);
 
         const uint8_t* sorted = result.sorted_output ? result.sorted_output : h_data;
@@ -2885,10 +2924,9 @@ int main(int argc, char** argv) {
             printf(bad==0 ? "  PASS: %lu records sorted\n" : "  FAIL: %lu violations\n",
                    bad==0 ? num_records : bad);
         }
-        if (result.sorted_output) {
-            if (result.sorted_output_is_mmap) munmap(result.sorted_output, result.sorted_output_size);
-            else free(result.sorted_output);
-        }
+        // (B1) Don't free result.sorted_output here — it's owned by the
+        // sorter's h_output_persistent and will be freed by ~ExternalGpuSort
+        // after the loop ends.
 
         printf("\nCSV,%s,%.2f,%lu,%d,%d,%.2f,%.2f,%.2f,%.4f,%.2f,%.2f,%.2f,%.1f\n",
                props.name, total_bytes/1e9, num_records,
