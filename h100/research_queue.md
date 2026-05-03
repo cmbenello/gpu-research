@@ -134,7 +134,7 @@ GPU0/1 share NUMA node 0 (CPU 0-10 even); GPU2/3 share NUMA node 1.
 Total aggregate HBM: 376 GB — SF500 (~360 GB) fits entirely in aggregate HBM; SF1000 needs streaming.
 
 - [x] **15.1 detect_multigpu** — confirmed: 4 GPUs, all NV6 (6-link NVLink) between every pair → see results/h100_runs/15.1_topology_2026-05-02.md (recorded inline in this commit).
-- [~] **15.2 nvlink_bandwidth** — build CUDA samples' `p2pBandwidthLatencyTest` (or roll a small p2p memcpy bench). Measure pair-wise NVLink b/w. Expected: ~300 GB/s per direction with NV6 (50 GB/s × 6). Started 2026-05-03 ~07:00 UTC.
+- [x] **15.2 nvlink_bandwidth** — Measured 133.3 GB/s/direction *uniformly* across all 4×3 pairs (89% of NV6 theoretical 150 GB/s). Intra-GPU memcpy 994 GB/s. Aggregate inter-GPU 533 GB/s — 17× PCIe5 ceiling. → [`results/h100_runs/15.2_nvlink_bandwidth.md`](../results/h100_runs/15.2_nvlink_bandwidth.md)
 - [ ] **15.3 partition_then_sort_2gpu** — partition input by sample splitters, send half to GPU0 / half to GPU1, sort independently, merge. SF100 across 2 GPUs (same-NUMA pair).
 - [ ] **15.4 partition_then_sort_4gpu** — same as 15.3 but 4-way across all 4 GPUs. SF100 + SF300 + SF500. SF500 case is the headline because it fits entirely in 4×94 GB aggregate HBM.
 - [ ] **15.5 dataparallel_meta_merge_sf1000** — shard SF1000 into 4 chunks (~SF250 each), sort each chunk on its own GPU concurrently, then meta-merge sorted runs on host (or via NVLink-streamed merger). The "effective SF1000 with 4× peak HBM" plan.
