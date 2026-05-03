@@ -1,0 +1,9 @@
+starting at 21:20:48
+ended at 21:23:38
+GPU 0: runs=3, last warm wall=3653.87 ms, GB/s=24.6317
+GPU 1: runs=3, last warm wall=5752.16 ms, GB/s=15.6465
+GPU 2: runs=3, last warm wall=5534.48 ms, GB/s=16.2618
+GPU 3: runs=3, last warm wall=3664.54 ms, GB/s=24.5599
+max warm wall: 5752.16 ms
+aggregate GB/s = 360 GB / max warm wall in seconds
+62.58
