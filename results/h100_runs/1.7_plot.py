@@ -22,9 +22,12 @@ def load_rows():
         return [r for r in csv.DictReader(f)]
 
 def plot_walltime(rows):
-    fig, ax = plt.subplots(figsize=(8, 5))
-    base = [r for r in rows if r["config"] == "compact_baseline" and r["status"] == "PASS"]
+    fig, ax = plt.subplots(figsize=(9, 5))
+    # Modern path: compact_post031 wins at SF50/100; compact_baseline at SF10/300+
+    base = [r for r in rows if r["config"] in ("compact_baseline", "compact_post031", "compact_4gpu")
+            and r["status"] == "PASS"]
     bp   = [r for r in rows if r["config"] == "compact_bitpack"  and r["status"] == "PASS"]
+    pre031 = [r for r in rows if r["config"] in ("compact_pre031",) and r["status"] == "SUPERSEDED"]
     fail = [r for r in rows if r["status"] == "FAIL"]
 
     bx = [float(r["gb"]) for r in base]
@@ -32,8 +35,13 @@ def plot_walltime(rows):
     pbx = [float(r["gb"]) for r in bp]
     pby = [float(r["best_warm_ms"]) / 1000.0 for r in bp]
 
-    ax.plot(bx, by, "o-", color="#1f77b4", label="compact baseline (warm best)")
+    ax.plot(bx, by, "o-", color="#1f77b4", label="current best (compact, post-0.3.1)")
     ax.plot(pbx, pby, "s--", color="#ff7f0e", label="compact + USE_BITPACK (warm best)")
+    if pre031:
+        prex = [float(r["gb"]) for r in pre031]
+        prey = [float(r["best_warm_ms"]) / 1000.0 for r in pre031]
+        ax.plot(prex, prey, "^:", color="#888888", alpha=0.7,
+                label="superseded (pre-0.3.1, full-key upload)")
 
     for r in fail:
         gb = float(r["gb"])
@@ -56,9 +64,11 @@ def plot_walltime(rows):
     print(f"wrote {out}")
 
 def plot_throughput(rows):
-    fig, ax = plt.subplots(figsize=(8, 5))
-    base = [r for r in rows if r["config"] == "compact_baseline" and r["status"] == "PASS"]
+    fig, ax = plt.subplots(figsize=(9, 5))
+    base = [r for r in rows if r["config"] in ("compact_baseline", "compact_post031", "compact_4gpu")
+            and r["status"] == "PASS"]
     bp   = [r for r in rows if r["config"] == "compact_bitpack"  and r["status"] == "PASS"]
+    pre031 = [r for r in rows if r["config"] in ("compact_pre031",) and r["status"] == "SUPERSEDED"]
     fail = [r for r in rows if r["status"] == "FAIL"]
 
     bx = [float(r["gb"]) for r in base]
@@ -66,8 +76,13 @@ def plot_throughput(rows):
     pbx = [float(r["gb"]) for r in bp]
     pby = [float(r["best_warm_gb_per_s"]) for r in bp]
 
-    ax.plot(bx, by, "o-", color="#1f77b4", label="compact baseline")
+    ax.plot(bx, by, "o-", color="#1f77b4", label="current best (compact, post-0.3.1)")
     ax.plot(pbx, pby, "s--", color="#ff7f0e", label="compact + USE_BITPACK")
+    if pre031:
+        prex = [float(r["gb"]) for r in pre031]
+        prey = [float(r["best_warm_gb_per_s"]) for r in pre031]
+        ax.plot(prex, prey, "^:", color="#888888", alpha=0.7,
+                label="superseded (pre-0.3.1)")
 
     for r in fail:
         gb = float(r["gb"])
