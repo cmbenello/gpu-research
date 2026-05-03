@@ -2918,17 +2918,20 @@ int main(int argc, char** argv) {
     double total_gb = 0.5;
     bool verify = true;
     const char* input_file = nullptr;
+    const char* output_file = nullptr;
     int num_experiment_runs = 1;
     int64_t offset_records = 0;
     int64_t limit_records  = -1;  // -1 = "all from offset"
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i],"--total-gb") && i+1<argc) total_gb = atof(argv[++i]);
         else if (!strcmp(argv[i],"--input") && i+1<argc) input_file = argv[++i];
+        else if (!strcmp(argv[i],"--output-file") && i+1<argc) output_file = argv[++i];
         else if (!strcmp(argv[i],"--no-verify")) verify = false;
         else if (!strcmp(argv[i],"--runs") && i+1<argc) num_experiment_runs = atoi(argv[++i]);
         else if (!strcmp(argv[i],"--offset-records") && i+1<argc) offset_records = atoll(argv[++i]);
         else if (!strcmp(argv[i],"--limit-records") && i+1<argc) limit_records = atoll(argv[++i]);
-        else { printf("Usage: %s [--total-gb N] [--input FILE] [--no-verify] [--runs N] "
+        else { printf("Usage: %s [--total-gb N] [--input FILE] [--output-file FILE] "
+                      "[--no-verify] [--runs N] "
                       "[--offset-records X] [--limit-records N]\n",argv[0]); return 0; }
     }
 
@@ -3099,6 +3102,31 @@ int main(int argc, char** argv) {
                result.pcie_h2d_gb, result.pcie_d2h_gb,
                result.pcie_h2d_gb + result.pcie_d2h_gb,
                (result.pcie_h2d_gb + result.pcie_d2h_gb) / (total_bytes/1e9));
+
+        // (15.5) Optional sorted-output to file. Used by the multi-process
+        // distributed sort to feed a host-side k-way merge.
+        if (output_file && run == num_experiment_runs - 1) {
+            const uint8_t* sorted_data = result.sorted_output ? result.sorted_output : h_data;
+            uint64_t out_bytes = result.sorted_output ? result.sorted_output_size : total_bytes;
+            printf("Writing %.2f GB sorted output to %s ...\n", out_bytes/1e9, output_file);
+            WallTimer wt; wt.begin();
+            FILE* of = fopen(output_file, "wb");
+            if (!of) {
+                fprintf(stderr, "  Cannot open %s for write\n", output_file);
+            } else {
+                size_t wrote = 0;
+                size_t chunk = 1ULL << 30;  // 1 GiB chunks
+                for (size_t off = 0; off < out_bytes; off += chunk) {
+                    size_t n = std::min(chunk, out_bytes - off);
+                    size_t w = fwrite(sorted_data + off, 1, n, of);
+                    if (w != n) { fprintf(stderr, "  write failed\n"); break; }
+                    wrote += w;
+                }
+                fclose(of);
+                printf("  Wrote %.2f GB in %.0f ms (%.2f GB/s)\n",
+                       wrote/1e9, wt.end_ms(), wrote/(wt.end_ms()*1e6));
+            }
+        }
     }
 
     if (h_data_is_mmap) {
