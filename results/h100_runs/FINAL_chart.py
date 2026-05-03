@@ -15,19 +15,20 @@ import matplotlib.pyplot as plt
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
-# Data tabulated from the run results
+# Data tabulated from the run results.
+# Updated 2026-05-04: single-GPU and 4-GPU-partition use numactl wrap.
 gpu_crocsort_1g = [
-    ("SF10",    7.20, 0.352, 20.4),
-    ("SF50",   36.00, 1.51,  23.9),
-    ("SF100",  72.00, 3.02,  23.8),
-    ("SF300", 216.00, 8.65,  25.0),
+    ("SF10",    7.20, 0.352, 20.4),    # not yet retested under numactl
+    ("SF50",   36.00, 1.41,  25.6),    # 17.3.2.2 numactl warm best
+    ("SF100",  72.00, 2.95,  24.4),    # 17.3.2.2 numactl warm best
+    ("SF300", 216.00, 7.78,  27.8),    # 17.3.2.2 numactl warm best
 ]
 gpu_crocsort_4g_partition = [
-    ("SF500-4G-partition",  360.00, 6.77, 53.2),  # 15.4 sort phase only (no merge → not globally sorted)
+    ("SF500-4G-partition",  360.00, 5.48, 65.7),  # 17.3.2.3 numactl spread, run 2 best
 ]
 gpu_crocsort_4g_distributed = [
-    ("SF500-4G-distributed", 360.00, 456.0, 0.79),   # 15.5.3 paired, globally sorted
-    ("SF1000-4G-distributed", 720.00, 1360.0, 0.53), # 15.5.3 paired SF1000 22m40s
+    ("SF500-4G-distributed", 360.00, 430.0, 0.84),   # 17.3.2.3.3 numactl --preferred, 7m10s
+    ("SF1000-4G-distributed", 720.00, 1360.0, 0.53), # 15.5.3 paired SF1000 22m40s, no numactl test yet
 ]
 duckdb_1g = [
     ("SF50",   36.00, 33.0, 1.09),
