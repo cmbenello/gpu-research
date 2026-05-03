@@ -123,7 +123,7 @@ The loop is allowed to **add new experiments** at the bottom when findings warra
 
 ## Tier 14 — Energy / efficiency
 
-- [ ] **14.1 joule_per_sorted_gb** — measure power draw during SF100 sort with `nvidia-smi --query-gpu=power.draw`. Compute J/GB. Compare to MendSort's published numbers.
+- [x] **14.1 joule_per_sorted_gb** — H100 NVL: **36.2 J/GB GPU-only** at SF300. Avg GPU power 115 W (peak 345 W during CUB radix sort). Competitive with MendSort 2023's ~37 J/GB system-level. → [`results/h100_runs/14.1_joule_per_gb.md`](../results/h100_runs/14.1_joule_per_gb.md)
 - [ ] **14.2 hbm3_vs_pcie5_balance** — at what record count does HBM3 bandwidth, not PCIe5, become the bottleneck on H100?
 - [ ] **14.3 compression_pareto** — pareto curve of compression ratio vs encode CPU cost. Helps choose the right codec for a given workload.
 
