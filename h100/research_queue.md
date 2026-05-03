@@ -197,6 +197,15 @@ Total aggregate HBM: 376 GB — SF500 (~360 GB) fits entirely in aggregate HBM; 
 
 ## Running notes (loop appends to this section)
 
+### 2026-05-03 — 0.3.1 slow-path compact upload SHIPPED
+
+- SF50: 2.62 s → 1.51 s (1.74× faster, 23.9 GB/s)
+- SF100: 4.50 s → 3.02 s (1.49× faster, 23.8 GB/s) **— first SF100 win vs RTX 6000**
+- PCIe: 1.94× compression at both scales (66 B → 32 B keys + 4 LSD passes vs 9)
+- See [`results/h100_runs/0.3.1_compact_upload.md`](../results/h100_runs/0.3.1_compact_upload.md)
+
+
+
 ### 2026-05-02 — 0.1 surfaced two bugs
 
 - **Build:** `external-sort-tpch` and `external-sort` had a 2-error compile failure (COMPACT_KEY_SIZE / runtime_compact_size unconditionally referenced). Fixed in 1944409.
