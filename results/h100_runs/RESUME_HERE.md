@@ -23,22 +23,29 @@ That'll dump all the night's work to GitHub.
 - **64-thread gather default** → 9% wall improvement at SF300
 - Two-pass gather attempted but worse (TLB thrash) — kept opt-in via `TWO_PASS_GATHER=1`
 
-## Headline numbers
+## Headline numbers (latest)
 
 ```
-SF50  (300M / 36 GB):  1.51 s @ 24 GB/s   (gpu_crocsort)
-                       14.5 s @ 2.5 GB/s  (Polars)
-                       33.0 s @ 1.1 GB/s  (DuckDB)
+SF50  (300M / 36 GB):    1.51 s @ 24 GB/s   (gpu_crocsort 1×H100)
+                         14.5 s @ 2.5 GB/s  (Polars)
+                         33.0 s @ 1.1 GB/s  (DuckDB)
 
-SF100 (600M / 72 GB):  3.02 s @ 24 GB/s   (gpu_crocsort, beats RTX 6000)
-                       28.6 s @ 2.5 GB/s  (Polars)
-                       106  s @ 0.7 GB/s  (DuckDB)
+SF100 (600M / 72 GB):    3.02 s @ 24 GB/s   (gpu_crocsort 1×H100, beats RTX 6000)
+                         28.6 s @ 2.5 GB/s  (Polars)
+                         106  s @ 0.7 GB/s  (DuckDB)
 
-SF300 (1.8B / 216 GB): 8.67 s @ 25 GB/s   (single-GPU)
+SF300 (1.8B / 216 GB):   8.67 s @ 25 GB/s   (gpu_crocsort 1×H100)
 
-SF500 (3B / 360 GB):   OOM (single-GPU)
-                       ~12 min globally sorted across 4 H100 NVLs
-                       (NVMe-bound on the merge — multi-day fix to skip)
+SF500 (3B / 360 GB):     OOM (single-GPU)
+                         12 min  (15.5 distributed-with-merge)
+                         7m36s   (15.5.3 sample-partition + paired sort)
+
+SF1000 (6B / 720 GB):    OOM (single-GPU + 15.5 merge)
+                         22m40s  (15.5.3 sample-partition with NO_MAP_POPULATE)
+                         **FIRST EVER globally-sorted SF1000 on this hardware**
+
+SF1500+:                 Still out of envelope — 1080 GB partition output
+                         doesn't fit /mnt/data without deleting smaller scales.
 ```
 
 ## Detailed reading order
