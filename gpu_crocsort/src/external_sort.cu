@@ -2177,8 +2177,15 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
 
     // Check: prefix merge buffers fit? Need: 8B pfx1 + 8B pfx2 + 4B perm = 20B per record
     size_t ovc_total = num_records * (sizeof(uint64_t) + sizeof(uint64_t) + sizeof(uint32_t));
+    // (B3-light) Use compact-upload memory footprint estimate. The compact path
+    // only needs sort_ws (56 B/record) + CUB scratch (~256 MB), whereas the
+    // full-record path needs 2 × buf_bytes (42 GB at SF300+). Reserving
+    // 2*buf_bytes was rejecting the OVC path at SF500 (102 GB > 84 GB) even
+    // though compact-upload would have fit. With compact: 60 GB OVC + ~0.5 GB
+    // scratch = 60.5 GB < 84 GB → OVC fits.
+    size_t compact_scratch_estimate = 512 * 1024 * 1024;  // 512 MB
     bool use_ovc = (total_keys_bytes + est_arena > free_mem_now * 0.9) &&
-                   (ovc_total + 2*buf_bytes + 512*1024*1024 < free_mem_now * 0.95);
+                   (ovc_total + compact_scratch_estimate < free_mem_now * 0.95);
 
     if (use_ovc) {
         printf("  Keys too large for single-pass (%.1f GB > %.1f GB)\n",
