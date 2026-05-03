@@ -3,6 +3,22 @@
 Branch: `h100/discoveries-2026-05-02` — 13+ commits queued locally
 (SSH agent intermittent during session; will batch-push when available).
 
+## Update — evening continued autonomous run
+
+User said "keep pushing" → daemon /tmp/auto_push.sh runs every 30s,
+tries any fresh SSH agent socket. Pushes have been landing.
+
+Additional wins after first FINAL summary:
+
+- **15.5.3 sample-partition** (commit `42937c5`) — eliminates the
+  merge phase. SF500 7m36s wall.
+- **SF1000 distributed** (commit `eb33936`) — **6 BILLION records
+  globally sorted in 22m40s. First ever on this hardware.** Required
+  NO_MAP_POPULATE=1 env var (commit `b4ad40f`).
+- **64-thread default for slow-path gather** (commit `acf75f0`) —
+  matches OVC gather, replaces older 48-thread cap.
+- Comprehensive throughput table (commit `b9f2e98`).
+
 ## Headline numbers
 
 | Workload | gpu_crocsort | DuckDB | Polars | Notes |
