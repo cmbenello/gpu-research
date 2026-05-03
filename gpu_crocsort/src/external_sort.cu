@@ -945,9 +945,17 @@ ExternalGpuSort::generate_runs_pipelined(
         // Lazy-allocate the pinned staging buffers if the constructor skipped them
         // (1.6.1 — defer to actual point of use so pinning doesn't fail at SF1000+
         // where the input is already 720 GB pinned).
+        // BUG-FIX: must use the original constructor-time buf_bytes, not the
+        // current member buf_bytes — the OVC compact-upload setup at line 2140
+        // resets buf_bytes to the CUB scratch size (~128 MB), but h_pin needs
+        // to be sized for the full triple-buffer slot (~21 GB at SF300+).
+        // Allocating at 128 MB and then writing past the end was the cause of
+        // the SF300 segfault that surfaced after 1.6.1 landed.
+        const uint64_t h_pin_alloc_bytes =
+            ((gpu_budget / NBUFS) / RECORD_SIZE) * (uint64_t)RECORD_SIZE;
         for (int i = 0; i < 2; i++) {
             if (!h_pin[i]) {
-                CUDA_CHECK(cudaMallocHost(&h_pin[i], buf_bytes));
+                CUDA_CHECK(cudaMallocHost(&h_pin[i], h_pin_alloc_bytes));
             }
         }
 
@@ -1919,10 +1927,12 @@ ExternalGpuSort::TimingResult ExternalGpuSort::sort(uint8_t* h_data, uint64_t nu
             uint64_t orig_buf_bytes = ((gpu_budget / NBUFS) / RECORD_SIZE) * (uint64_t)RECORD_SIZE;
             uint64_t pin_cap = orig_buf_bytes / COMPACT_KEY_SIZE;  // records per h_pin
 
-            // Lazy-allocate the pinned staging (1.6.1 — see constructor)
+            // Lazy-allocate the pinned staging (1.6.1; bug-fix: use
+            // orig_buf_bytes, not the member buf_bytes which can be clobbered
+            // — see commentary in generate_runs_pipelined).
             for (int i = 0; i < 2; i++) {
                 if (!h_pin[i]) {
-                    CUDA_CHECK(cudaMallocHost(&h_pin[i], buf_bytes));
+                    CUDA_CHECK(cudaMallocHost(&h_pin[i], orig_buf_bytes));
                 }
             }
 
