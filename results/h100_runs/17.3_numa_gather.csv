@@ -1,0 +1,5 @@
+policy,threads,records,wall_ms,gbs
+default,32,600000000,14138,5.09
+bind-node-0,32,600000000,3629,19.84
+bind-node-1,32,600000000,3993,18.03
+interleave,32,600000000,5047,14.27
