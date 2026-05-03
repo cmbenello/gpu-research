@@ -1,8 +1,24 @@
-# H100 sort bottlenecks — measured + ranked
+# H100 sort bottlenecks — measured + ranked (UPDATED 2026-05-03 evening)
 
 **Date:** 2026-05-03
-**Source data:** all experiments under `results/h100_runs/` from 2026-05-02 session
+**Source data:** all experiments under `results/h100_runs/` from 2026-05-02 + 2026-05-03 sessions
 **Method:** phase-level timing from binary stdout (no profiling tools needed — the binary already prints per-phase ms).
+
+## Status update — what's been closed since the original bottleneck list
+
+| # | Original bottleneck | Status | Win |
+|---|---------------------|--------|-----|
+| 1 | CPU gather phase    | **64-thread default** (was 192). 9% wall improvement at SF300. Two-pass gather attempted but slower (TLB thrash); reverted. | Modest |
+| 2 | Slow-path full-key upload at SF50/100 | **0.3.1 SHIPPED.** SF50: 1.74×, SF100: 1.49×. First SF100 win vs RTX 6000. | **Big** |
+| 3 | Single-GPU HBM ceiling at SF500 | Still OOMs. Multi-GPU (15.4) → 53 GB/s aggregate. Distributed sort (15.5/15.5.3) → globally sorted output. | **Capability** |
+| 4 | Single-host RAM ceiling at SF1500 | Still hits. SF1000 unblocked via 15.5.3 + NO_MAP_POPULATE=1. | **Capability** |
+| 5 | Cold-cache penalty | Fundamental | n/a |
+
+## New bottlenecks discovered this session
+
+- **Multi-process MAP_POPULATE OOM**: 4 concurrent sorts each MAP_POPULATEing 178 GB outputs cascaded to OOM-kill. Fixed by `NO_MAP_POPULATE=1` env override.
+- **/dev/shm 504 GB cap** limits intermediate staging at SF1000+.
+- **NVMe 3 GB/s cap** dominates the partition-output write phase at SF1000+ (8 min of partition is mostly waiting on disk).
 
 ## TL;DR
 
