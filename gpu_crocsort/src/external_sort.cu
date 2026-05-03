@@ -2739,7 +2739,12 @@ run_generation:
         // Chunk size sized to hold 32 M records of compact keys (~1 GB) —
         // small enough that 2 chunks fit easily, large enough that DMA
         // launch overhead doesn't dominate.
-        const uint64_t CHUNK_RECORDS = 32 * 1024 * 1024;  // 32 M records / chunk
+        // 32 M default; env-overridable for tuning (6.1 nsys showed
+        // 20 chunks at SF50 cost 28 GB/s effective vs 55 GB/s monolithic
+        // PCIe peak; larger chunks reduce overhead).
+        const char* cc_env = getenv("COMPACT_CHUNK_RECORDS");
+        const uint64_t CHUNK_RECORDS = cc_env ? std::max(1ULL, std::strtoull(cc_env, nullptr, 10))
+                                              : (32ULL * 1024 * 1024);  // 32 M records / chunk
         const int eff = sort_key_stride;
         const int nv = num_varying;
         const uint64_t chunk_bytes_max = CHUNK_RECORDS * (uint64_t)eff;
