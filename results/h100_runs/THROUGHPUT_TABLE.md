@@ -14,7 +14,7 @@ All measurements on `sorting-h100`: 4× NVIDIA H100 NVL (94 GB HBM each),
 | SF10  | 60 M     | 7.2 GB | 0.35 s | 20.4 | 14.4 | fast path |
 | SF50  | 300 M    | 36 GB  | **1.41 s** | **25.5** | 10.8 | numactl + post-0.3.1 |
 | SF100 | 600 M    | 72 GB  | **2.95 s** | **24.4** | 21.6 | numactl + post-0.3.1; first beats RTX 6000 |
-| SF300 | 1.8 B    | 216 GB | **6.59 s** | **32.7** | 64.8 | numactl --preferred + OVC; **highest single-GPU throughput** (median 32.1, best 32.7 across 8 warm runs) |
+| SF300 | 1.8 B    | 216 GB | **6.53 s** | **33.1** | 64.8 | numactl --preferred + OVC + SKIP_HOST_PIN=1; **highest single-GPU throughput** (median 6545 ms across 4 warm runs) |
 | SF500 | 3 B      | 360 GB | OOM    | —    | —    | exceeds 94 GB HBM |
 
 Pre-numactl (2026-05-03 evening): SF50 1.51, SF100 3.02, SF300 8.65 s.
