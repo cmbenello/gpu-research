@@ -1,0 +1,9 @@
+=== SF50 verify ===
+  PASS: 300005811 records sorted
+  PASS: 300005811 records sorted
+=== SF100 verify ===
+  PASS: 600037902 records sorted
+  PASS: 600037902 records sorted
+=== SF300 verify ===
+  PASS: 1799989091 records sorted
+  PASS: 1799989091 records sorted
