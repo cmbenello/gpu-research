@@ -1,0 +1,30 @@
+tmpfs           504G     0  504G   0% /dev/shm
+13:55:28 — start
+=== Step 1: partition (one-time) ===
+Input: /mnt/data/lineitem_sf300.bin, 1799989091 records (216.00 GB)
+Sample + sort + splitters: 618 ms
+Pass 1 (count): 33131 ms
+  bucket[0]: 455800616 records (54.70 GB)
+  bucket[1]: 440516747 records (52.86 GB)
+  bucket[2]: 457913579 records (54.95 GB)
+  bucket[3]: 445758149 records (53.49 GB)
+Pass 2 (route): 23664 ms (9.13 GB/s)
+Total partition wall: 63221 ms (3.42 GB/s end-to-end)
+CSV,partition_by_range,records=1799989091,K=4,sample_ms=618,pass1_ms=33131,pass2_ms=23664,total_ms=63221,gb_per_s=3.42
+13:56:31 — partitioned
+tmpfs           504G  202G  303G  40% /dev/shm
+PARTITION_WALL=63.224251675 sec
+=== Step 2: paired-concurrent sorts (timed phase) ===
+13:56:31 — pair A start
+13:57:40 — pair A done
+13:57:40 — pair B start
+13:58:55 — pair B done
+
+=== Sort-only wall (no partition): 143.360630624 sec ===
+GPU 0: CSV,NVIDIA H100,54.70,455800616,1,1,1743.78,2907.70,4651.47,11.7589,14.59,1.82,16.41,0.3
+GPU 1: CSV,NVIDIA H100,52.86,440516747,1,1,1483.10,2813.69,4296.79,12.3027,14.10,1.76,15.86,0.3
+GPU 2: CSV,NVIDIA H100,54.95,457913579,1,1,2349.62,3054.46,5404.08,10.1682,14.65,1.83,16.48,0.3
+GPU 3: CSV,NVIDIA H100,53.49,445758149,1,1,1695.16,3341.11,5036.27,10.6212,14.26,1.78,16.05,0.3
+
+=== Cleanup ===
+13:59:10 — done
