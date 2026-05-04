@@ -1,0 +1,15 @@
+DataFusion version: 45.2.0
+Loading /mnt/data/lineitem_sf50.bin ...
+  mmap'd 300,005,811 records in 0.0s
+  decoded prefix into Arrow Table in 24.0s
+
+=== SF50 (300,005,811 rows) ===
+  Run 1: 158266 ms
+  Run 2: 154836 ms
+  Run 3: 154833 ms
+  Run 4: 154677 ms
+  Run 5: 154852 ms
+  Warm best: 154677 ms
+  Throughput: 0.03 GB/s on 16-byte sort key
+             (0.23 GB/s on 120-byte record-equiv)
+  CSV,datafusion_sort,label=SF50,rows=300005811,warm_best_ms=154676.7,key_gb_per_s=0.03,record_gb_per_s=0.23
