@@ -28,7 +28,7 @@ gpu_crocsort_4g_partition = [
 ]
 gpu_crocsort_4g_distributed = [
     ("SF500-4G-distributed", 360.00, 430.0, 0.84),   # 17.3.2.3.3 numactl --preferred, 7m10s
-    ("SF1000-4G-distributed", 720.00, 1208.0, 0.60), # 17.3.2.7.6 SF1000 with --preferred 20m08s
+    ("SF1000-4G-distributed", 720.00, 860.0, 0.84), # 18.5c SF1000 with 2-GPU one-per-node 14m20s (sort phase 6m14s)
 ]
 duckdb_1g = [
     ("SF50",   36.00, 33.0, 1.09),

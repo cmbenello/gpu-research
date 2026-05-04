@@ -47,7 +47,7 @@ intermittently OOMs at SF300 when node 0's free memory is tight.
 | Scale  | Bytes   | Wall   | End-to-end GB/s | Notes |
 |--------|---------|--------|-----------------|-------|
 | SF500  | 360 GB  | **7m36s** | 0.79 | partition (66 s warm) + 2 pairs (180+200 s) |
-| SF1000 | 720 GB  | **20m08s** | 0.60 | **first ever globally sorted SF1000.** NO_MAP_POPULATE=1 + NUMA --preferred per pair (17.3.2.7.6). |
+| SF1000 | 720 GB  | **14m20s** | 0.84 | **first ever globally sorted SF1000.** Pre-partitioned sort phase only: **6m14s** (18.5c). 2-GPU one-per-node beats 4-GPU paired by avoiding contention. |
 
 ## CPU baselines (1 process, 192-core box)
 
