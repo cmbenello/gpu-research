@@ -3089,8 +3089,16 @@ int main(int argc, char** argv) {
                             MAP_PRIVATE|MAP_ANONYMOUS|MAP_POPULATE, -1, 0);
     if (h_data != MAP_FAILED) {
         madvise(h_data, total_bytes, MADV_HUGEPAGE);
-        // Pin for GPU DMA access (equivalent to cudaMallocHost but keeps huge pages)
-        cudaError_t reg_err = cudaHostRegister(h_data, total_bytes, cudaHostRegisterDefault);
+        // SKIP_HOST_PIN=1 disables cudaHostRegister. Per 19.5: pin is at
+        // 1.2 GB/s vs unpinned cudaMemcpy at ~10 GB/s. For one-shot SF1500-
+        // class sort, skipping pin saves up to 30× per-bucket on cold load.
+        const char* skip_pin_env = getenv("SKIP_HOST_PIN");
+        bool skip_pin = skip_pin_env && atoi(skip_pin_env) > 0;
+        cudaError_t reg_err = cudaSuccess;
+        if (!skip_pin) {
+            // Pin for GPU DMA access (equivalent to cudaMallocHost but keeps huge pages)
+            reg_err = cudaHostRegister(h_data, total_bytes, cudaHostRegisterDefault);
+        }
         if (reg_err != cudaSuccess) {
             printf("  cudaHostRegister failed (%s), falling back to cudaMallocHost\n",
                    cudaGetErrorString(reg_err));
@@ -3098,7 +3106,9 @@ int main(int argc, char** argv) {
             h_data = nullptr;
         } else {
             h_data_is_mmap = true;
-            printf("  Using mmap + huge pages + cudaHostRegister\n");
+            printf("  Using mmap + huge pages%s\n",
+                   skip_pin ? " (SKIP_HOST_PIN=1, no cudaHostRegister)"
+                            : " + cudaHostRegister");
         }
     } else {
         h_data = nullptr;
