@@ -1,0 +1,6 @@
+file,size_gb,mmap_ms,register_ms,unregister_ms,munmap_ms,total_ms,gb_per_s
+/mnt/data/lineitem_sf10.bin,7.20,0.00,5776.26,160.24,186.82,6123.32,1.176
+/mnt/data/lineitem_sf50.bin,36.00,0.01,28352.50,752.62,761.88,29867.01,1.205
+/mnt/data/lineitem_sf100.bin,72.00,0.01,56451.68,1507.35,1591.44,59550.47,1.209
+/mnt/data/lineitem_sf300.bin,216.00,0.01,173627.73,5099.85,4658.95,183386.53,1.178
+/mnt/data/lineitem_sf500.bin,360.00,0.01,314136.14,8702.23,8480.45,331318.82,1.087
