@@ -45,7 +45,17 @@ int main(int argc, char** argv) {
         double t_mmap = now_ms();
 
         // Register pages with CUDA — this is the slow step
-        cudaError_t err = cudaHostRegister(m, sz, cudaHostRegisterReadOnly | cudaHostRegisterMapped);
+        // Allow flag override via env var
+        unsigned int flags = cudaHostRegisterDefault;
+        const char* flag_env = getenv("PIN_FLAGS");
+        if (flag_env) {
+            if (!strcmp(flag_env, "default"))   flags = cudaHostRegisterDefault;
+            else if (!strcmp(flag_env, "ro"))   flags = cudaHostRegisterReadOnly;
+            else if (!strcmp(flag_env, "mapped")) flags = cudaHostRegisterMapped;
+            else if (!strcmp(flag_env, "ro_mapped")) flags = cudaHostRegisterReadOnly | cudaHostRegisterMapped;
+            else if (!strcmp(flag_env, "portable")) flags = cudaHostRegisterPortable;
+        }
+        cudaError_t err = cudaHostRegister(m, sz, flags);
         if (err != cudaSuccess) {
             fprintf(stderr, "%s: cudaHostRegister failed: %s\n", path, cudaGetErrorString(err));
             munmap(m, sz);

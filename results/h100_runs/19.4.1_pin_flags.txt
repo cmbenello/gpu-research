@@ -1,0 +1,15 @@
+=== flags=default ===
+/mnt/data/lineitem_sf100.bin: cudaHostRegister failed: invalid argument
+file,size_gb,mmap_ms,register_ms,unregister_ms,munmap_ms,total_ms,gb_per_s
+=== flags=ro ===
+file,size_gb,mmap_ms,register_ms,unregister_ms,munmap_ms,total_ms,gb_per_s
+/mnt/data/lineitem_sf100.bin,72.00,0.00,28484.48,1697.96,2698.22,32880.66,2.190
+=== flags=mapped ===
+/mnt/data/lineitem_sf100.bin: cudaHostRegister failed: invalid argument
+file,size_gb,mmap_ms,register_ms,unregister_ms,munmap_ms,total_ms,gb_per_s
+=== flags=ro_mapped ===
+file,size_gb,mmap_ms,register_ms,unregister_ms,munmap_ms,total_ms,gb_per_s
+/mnt/data/lineitem_sf100.bin,72.00,0.00,28246.00,1690.47,2689.67,32626.15,2.207
+=== flags=portable ===
+/mnt/data/lineitem_sf100.bin: cudaHostRegister failed: invalid argument
+file,size_gb,mmap_ms,register_ms,unregister_ms,munmap_ms,total_ms,gb_per_s
