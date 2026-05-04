@@ -47,7 +47,8 @@ intermittently OOMs at SF300 when node 0's free memory is tight.
 | Scale  | Bytes   | Wall   | End-to-end GB/s | Notes |
 |--------|---------|--------|-----------------|-------|
 | SF500  | 360 GB  | **7m36s** | 0.79 | partition (66 s warm) + 2 pairs (180+200 s) |
-| SF1000 | 720 GB  | **14m20s** | 0.84 | **first ever globally sorted SF1000.** Pre-partitioned sort phase only: **6m14s** (18.5c). 2-GPU one-per-node beats 4-GPU paired by avoiding contention. |
+| SF1000 | 720 GB  | **14m20s** | 0.84 | first ever globally sorted SF1000. Pre-partitioned sort phase only: **6m14s** (18.5c). 2-GPU one-per-node beats 4-GPU paired by avoiding contention. |
+| **SF1500** | **1080 GB** | **49m15s** | **0.37** | **above-RAM regime (1.08 TB > 1 TB host RAM).** Sequential 1-GPU strategy required (paired/one-per-node concurrent OOMed). **Largest published TPC-H lineitem global sort with full payload** (19.1.3). |
 
 ## CPU baselines (1 process, 192-core box)
 
