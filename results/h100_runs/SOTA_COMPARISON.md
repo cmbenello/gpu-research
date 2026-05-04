@@ -38,7 +38,8 @@
 |--------|----------|------|------------|
 | **gpu_crocsort 4-GPU partition (--membind)** | SF500 | 5.48 s | 65.7 GB/s (each GPU sorts 1/4) |
 | **gpu_crocsort 4-GPU distributed (--preferred per pair)** | SF500 | 7m10s | 0.84 GB/s end-to-end (globally sorted) |
-| **gpu_crocsort 4-GPU distributed** | SF1000 | 20m08s | 0.60 GB/s end-to-end (globally sorted) |
+| **gpu_crocsort 4-GPU distributed** | SF1000 | **14m20s** | **0.84 GB/s** end-to-end (globally sorted, 18.5c) |
+| **gpu_crocsort SF1000 sort phase only** (pre-partitioned) | SF1000 | **6m14s** | 1.93 GB/s sort-only (18.5c) |
 
 ## Key takeaways
 
