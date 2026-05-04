@@ -13,6 +13,7 @@
 | **gpu_crocsort (1 GPU, numactl)** | **1,408** | **25.6** | **1.0×** |
 | Polars 1.8.2 (192-core CPU, 16 B prefix only) | 14,500 | 2.48 | 10.3× slower |
 | DuckDB 1.3.2 (192-core CPU, full ORDER BY) | 33,013 | 1.09 | 23.4× slower |
+| DataFusion 45.2.0 (192-core, SQL ORDER BY) | 154,677 | 0.23 | **109× slower** |
 | Raw CUB (8 B keys, GPU only, no I/O) | 33.9 | 70.8 | 0.024× (41× faster) |
 
 ### SF100 (600 M records, 72 GB)
