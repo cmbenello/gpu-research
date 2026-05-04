@@ -23,6 +23,7 @@
 | **gpu_crocsort (1 GPU, numactl)** | **2,952** | **24.4** | **1.0×** |
 | Polars 1.8.2 (16 B prefix only) | 28,628 | 2.52 | 9.7× slower |
 | DuckDB 1.3.2 (full ORDER BY) | 106,001 | 0.68 | 35.9× slower |
+| DataFusion 45.2.0 (SQL ORDER BY) | 349,173 | 0.21 | **118× slower** |
 | Raw CUB (8 B keys, GPU only) | 67.6 | 71.0 | 0.023× (44× faster) |
 
 ### SF300 (1.8 B records, 216 GB)
