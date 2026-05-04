@@ -1,0 +1,30 @@
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/nvme1n1    3.5T  2.3T 1021G  70% /mnt/data
+00:11:45 — start
+=== Step 1: partition (output → NVMe) ===
+Input: /mnt/data/lineitem_sf1000.bin, 5999989709 records (720.00 GB)
+Sample + sort + splitters: 621 ms
+Pass 1 (count): 129903 ms
+  bucket[0]: 1507078137 records (180.85 GB)
+  bucket[1]: 1486610551 records (178.39 GB)
+  bucket[2]: 1480837405 records (177.70 GB)
+  bucket[3]: 1525463616 records (183.06 GB)
+Pass 2 (route): 315815 ms (2.28 GB/s)
+Total partition wall: 472450 ms (1.52 GB/s end-to-end)
+CSV,partition_by_range,records=5999989709,K=4,sample_ms=621,pass1_ms=129903,pass2_ms=315815,total_ms=472450,gb_per_s=1.52
+00:19:38 — partitioned
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/nvme1n1    3.5T  3.0T  351G  90% /mnt/data
+=== Step 2: paired-concurrent sorts with NUMA --preferred ===
+00:19:38 — pair A start
+00:25:27 — pair A done
+00:25:27 — pair B start
+00:31:31 — pair B done
+=== Step 3: per-bucket times ===
+GPU 0: CSV,NVIDIA H100,180.85,1507078137,3,2,16631.88,28137.68,44769.56,4.0396,48.23,6.03,54.25,0.3
+GPU 1: CSV,NVIDIA H100,178.39,1486610551,3,2,15880.32,29020.14,44900.47,3.9731,47.57,5.95,53.52,0.3
+GPU 2: CSV,NVIDIA H100,177.70,1480837405,3,2,19420.54,25457.48,44878.01,3.9596,47.39,5.92,53.31,0.3
+GPU 3: CSV,NVIDIA H100,183.06,1525463616,3,2,24255.29,18034.82,42290.11,4.3286,48.81,6.10,54.92,0.3
+=== Step 4: cleanup ===
+/dev/nvme1n1    3.5T  3.0T  351G  90% /mnt/data
+00:31:53 — done
