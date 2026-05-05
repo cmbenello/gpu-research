@@ -1,0 +1,43 @@
+23:19:14 — start
+/mnt/data/lineitem_sf1000.bin (720.0 GB): fadvise(DONTNEED) rc=0
+=== Phase 1: stream partition + sort (offsets only) ===
+Input: /mnt/data/lineitem_sf1000.bin, 5999989709 records (720.00 GB)
+cmap: 28 bytes in 6346 ms
+Allocating 8 × 33.00 GB pinned bucket buffers = 264.00 GB total
+Unpinned mmap alloc: 0 ms (will pin lazily per bucket)
+  bucket[0]: 757101456 records (30.28 GB)
+  bucket[1]: 749976681 records (30.00 GB)
+  bucket[2]: 737702541 records (29.51 GB)
+  bucket[3]: 748908010 records (29.96 GB)
+  bucket[4]: 757938923 records (30.32 GB)
+  bucket[5]: 722898482 records (28.92 GB)
+  bucket[6]: 780066980 records (31.20 GB)
+  bucket[7]: 745396636 records (29.82 GB)
+Partition (in-RAM): 147622 ms (720.00 GB read, 240.00 GB partitioned)
+Pre-pin (8 buckets concurrent): 21209 ms
+  round 1 done
+  round 2 done
+Sort phase: 41001 ms (2 rounds)
+
+Total wall: 224608 ms (3.21 GB/s end-to-end)
+CSV,stream_partition_sort,records=5999989709,K=8,n_cmap=28,partition_ms=147622,sort_ms=41001,total_ms=224608
+=== Phase 2: gather full sorted records ===
+Input: 5999989709 records (720.00 GB)
+Output: 5999989709 records (720.00 GB) across 8 offsets files
+  gathered file 0: 757101456 records (cumulative 757101456)
+  gathered file 1: 749976681 records (cumulative 1507078137)
+  gathered file 2: 737702541 records (cumulative 2244780678)
+  gathered file 3: 748908010 records (cumulative 2993688688)
+  gathered file 4: 757938923 records (cumulative 3751627611)
+  gathered file 5: 722898482 records (cumulative 4474526093)
+  gathered file 6: 780066980 records (cumulative 5254593073)
+  gathered file 7: 745396636 records (cumulative 5999989709)
+Gather: 601266 ms (1.20 GB/s effective)
+Total wall: 636076 ms (1.13 GB/s)
+CSV,gather_records,records=5999989709,gather_ms=601266,total_ms=636076,gb_per_s=1.13
+=== Stream wall: 244.228998078 s ===
+=== Gather wall: 636.080028658 s ===
+=== TOTAL E2E: 880.313263659 s ===
+-rw-r--r-- 1 cc cc 719998765080 May  5 23:33 /mnt/data/19.37_sf1000/sorted_records.bin
+Verify 1000000 records, 0 violations: PASS
+23:35:12 — done
