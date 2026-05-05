@@ -52,7 +52,7 @@ intermittently OOMs at SF300 when node 0's free memory is tight.
 | **SF1500 PERM** | **1080 GB** | **22m31s** | **0.80** | **perm-only output (34 GB, 4-byte indices)**. PERM_ONLY=1 + K=16 4-GPU recipe (19.20). **27% faster** than full-records mode. **n=3: 22m31s / 22m45s / 22m52s, ±21s variance.** NVMe write halved by skipping the 1.08 TB sorted-records emit. Verified correct at SF50. **54% faster than 49m15s 19.1.3 baseline.** |
 | **SF1500 COMPACT v1** | **1080 GB** | **12m07s** | **1.49** | compact pipeline 40-byte buckets + 8-byte sorted offsets (19.21). Partition v1 (2-pass): 7m32s. Sort phase 3m03s. |
 | **SF1500 COMPACT v2** | **1080 GB** | **8m54s** | **2.02** | single-pass compact partition (19.22). Partition: 4m33s. Sort: 3m09s. n=2: 8m54s, 8m41s = ±13s. |
-| **SF1500 COMPACT v3** | **1080 GB** | **7m56s** | **2.27** | **single-pass compact + no-bucket-evict** (19.23): keeps 360 GB bucket cache hot between partition and sort → fread serves from RAM, per-round 38s vs 47s. Saves 33s on sort phase + 25s on eviction. **84% faster than 49m baseline. New best.** Validated at SF1500 (16/16 PASS). |
+| **SF1500 COMPACT v3** | **1080 GB** | **7m56s** (best) **8m24s** (mean) | **2.27** (best) **2.14** (mean) | **single-pass compact + no-bucket-evict** (19.23). Keeps 360 GB bucket cache hot between partition and sort → fread serves from RAM, per-round 38s vs 47s. **n=3: 7m56s / 8m38s / 8m39s. Run 1 hit NVMe SLC cache (1.34 GB/s write); runs 2-3 sustained at NVMe write floor (1.14 GB/s). 83-84% faster than 49m baseline.** Validated at SF1500 (16/16 PASS, 4M pairs). |
 
 ## CPU baselines (1 process, 192-core box)
 
