@@ -2932,6 +2932,25 @@ run_generation:
     printf("  Downloaded %.2f GB perm in %.0f ms\n", total_perm_bytes/1e9, download_ms);
 
     // ── Step 5: CPU multi-threaded gather ──
+    // PERM_ONLY=1 skips the gather and emits the 4-byte permutation as
+    // output instead of materialized records. At SF1500-class scales this
+    // cuts NVMe write traffic from total_bytes (e.g. 67 GB/bucket) down to
+    // total_perm_bytes (~2.3 GB/bucket) — the dominant write-bandwidth cost.
+    // Downstream consumers gather lazily via input[perm[i]].
+    const char* perm_only_env = getenv("PERM_ONLY");
+    bool perm_only = perm_only_env && atoi(perm_only_env) > 0;
+
+    double gather_ms = 0.0;
+    if (perm_only) {
+        printf("== Step 5: SKIPPED (PERM_ONLY=1) — emitting %.2f GB perm instead of %.2f GB records ==\n",
+               total_perm_bytes/1e9, total_bytes/1e9);
+        phase_timer.begin();
+        // Copy perm into h_output (which is sized for full records — perm fits comfortably).
+        memcpy(h_output, h_perm, total_perm_bytes);
+        gather_ms = phase_timer.end_ms();
+        printf("  Copied perm to output buffer in %.0f ms\n", gather_ms);
+        cudaFreeHost(h_perm);
+    } else {
     printf("== Step 5: CPU Gather ==\n");
     phase_timer.begin();
 
@@ -2969,18 +2988,19 @@ run_generation:
         for (auto& t : threads) t.join();
     }
 
-    double gather_ms = phase_timer.end_ms();
+    gather_ms = phase_timer.end_ms();
     printf("  Gathered %.2f GB in %.0f ms (%.2f GB/s)\n",
            total_bytes/1e9, gather_ms, total_bytes/(gather_ms*1e6));
 
     cudaFreeHost(h_perm);
+    }
 
     r.run_gen_ms = upload_ms + sort_ms + download_ms;  // no separate extract step with cudaMemcpy2D
     r.merge_ms = gather_ms;
     r.merge_passes = 1;
     r.num_runs = 1;
     r.sorted_output = h_output;
-    r.sorted_output_size = total_bytes;
+    r.sorted_output_size = perm_only ? total_perm_bytes : total_bytes;
     r.sorted_output_is_mmap = h_output_is_mmap;
     r.total_ms = r.run_gen_ms + r.merge_ms;
 
