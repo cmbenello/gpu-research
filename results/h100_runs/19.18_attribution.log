@@ -1,0 +1,56 @@
+03:18:29 — start
+Input: /mnt/data/lineitem_sf1500.bin, 9000021272 records (1080.00 GB)
+Sample + sort + splitters: 669 ms
+Pass 1 (count): 171110 ms
+  bucket[0]: 552476095 records (66.30 GB)
+  bucket[1]: 566449690 records (67.97 GB)
+  bucket[2]: 543612294 records (65.23 GB)
+  bucket[3]: 561393154 records (67.37 GB)
+  bucket[4]: 574158467 records (68.90 GB)
+  bucket[5]: 571009668 records (68.52 GB)
+  bucket[6]: 570716848 records (68.49 GB)
+  bucket[7]: 531079435 records (63.73 GB)
+  bucket[8]: 555772930 records (66.69 GB)
+  bucket[9]: 571023983 records (68.52 GB)
+  bucket[10]: 574573498 records (68.95 GB)
+  bucket[11]: 572896401 records (68.75 GB)
+  bucket[12]: 559447325 records (67.13 GB)
+  bucket[13]: 550503169 records (66.06 GB)
+  bucket[14]: 574937581 records (68.99 GB)
+  bucket[15]: 569970734 records (68.40 GB)
+Pass 2 (route): 580325 ms (1.86 GB/s)
+Total partition wall: 782858 ms (1.38 GB/s end-to-end)
+CSV,partition_by_range,records=9000021272,K=16,sample_ms=669,pass1_ms=171110,pass2_ms=580325,total_ms=782858,gb_per_s=1.38
+03:31:32 — partitioned
+/mnt/data/lineitem_sf1500.bin (1080.0 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.18_sf1500/part.bucket_0.bin (66.3 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.18_sf1500/part.bucket_1.bin (68.0 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.18_sf1500/part.bucket_10.bin (68.9 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.18_sf1500/part.bucket_11.bin (68.7 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.18_sf1500/part.bucket_12.bin (67.1 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.18_sf1500/part.bucket_13.bin (66.1 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.18_sf1500/part.bucket_14.bin (69.0 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.18_sf1500/part.bucket_15.bin (68.4 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.18_sf1500/part.bucket_2.bin (65.2 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.18_sf1500/part.bucket_3.bin (67.4 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.18_sf1500/part.bucket_4.bin (68.9 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.18_sf1500/part.bucket_5.bin (68.5 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.18_sf1500/part.bucket_6.bin (68.5 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.18_sf1500/part.bucket_7.bin (63.7 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.18_sf1500/part.bucket_8.bin (66.7 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.18_sf1500/part.bucket_9.bin (68.5 GB): fadvise(DONTNEED) rc=0
+=== Round 1 — WITH output write (baseline) ===
+03:33:38 — round 1 start
+Round 1 WITH write: 145.482589936 sec
+/mnt/data/19.18_sf1500/sorted_0.bin (66.3 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.18_sf1500/sorted_1.bin (68.0 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.18_sf1500/sorted_2.bin (65.2 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.18_sf1500/sorted_3.bin (67.4 GB): fadvise(DONTNEED) rc=0
+=== Round 2 — WITHOUT output write ===
+03:36:37 — round 2 start
+Round 2 WITHOUT write: 81.475376271 sec
+==========================
+WITH    write: 145.482589936 sec
+WITHOUT write: 81.475376271 sec
+Output write contributes: 64.007213665 sec per 4-bucket round
+03:38:19 — done
