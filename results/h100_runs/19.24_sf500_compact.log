@@ -1,0 +1,54 @@
+07:40:26 — start
+=== Step 1: SINGLE-PASS compact partition K=16 ===
+Input: /mnt/data/lineitem_sf500.bin, 3000028242 records (360.00 GB)
+Compact map: 27 bytes detected in 6482 ms
+Splitter sort: 521 ms
+  bucket[0]: 187088855 records (7.48 GB compact)
+  bucket[1]: 181089591 records (7.24 GB compact)
+  bucket[2]: 188840546 records (7.55 GB compact)
+  bucket[3]: 181806029 records (7.27 GB compact)
+  bucket[4]: 198574548 records (7.94 GB compact)
+  bucket[5]: 198092932 records (7.92 GB compact)
+  bucket[6]: 183080784 records (7.32 GB compact)
+  bucket[7]: 176351302 records (7.05 GB compact)
+  bucket[8]: 198150829 records (7.93 GB compact)
+  bucket[9]: 188532474 records (7.54 GB compact)
+  bucket[10]: 187016737 records (7.48 GB compact)
+  bucket[11]: 189573358 records (7.58 GB compact)
+  bucket[12]: 190158935 records (7.61 GB compact)
+  bucket[13]: 188216524 records (7.53 GB compact)
+  bucket[14]: 171681170 records (6.87 GB compact)
+  bucket[15]: 191773628 records (7.67 GB compact)
+Single-pass (classify + write): 76770 ms (360.00 GB read, 120.00 GB write)
+Total partition wall: 87634 ms (4.11 GB/s effective on input read)
+CSV,partition_compact_v2,records=3000028242,K=16,n_cmap=27,sample_ms=521,pass_ms=76770,total_ms=87634,read_gb=360.00,write_gb=120.00
+07:41:54 — partitioned
+Partition wall: 87.636707708 s
+=== Evicting INPUT only (keep bucket cache) ===
+/mnt/data/lineitem_sf500.bin (360.0 GB): fadvise(DONTNEED) rc=0
+=== Step 2: 4-GPU concurrent × 4 rounds ===
+07:42:14 — round 1
+07:42:29 — round 2
+07:42:45 — round 3
+07:43:01 — round 4
+=== Sort-only wall: 62.239244162 s ===
+b0: CSV,sort_compact_bucket,records=187088855,total_ms=11351,load_ms=9257,h2d_ms=136,sort_ms=109,gather_ms=544,write_ms=1305
+b1: CSV,sort_compact_bucket,records=181089591,total_ms=11129,load_ms=9189,h2d_ms=132,sort_ms=106,gather_ms=500,write_ms=1203
+b2: CSV,sort_compact_bucket,records=188840546,total_ms=11438,load_ms=9403,h2d_ms=138,sort_ms=110,gather_ms=513,write_ms=1275
+b3: CSV,sort_compact_bucket,records=181806029,total_ms=11297,load_ms=9321,h2d_ms=132,sort_ms=106,gather_ms=486,write_ms=1251
+b4: CSV,sort_compact_bucket,records=198574548,total_ms=11387,load_ms=9416,h2d_ms=145,sort_ms=115,gather_ms=546,write_ms=1165
+b5: CSV,sort_compact_bucket,records=198092932,total_ms=11367,load_ms=9387,h2d_ms=144,sort_ms=115,gather_ms=568,write_ms=1152
+b6: CSV,sort_compact_bucket,records=183080784,total_ms=10850,load_ms=9041,h2d_ms=133,sort_ms=107,gather_ms=479,write_ms=1090
+b7: CSV,sort_compact_bucket,records=176351302,total_ms=10637,load_ms=8962,h2d_ms=128,sort_ms=103,gather_ms=459,write_ms=985
+b8: CSV,sort_compact_bucket,records=198150829,total_ms=11584,load_ms=9366,h2d_ms=144,sort_ms=115,gather_ms=567,write_ms=1391
+b9: CSV,sort_compact_bucket,records=188532474,total_ms=11360,load_ms=9290,h2d_ms=137,sort_ms=110,gather_ms=518,write_ms=1305
+b10: CSV,sort_compact_bucket,records=187016737,total_ms=11421,load_ms=9385,h2d_ms=136,sort_ms=109,gather_ms=504,write_ms=1287
+b11: CSV,sort_compact_bucket,records=189573358,total_ms=11492,load_ms=9420,h2d_ms=138,sort_ms=110,gather_ms=524,write_ms=1300
+b12: CSV,sort_compact_bucket,records=190158935,total_ms=11177,load_ms=9165,h2d_ms=139,sort_ms=111,gather_ms=532,write_ms=1231
+b13: CSV,sort_compact_bucket,records=188216524,total_ms=11112,load_ms=9133,h2d_ms=137,sort_ms=110,gather_ms=516,write_ms=1216
+b14: CSV,sort_compact_bucket,records=171681170,total_ms=10049,load_ms=8612,h2d_ms=125,sort_ms=100,gather_ms=423,write_ms=789
+b15: CSV,sort_compact_bucket,records=191773628,total_ms=11311,load_ms=9292,h2d_ms=140,sort_ms=112,gather_ms=506,write_ms=1261
+=== 16 PASS / 0 FAIL ===
+Checked 999999 adjacent pairs, 0 violations
+PASS
+07:45:26 — done
