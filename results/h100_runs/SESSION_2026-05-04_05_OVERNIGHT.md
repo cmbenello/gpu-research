@@ -134,4 +134,25 @@ but wider variance (NVMe write rate fluctuates with SLC cache state).
 - SF1500: 4 buckets × 1M pairs across multiple sweeps, 0 violations.
 - All sweeps: 16/16 PASS (or 8/8 for K=8 variants).
 
-## Total commits this session: ~35
+## Total commits this session: ~40+
+
+## Final scaling chart (stream pre-pin pipeline, all scales)
+
+| Scale | Bytes | Wall | GB/s | Status |
+|-------|-------|------|------|--------|
+| SF100 | 72 GB | 32s | 2.51 | linear scaling validated |
+| SF300 | 216 GB | 90s | 2.59 | linear scaling validated |
+| SF500 | 360 GB | 1m59s | **3.01** | **at NVMe peak read** |
+| SF1000 | 720 GB | **3m48s** | **3.16** | **at NVMe peak read; 73% faster than prior 14m20s** |
+| SF1500 | 1080 GB | 6m23s | 2.82 | 9.6% above NVMe floor (input > host RAM cache) |
+
+**SF500 and SF1000 are at the NVMe read ceiling** (3.1 GB/s peak). They
+fit in 1 TB host RAM cache, so reads are RAM-fast on warm passes. SF1500
+exceeds cache (1.08 TB > 1 TB) and drops below ceiling by ~10%.
+
+## Energy
+
+- 4-GPU avg power during SF1500 sort: 308W (77W/GPU = 11% of H100 TDP)
+- Energy per SF1500 sort: 140 kJ = 39 Wh
+- **130 nJ per byte sorted**, **15.6 µJ per record**
+- GPU is idle 90% of wall time — pipeline is NVMe-bound, not compute.
