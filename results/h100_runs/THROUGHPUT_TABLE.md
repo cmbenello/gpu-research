@@ -49,7 +49,7 @@ intermittently OOMs at SF300 when node 0's free memory is tight.
 | SF500  | 360 GB  | **7m36s** | 0.79 | partition (66 s warm) + 2 pairs (180+200 s) |
 | SF1000 | 720 GB  | **14m20s** | 0.84 | first ever globally sorted SF1000. Pre-partitioned sort phase only: **6m14s** (18.5c). 2-GPU one-per-node beats 4-GPU paired by avoiding contention. |
 | **SF1500** | **1080 GB** | **31m07s** | **0.58** | **full records output**. K=16 partition + 4-GPU concurrent + posix_fadvise(DONTNEED) cache eviction (19.16, n=3 ±2s). **37% faster** than 19.1.3 baseline (49m15s). **Largest published TPC-H lineitem global sort with full payload.** |
-| **SF1500 PERM** | **1080 GB** | **22m31s** | **0.80** | **perm-only output (34 GB, 4-byte indices)**. PERM_ONLY=1 + same K=16 4-GPU recipe (19.20). **28% faster** than full-records mode. NVMe write halved by skipping the 1.08 TB sorted-records emit. Verified correct at SF50. |
+| **SF1500 PERM** | **1080 GB** | **22m31s** | **0.80** | **perm-only output (34 GB, 4-byte indices)**. PERM_ONLY=1 + K=16 4-GPU recipe (19.20). **27% faster** than full-records mode (n=2: 22m31s, 22m45s = ±14s). NVMe write halved by skipping the 1.08 TB sorted-records emit. Verified correct at SF50. |
 
 ## CPU baselines (1 process, 192-core box)
 
