@@ -97,13 +97,15 @@ static void sort_one_bucket(const SortJob& job) {
     const char* skip_pin_env = getenv("SKIP_PIN");
     bool skip_pin = skip_pin_env && atoi(skip_pin_env) > 0;
 
-    if (!skip_pin) cudaHostRegister(job.h_records, bytes, cudaHostRegisterDefault);
+    // Lazy pin (when LAZY_PIN=1 env). Otherwise pre-pin already done at partition end.
+    bool lazy_pin = !skip_pin && getenv("LAZY_PIN") && atoi(getenv("LAZY_PIN")) > 0;
+    if (lazy_pin) cudaHostRegister(job.h_records, bytes, cudaHostRegisterDefault);
 
     // Upload to GPU
     uint8_t* d_records;
     CUDA_CHECK(cudaMalloc(&d_records, bytes));
     CUDA_CHECK(cudaMemcpy(d_records, job.h_records, bytes, cudaMemcpyHostToDevice));
-    if (!skip_pin) cudaHostUnregister(job.h_records);
+    if (lazy_pin) cudaHostUnregister(job.h_records);
 
     // Allocate sort buffers
     uint32_t *d_perm_a, *d_perm_b;
@@ -134,15 +136,17 @@ static void sort_one_bucket(const SortJob& job) {
     CUDA_CHECK(cudaMalloc(&d_offsets, n * sizeof(uint64_t)));
     gather_offsets_k<<<(n+255)/256, 256>>>(d_records, vb.Current(), d_offsets, n);
 
-    uint64_t* h_offsets;
-    CUDA_CHECK(cudaMallocHost(&h_offsets, n * sizeof(uint64_t)));
+    // Use regular malloc (pageable) — pinned alloc may fail if pre-pinned 360 GB
+    // saturates the kernel's pin limits. Pageable D2H is ~half-speed but reliable.
+    uint64_t* h_offsets = (uint64_t*)malloc(n * sizeof(uint64_t));
+    if (!h_offsets) { fprintf(stderr, "malloc h_offsets failed\n"); exit(1); }
     CUDA_CHECK(cudaMemcpy(h_offsets, d_offsets, n * sizeof(uint64_t), cudaMemcpyDeviceToHost));
 
     // Write output
     FILE* fp = fopen(job.output_path, "wb");
     if (fp) { fwrite(h_offsets, sizeof(uint64_t), n, fp); fclose(fp); }
 
-    cudaFreeHost(h_offsets);
+    free(h_offsets);
     cudaFree(d_records);
     cudaFree(d_perm_a);
     cudaFree(d_perm_b);
@@ -300,6 +304,26 @@ int main(int argc, char** argv) {
 
     // We can release input.bin mmap now — sort phase only needs the bucket buffers
     munmap((void*)input, total_bytes);
+
+    // ── PRE-PIN: register all bucket buffers concurrently, before sort starts ──
+    // This overlaps pin latency across buckets (vs lazy pin in sort phase which
+    // serializes 1 pin per bucket per GPU). Saves ~30-70s on sort phase.
+    if (!getenv("LAZY_PIN")) {
+        auto t_prepin0 = std::chrono::high_resolution_clock::now();
+        std::vector<std::thread> pin_threads;
+        for (int b = 0; b < K; b++) {
+            uint64_t cnt = bucket_counts[b].load();
+            if (cnt > 0) {
+                pin_threads.emplace_back([&, b, cnt]() {
+                    cudaHostRegister(bucket_bufs[b], cnt, cudaHostRegisterDefault);
+                });
+            }
+        }
+        for (auto& t : pin_threads) t.join();
+        auto t_prepin1 = std::chrono::high_resolution_clock::now();
+        printf("Pre-pin (%d buckets concurrent): %.0f ms\n", K,
+               std::chrono::duration<double, std::milli>(t_prepin1 - t_prepin0).count());
+    }
 
     // ── Sort phase: 4-GPU concurrent × ceil(K/4) rounds ──
     auto t_sort0 = std::chrono::high_resolution_clock::now();
