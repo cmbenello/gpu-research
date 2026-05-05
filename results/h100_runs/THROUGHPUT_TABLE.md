@@ -48,6 +48,7 @@ intermittently OOMs at SF300 when node 0's free memory is tight.
 |--------|---------|--------|-----------------|-------|
 | SF500  | 360 GB  | **7m36s** | 0.79 | partition (66 s warm) + 2 pairs (180+200 s) |
 | SF1000 | 720 GB  | **14m20s** | 0.84 | first ever globally sorted SF1000. Pre-partitioned sort phase only: **6m14s** (18.5c). 2-GPU one-per-node beats 4-GPU paired by avoiding contention. |
+| **SF1000 STREAM PRE-PIN** | **720 GB** | **3m48s** | **3.16** | **stream pre-pin at SF1000** (19.36). Partition: 2m44s. Pre-pin: 24s. Sort: 40s. **At NVMe read peak (3.1 GB/s). 73% faster than 14m20s prior best.** Validated 1M pairs PASS. |
 | **SF500 COMPACT** | **360 GB** | **2m35s** | **2.32** | compact pipeline (19.24). Partition: 1m28s. Sort: 1m02s. |
 | **SF500 STREAM PRE-PIN** | **360 GB** | **1m59s** | **3.01** | **streaming compact + pre-pin at SF500** (19.31). Partition (in-RAM): 1m20s. Pre-pin: 14s. Sort: 26s. **At NVMe read peak (3.1 GB/s). 4× faster than 15.5.3's 7m36s; 24% faster than 19.24.** Validated 1M pairs PASS. |
 | **SF300 STREAM PRE-PIN** | **216 GB** | **1m30s** | **2.59** | **stream pre-pin at SF300** (19.32). Linear scaling vs SF1500. PASS. |

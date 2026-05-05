@@ -1,0 +1,28 @@
+20:35:43 — start
+/mnt/data/lineitem_sf1000.bin (720.0 GB): fadvise(DONTNEED) rc=0
+              total        used        free      shared  buff/cache   available
+Mem:           1007           3         947           0          55         998
+Input: /mnt/data/lineitem_sf1000.bin, 5999989709 records (720.00 GB)
+cmap: 28 bytes in 6292 ms
+Allocating 8 × 33.00 GB pinned bucket buffers = 264.00 GB total
+Unpinned mmap alloc: 0 ms (will pin lazily per bucket)
+  bucket[0]: 757101456 records (30.28 GB)
+  bucket[1]: 749976681 records (30.00 GB)
+  bucket[2]: 737702541 records (29.51 GB)
+  bucket[3]: 748908010 records (29.96 GB)
+  bucket[4]: 757938923 records (30.32 GB)
+  bucket[5]: 722898482 records (28.92 GB)
+  bucket[6]: 780066980 records (31.20 GB)
+  bucket[7]: 745396636 records (29.82 GB)
+Partition (in-RAM): 149193 ms (720.00 GB read, 240.00 GB partitioned)
+Pre-pin (8 buckets concurrent): 23641 ms
+  round 1 done
+  round 2 done
+Sort phase: 39965 ms (2 rounds)
+
+Total wall: 227820 ms (3.16 GB/s end-to-end)
+CSV,stream_partition_sort,records=5999989709,K=8,n_cmap=28,partition_ms=149193,sort_ms=39965,total_ms=227820
+20:40:59 — done
+Checked 999999 adjacent pairs, 0 violations
+PASS
+20:41:08 — cleaned
