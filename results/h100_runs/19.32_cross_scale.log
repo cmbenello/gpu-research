@@ -1,0 +1,58 @@
+==========================================
+SF100
+==========================================
+18:50:43 — start
+/mnt/data/lineitem_sf100.bin (72.0 GB): fadvise(DONTNEED) rc=0
+Input: /mnt/data/lineitem_sf100.bin, 600037902 records (72.00 GB)
+cmap: 27 bytes in 6167 ms
+Allocating 8 × 3.30 GB pinned bucket buffers = 26.40 GB total
+Unpinned mmap alloc: 0 ms (will pin lazily per bucket)
+  bucket[0]: 74472468 records (2.98 GB)
+  bucket[1]: 75054299 records (3.00 GB)
+  bucket[2]: 71134830 records (2.85 GB)
+  bucket[3]: 74254029 records (2.97 GB)
+  bucket[4]: 73074633 records (2.92 GB)
+  bucket[5]: 79608678 records (3.18 GB)
+  bucket[6]: 75728036 records (3.03 GB)
+  bucket[7]: 76710929 records (3.07 GB)
+Partition (in-RAM): 11707 ms (72.00 GB read, 24.00 GB partitioned)
+Pre-pin (8 buckets concurrent): 4579 ms
+  round 1 done
+  round 2 done
+Sort phase: 4504 ms (2 rounds)
+
+Total wall: 28652 ms (2.51 GB/s end-to-end)
+CSV,stream_partition_sort,records=600037902,K=8,n_cmap=27,partition_ms=11707,sort_ms=4504,total_ms=28652
+SF100 wall: 31.575738870 s
+Checked 999999 adjacent pairs, 0 violations
+PASS
+18:51:20 — done
+==========================================
+SF300
+==========================================
+18:51:20 — start
+/mnt/data/lineitem_sf300.bin (216.0 GB): fadvise(DONTNEED) rc=0
+Input: /mnt/data/lineitem_sf300.bin, 1799989091 records (216.00 GB)
+cmap: 27 bytes in 6289 ms
+Allocating 8 × 9.90 GB pinned bucket buffers = 79.20 GB total
+Unpinned mmap alloc: 0 ms (will pin lazily per bucket)
+  bucket[0]: 236930317 records (9.48 GB)
+  bucket[1]: 218870299 records (8.75 GB)
+  bucket[2]: 213564113 records (8.54 GB)
+  bucket[3]: 226952634 records (9.08 GB)
+  bucket[4]: 232253994 records (9.29 GB)
+  bucket[5]: 225659585 records (9.03 GB)
+  bucket[6]: 221707506 records (8.87 GB)
+  bucket[7]: 224050643 records (8.96 GB)
+Partition (in-RAM): 44557 ms (216.00 GB read, 72.00 GB partitioned)
+Pre-pin (8 buckets concurrent): 11989 ms
+  round 1 done
+  round 2 done
+Sort phase: 15768 ms (2 rounds)
+
+Total wall: 83371 ms (2.59 GB/s end-to-end)
+CSV,stream_partition_sort,records=1799989091,K=8,n_cmap=27,partition_ms=44557,sort_ms=15768,total_ms=83371
+SF300 wall: 90.086342358 s
+Checked 999999 adjacent pairs, 0 violations
+PASS
+18:52:59 — done
