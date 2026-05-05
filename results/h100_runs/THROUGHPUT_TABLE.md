@@ -51,7 +51,8 @@ intermittently OOMs at SF300 when node 0's free memory is tight.
 | **SF1500** | **1080 GB** | **31m07s** | **0.58** | **full records output**. K=16 partition + 4-GPU concurrent + posix_fadvise(DONTNEED) cache eviction (19.16, n=3 ±2s). **37% faster** than 19.1.3 baseline (49m15s). **Largest published TPC-H lineitem global sort with full payload.** |
 | **SF1500 PERM** | **1080 GB** | **22m31s** | **0.80** | **perm-only output (34 GB, 4-byte indices)**. PERM_ONLY=1 + K=16 4-GPU recipe (19.20). **27% faster** than full-records mode. **n=3: 22m31s / 22m45s / 22m52s, ±21s variance.** NVMe write halved by skipping the 1.08 TB sorted-records emit. Verified correct at SF50. **54% faster than 49m15s 19.1.3 baseline.** |
 | **SF1500 COMPACT v1** | **1080 GB** | **12m07s** | **1.49** | compact pipeline 40-byte buckets + 8-byte sorted offsets (19.21). Partition v1 (2-pass): 7m32s. Sort phase 3m03s. |
-| **SF1500 COMPACT v2** | **1080 GB** | **8m54s** | **2.02** | **single-pass compact partition** (19.22): same 40-byte buckets but skips pass-1 count via per-thread per-bucket RAM buffers + atomic offset counters. Partition: 4m33s. Sort: 3m09s. **82% faster than 49m15s baseline. Approaching single-SSD floor (5.8m at NVMe peak read).** Validated correct at SF50 + SF1500 (4-of-4 sampled buckets, 4M pairs total, 0 violations). |
+| **SF1500 COMPACT v2** | **1080 GB** | **8m54s** | **2.02** | single-pass compact partition (19.22). Partition: 4m33s. Sort: 3m09s. n=2: 8m54s, 8m41s = ±13s. |
+| **SF1500 COMPACT v3** | **1080 GB** | **7m56s** | **2.27** | **single-pass compact + no-bucket-evict** (19.23): keeps 360 GB bucket cache hot between partition and sort → fread serves from RAM, per-round 38s vs 47s. Saves 33s on sort phase + 25s on eviction. **84% faster than 49m baseline. New best.** Validated at SF1500 (16/16 PASS). |
 
 ## CPU baselines (1 process, 192-core box)
 
