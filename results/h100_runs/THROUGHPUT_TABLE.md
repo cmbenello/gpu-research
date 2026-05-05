@@ -48,7 +48,8 @@ intermittently OOMs at SF300 when node 0's free memory is tight.
 |--------|---------|--------|-----------------|-------|
 | SF500  | 360 GB  | **7m36s** | 0.79 | partition (66 s warm) + 2 pairs (180+200 s) |
 | SF1000 | 720 GB  | **14m20s** | 0.84 | first ever globally sorted SF1000. Pre-partitioned sort phase only: **6m14s** (18.5c). 2-GPU one-per-node beats 4-GPU paired by avoiding contention. |
-| **SF500 COMPACT** | **360 GB** | **2m35s** | **2.32** | **compact pipeline at SF500** (19.24). Partition: 1m28s. Sort: 1m02s. **3× faster than 15.5.3's 7m36s. 16/16 PASS, bucket 0 verified at 1M pairs.** Confirms recipe scales linearly with data size. |
+| **SF500 COMPACT** | **360 GB** | **2m35s** | **2.32** | compact pipeline (19.24). Partition: 1m28s. Sort: 1m02s. |
+| **SF500 STREAM PRE-PIN** | **360 GB** | **1m59s** | **3.01** | **streaming compact + pre-pin at SF500** (19.31). Partition (in-RAM): 1m20s. Pre-pin: 14s. Sort: 26s. **At NVMe read peak (3.1 GB/s). 4× faster than 15.5.3's 7m36s; 24% faster than 19.24.** Validated 1M pairs PASS. |
 | **SF1500** | **1080 GB** | **31m07s** | **0.58** | **full records output**. K=16 partition + 4-GPU concurrent + posix_fadvise(DONTNEED) cache eviction (19.16, n=3 ±2s). **37% faster** than 19.1.3 baseline (49m15s). **Largest published TPC-H lineitem global sort with full payload.** |
 | **SF1500 PERM** | **1080 GB** | **22m31s** | **0.80** | **perm-only output (34 GB, 4-byte indices)**. PERM_ONLY=1 + K=16 4-GPU recipe (19.20). **27% faster** than full-records mode. **n=3: 22m31s / 22m45s / 22m52s, ±21s variance.** NVMe write halved by skipping the 1.08 TB sorted-records emit. Verified correct at SF50. **54% faster than 49m15s 19.1.3 baseline.** |
 | **SF1500 COMPACT v1** | **1080 GB** | **12m07s** | **1.49** | compact pipeline 40-byte buckets + 8-byte sorted offsets (19.21). Partition v1 (2-pass): 7m32s. Sort phase 3m03s. |
