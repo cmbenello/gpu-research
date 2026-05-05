@@ -92,14 +92,18 @@ static void sort_one_bucket(const SortJob& job) {
     uint64_t n = job.n_records;
     uint64_t bytes = n * COMPACT_REC_SIZE;
 
-    // Pin the bucket buffer for fast H2D
-    cudaHostRegister(job.h_records, bytes, cudaHostRegisterDefault);
+    // SKIP_PIN=1 skips cudaHostRegister; CUDA driver does internal staging.
+    // PCIe transfer is ~half speed (5-10 GB/s) but avoids the 1.2 GB/s pin overhead.
+    const char* skip_pin_env = getenv("SKIP_PIN");
+    bool skip_pin = skip_pin_env && atoi(skip_pin_env) > 0;
+
+    if (!skip_pin) cudaHostRegister(job.h_records, bytes, cudaHostRegisterDefault);
 
     // Upload to GPU
     uint8_t* d_records;
     CUDA_CHECK(cudaMalloc(&d_records, bytes));
     CUDA_CHECK(cudaMemcpy(d_records, job.h_records, bytes, cudaMemcpyHostToDevice));
-    cudaHostUnregister(job.h_records);
+    if (!skip_pin) cudaHostUnregister(job.h_records);
 
     // Allocate sort buffers
     uint32_t *d_perm_a, *d_perm_b;
