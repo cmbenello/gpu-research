@@ -1,0 +1,74 @@
+10:05:08 — n=5 GDS+integrated start
+==========================================
+Run 1 at 10:05:08
+==========================================
+vm.drop_caches = 3
+/mnt/data/lineitem_sf1500.bin (1080.0 GB): fadvise(DONTNEED) rc=0
+  bucket[4]: 1126796913 records (45.07 GB)
+  bucket[5]: 1147469899 records (45.90 GB)
+  bucket[6]: 1109950494 records (44.40 GB)
+  bucket[7]: 1144908315 records (45.80 GB)
+Multi-stream GDS partition: 296653 ms (3.64 GB/s effective)
+Sort phase: 64321 ms (2 rounds)
+Total wall: 372438 ms (2.90 GB/s end-to-end)
+CSV,gds_partition_multistream,records=9000021272,K=8,N_SLOTS=4,N_READERS=2,part_ms=296653,total_ms=372438,gb_per_s=2.90
+Run 1 wall: 373.119829457 s
+==========================================
+Run 2 at 10:12:16
+==========================================
+vm.drop_caches = 3
+/mnt/data/lineitem_sf1500.bin (1080.0 GB): fadvise(DONTNEED) rc=0
+  bucket[4]: 1126796913 records (45.07 GB)
+  bucket[5]: 1147469899 records (45.90 GB)
+  bucket[6]: 1109950494 records (44.40 GB)
+  bucket[7]: 1144908315 records (45.80 GB)
+Multi-stream GDS partition: 285505 ms (3.78 GB/s effective)
+Sort phase: 70391 ms (2 rounds)
+Total wall: 367479 ms (2.94 GB/s end-to-end)
+CSV,gds_partition_multistream,records=9000021272,K=8,N_SLOTS=4,N_READERS=2,part_ms=285505,total_ms=367479,gb_per_s=2.94
+Run 2 wall: 368.138247662 s
+==========================================
+Run 3 at 10:19:06
+==========================================
+vm.drop_caches = 3
+/mnt/data/lineitem_sf1500.bin (1080.0 GB): fadvise(DONTNEED) rc=0
+  bucket[4]: 1126796913 records (45.07 GB)
+  bucket[5]: 1147469899 records (45.90 GB)
+  bucket[6]: 1109950494 records (44.40 GB)
+  bucket[7]: 1144908315 records (45.80 GB)
+Multi-stream GDS partition: 292465 ms (3.69 GB/s effective)
+Sort phase: 65871 ms (2 rounds)
+Total wall: 370024 ms (2.92 GB/s end-to-end)
+CSV,gds_partition_multistream,records=9000021272,K=8,N_SLOTS=4,N_READERS=2,part_ms=292465,total_ms=370024,gb_per_s=2.92
+Run 3 wall: 370.708480411 s
+==========================================
+Run 4 at 10:25:59
+==========================================
+vm.drop_caches = 3
+/mnt/data/lineitem_sf1500.bin (1080.0 GB): fadvise(DONTNEED) rc=0
+  bucket[4]: 1126796913 records (45.07 GB)
+  bucket[5]: 1147469899 records (45.90 GB)
+  bucket[6]: 1109950494 records (44.40 GB)
+  bucket[7]: 1144908315 records (45.80 GB)
+Multi-stream GDS partition: 294989 ms (3.66 GB/s effective)
+Sort phase: 64890 ms (2 rounds)
+Total wall: 371427 ms (2.91 GB/s end-to-end)
+CSV,gds_partition_multistream,records=9000021272,K=8,N_SLOTS=4,N_READERS=2,part_ms=294989,total_ms=371427,gb_per_s=2.91
+Run 4 wall: 372.093873693 s
+==========================================
+Run 5 at 10:32:52
+==========================================
+vm.drop_caches = 3
+/mnt/data/lineitem_sf1500.bin (1080.0 GB): fadvise(DONTNEED) rc=0
+  bucket[4]: 1126796913 records (45.07 GB)
+  bucket[5]: 1147469899 records (45.90 GB)
+  bucket[6]: 1109950494 records (44.40 GB)
+  bucket[7]: 1144908315 records (45.80 GB)
+Multi-stream GDS partition: 286870 ms (3.76 GB/s effective)
+Sort phase: 66374 ms (2 rounds)
+Total wall: 364801 ms (2.96 GB/s end-to-end)
+CSV,gds_partition_multistream,records=9000021272,K=8,N_SLOTS=4,N_READERS=2,part_ms=286870,total_ms=364801,gb_per_s=2.96
+Run 5 wall: 365.505684930 s
+==========================================
+n=5 walls: 373.119829457 368.138247662 370.708480411 372.093873693 365.505684930
+10:39:40 — n=5 done
