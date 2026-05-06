@@ -353,3 +353,30 @@ Suitable target: SIGMOD/VLDB systems track, or workshop like DaMoN/IMDM.
 `/tmp/auto_push.sh` runs as PID 308842 (started May 03, ~50 commits queued).
 SSH agent forwarding flaky during this session — commits land locally but
 remote push is intermittent. All work is preserved in local git regardless.
+
+## RUN_SORT debugging (2026-05-06 morning)
+
+Test: integrated sort phase (RUN_SORT=1) at SF300 K=4 vs K=8.
+
+| Config | Result | Wall |
+|--------|--------|------|
+| SF300 K=4 (1 round, 4-GPU concurrent) | WORKS, PASS | 61.6s |
+| SF300 K=8 (2 rounds × 4-GPU) | HANGS round 2 (timeout 180s) | n/a |
+
+**Diagnosis**: round 1's 4 sort_threads (each cudaSetDevice on GPUs 0-3,
+allocate ~17 GB GPU memory, sort, free) complete fine. Round 2 launches
+4 NEW sort_threads on the same GPUs and hangs.
+
+Suspected cause: CUDA context state not fully cleaned between rounds
+when using std::thread to dispatch sort work. Each round's threads do
+cudaSetDevice + cudaMalloc, but the prior round's context may not be
+fully released.
+
+K=4 doesn't scale: at SF1500, K=4 → 90 GB buckets > 94 GB H100 HBM.
+sort_one_bucket would OOM.
+
+**Conclusion**: GDS integrated-sort path needs a different concurrency
+model (e.g., persistent worker threads pinned to each GPU, work-queue
+dispatch instead of thread-per-bucket). 1-2 days of additional engineering.
+
+For now: hugepages 5m51s remains the SF1500 champion.
