@@ -28,3 +28,5 @@ Master overnight start: Wed May  6 17:02:37 UTC 2026
 [18:56:28] p1_sf1500_run18: 325.643934966s — PASS
 [19:02:42] p1_sf1500_run19: 324.971880303s — PASS
 [19:09:02] p1_sf1500_run20: 330.683306219s — PASS
+ create mode 100644 results/h100_runs/master_overnight/p1_sf1500_run20.log
+ create mode 100644 results/h100_runs/master_overnight/phase5.log
