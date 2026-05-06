@@ -1,0 +1,24 @@
+05:09:19 — start
+/mnt/data/lineitem_sf1500.bin (1080.0 GB): fadvise(DONTNEED) rc=0
+              total        used        free      shared  buff/cache   available
+Mem:           1007         472         534           0           0         530
+HugePages_Total:   240000
+HugePages_Free:    240000
+Input: 9000021272 records (1080.00 GB)
+cmap: 26 varying bytes
+Ring buffer: 4 slots × 4.29 GB = 17.18 GB GPU memory
+GPU staging: 2 × 11.45 GB = 22.91 GB
+Total chunks: 252 (4.29 GB each)
+  bucket[0]: 1118925785 records (44.76 GB)
+  bucket[1]: 1105005448 records (44.20 GB)
+  bucket[2]: 1145168135 records (45.81 GB)
+  bucket[3]: 1101796283 records (44.07 GB)
+  bucket[4]: 1126796913 records (45.07 GB)
+  bucket[5]: 1147469899 records (45.90 GB)
+  bucket[6]: 1109950494 records (44.40 GB)
+  bucket[7]: 1144908315 records (45.80 GB)
+Multi-stream GDS partition: 245729 ms (4.40 GB/s effective)
+Total wall: 252192 ms (4.28 GB/s end-to-end)
+CSV,gds_partition_multistream,records=9000021272,K=8,N_SLOTS=4,N_READERS=2,part_ms=245729,total_ms=252192,gb_per_s=4.28
+Multi-stream GDS partition wall: 252.789999260 s
+05:13:34 — done
