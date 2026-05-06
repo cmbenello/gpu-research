@@ -229,19 +229,41 @@ int main(int argc, char** argv) {
     std::vector<uint8_t*> bucket_bufs(K, nullptr);
     std::vector<std::atomic<uint64_t>> bucket_counts(K);
     for (int b = 0; b < K; b++) bucket_counts[b].store(0);
+
+    // USE_HUGETLB=1 enables explicit 2MB hugepages (requires hugepage pool).
+    // Per 19.11: pin rate on hugepage memory is 5-10× faster than 4KB pages.
+    bool use_hugetlb = !getenv("NO_HUGETLB");
+    if (use_hugetlb) {
+        printf("Using MAP_HUGETLB (2MB pages) for bucket buffers\n");
+    }
+
+    // Round per-bucket size up to 2MB boundary for hugetlb alignment
+    uint64_t hugepage_sz = 2 * 1024 * 1024;
+    if (use_hugetlb) {
+        per_bucket_max_bytes = ((per_bucket_max_bytes + hugepage_sz - 1) / hugepage_sz) * hugepage_sz;
+    }
+
     for (int b = 0; b < K; b++) {
-        // Unpinned mmap; pin lazily before GPU sort. Saves ~3 min at SF1500.
+        int flags = MAP_PRIVATE|MAP_ANONYMOUS;
+        if (use_hugetlb) flags |= MAP_HUGETLB | (21 << MAP_HUGE_SHIFT);
         bucket_bufs[b] = (uint8_t*)mmap(nullptr, per_bucket_max_bytes,
-                                        PROT_READ|PROT_WRITE,
-                                        MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+                                        PROT_READ|PROT_WRITE, flags, -1, 0);
+        if (bucket_bufs[b] == MAP_FAILED && use_hugetlb) {
+            fprintf(stderr, "MAP_HUGETLB failed for bucket %d, falling back to regular mmap\n", b);
+            bucket_bufs[b] = (uint8_t*)mmap(nullptr, per_bucket_max_bytes,
+                                            PROT_READ|PROT_WRITE,
+                                            MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+            madvise(bucket_bufs[b], per_bucket_max_bytes, MADV_HUGEPAGE);
+            use_hugetlb = false;
+        }
         if (bucket_bufs[b] == MAP_FAILED) {
             fprintf(stderr, "mmap bucket %d (%.2f GB) failed\n", b, per_bucket_max_bytes/1e9);
             return 1;
         }
-        madvise(bucket_bufs[b], per_bucket_max_bytes, MADV_HUGEPAGE);
     }
     auto t_alloc1 = std::chrono::high_resolution_clock::now();
-    printf("Unpinned mmap alloc: %.0f ms (will pin lazily per bucket)\n",
+    printf("%s alloc: %.0f ms (will pin lazily per bucket)\n",
+           use_hugetlb ? "Hugetlb" : "Regular mmap",
            std::chrono::duration<double, std::milli>(t_alloc1 - t_alloc0).count());
 
     // ── Partition pass: classify + write to RAM bucket buffers ──
