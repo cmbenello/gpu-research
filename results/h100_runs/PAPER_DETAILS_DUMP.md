@@ -15,14 +15,23 @@ total), 1 TB DDR5, single 3.5 TB NVMe at /mnt/data.
 **SF1500 (1.08 TB, 9 billion records) globally sorted on a 4×H100 / 1 TB RAM /
 single-NVMe box.**
 
-| Cache state | Best | Mean | n | Variance | vs 49m15s baseline |
-|-------------|------|------|---|----------|---------------------|
-| Warm (input partly cached) | 5m51s | 6m06s | 3 | ±15s | 88% faster |
-| **Cold (drop_caches between runs)** | **6m34s** | **7m02s** | **10** | **±31s** | **86.7% / 85.7% faster** |
+| Config | Best | Mean | n | Variance | vs 49m15s baseline |
+|--------|------|------|---|----------|---------------------|
+| Hugepages stream pre-pin (cold) | 6m34s | 7m02s | 10 | ±31s | 85.7% mean |
+| **GDS+integrated-sort (cold)** | **6m05s** | **6m10s** | **5** | **±4s** | **87.4% mean** |
 
-**The COLD number is the paper-honest one.** All 10 cold runs PASS (1M pairs each).
-Hardware floor on this single-SSD box: 1.08 TB / 3.1 GB/s NVMe peak read = 5.8 min.
-Cold mean 7m02s = 1.21× of hardware floor.
+**The GDS+INTEGRATED config is the new champion.** It beats hugepages by 52
+sec mean AND has 7.7× tighter variance because cuFile reads bypass OS page
+cache entirely. Hardware floor on this single-SSD box: 1.08 TB / 3.1 GB/s
+NVMe peak read = 5.8 min. GDS mean 6m10s = **1.06× of hardware floor.**
+
+Recipe to reproduce 6m10s:
+```
+sudo sysctl vm.nr_hugepages=240000
+sudo sysctl vm.drop_caches=3   # for cold-cache start
+sudo modprobe nvidia_fs        # GDS kernel module
+RUN_SORT=1 ./gds_partition_multistream input.bin out_prefix 8
+```
 
 ## Hardware ceilings (measured)
 
