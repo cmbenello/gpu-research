@@ -119,6 +119,73 @@ static void sort_one_bucket(int gpu_id, uint8_t* h_records, uint64_t n,
     cudaFree(d_offsets); cudaFree(d_cub_temp);
 }
 
+// Vectorized classify+scatter kernel.
+// - 4 records per thread (better instruction-level parallelism)
+// - Splitters cached in shared memory (loaded once per block)
+// - 8-byte uint64 chunk comparisons instead of byte-by-byte memcmp
+extern __shared__ uint8_t s_splitters[];
+__global__ void gds_classify_scatter_v3(
+    const uint8_t* __restrict__ d_chunk,
+    uint64_t chunk_records, uint64_t chunk_global_offset,
+    const uint8_t* __restrict__ d_splitters,
+    int K, int n_cmap, const int* __restrict__ d_cmap,
+    uint8_t* d_bucket_buf, uint64_t bucket_capacity_records,
+    uint64_t* __restrict__ d_bucket_counts) {
+    // Cache (K-1) splitters in shared memory (462 B for K=8)
+    int splitter_bytes = (K - 1) * KEY_SIZE;
+    int tid = threadIdx.x;
+    int block_size = blockDim.x;
+    for (int j = tid; j < splitter_bytes; j += block_size) {
+        s_splitters[j] = d_splitters[j];
+    }
+    __syncthreads();
+
+    // Each thread handles 4 records
+    uint64_t base = ((uint64_t)blockIdx.x * blockDim.x + threadIdx.x) * 4;
+    #pragma unroll
+    for (int k = 0; k < 4; k++) {
+        uint64_t i = base + k;
+        if (i >= chunk_records) return;
+        const uint8_t* rec = d_chunk + i * RECORD_SIZE;
+        int b = K - 1;
+        for (int s = 0; s < K - 1; s++) {
+            const uint8_t* sp = s_splitters + (uint64_t)s * KEY_SIZE;
+            // Compare 8 bytes at a time. KEY_SIZE=66 → 8 full uint64 + 2 bytes.
+            int cmp = 0;
+            #pragma unroll
+            for (int j = 0; j < 8; j++) {  // 8 × 8 = 64 bytes
+                uint64_t r, p;
+                memcpy(&r, rec + j*8, 8);
+                memcpy(&p, sp + j*8, 8);
+                if (r != p) {
+                    // Big-endian (lex) comparison via bswap so uint64 cmp = byte order cmp.
+                    // Use __byte_perm on each half — or just byte-by-byte for the differing word.
+                    #pragma unroll
+                    for (int b2 = 0; b2 < 8; b2++) {
+                        int diff = (int)rec[j*8 + b2] - (int)sp[j*8 + b2];
+                        if (diff != 0) { cmp = diff; break; }
+                    }
+                    break;
+                }
+            }
+            if (cmp == 0) {
+                // Compare last 2 bytes
+                int diff = (int)rec[64] - (int)sp[64];
+                if (diff == 0) diff = (int)rec[65] - (int)sp[65];
+                cmp = diff;
+            }
+            if (cmp <= 0) { b = s; break; }
+        }
+        uint64_t pos = atomicAdd((unsigned long long*)&d_bucket_counts[b], 1ULL);
+        if (pos >= bucket_capacity_records) continue;
+        uint8_t* dst = d_bucket_buf + ((uint64_t)b * bucket_capacity_records + pos) * COMPACT_REC_SIZE;
+        for (int j = 0; j < n_cmap; j++) dst[j] = rec[d_cmap[j]];
+        for (int j = n_cmap; j < COMPACT_KEY_SIZE; j++) dst[j] = 0;
+        *(uint64_t*)(dst + COMPACT_KEY_SIZE) = chunk_global_offset + i;
+    }
+}
+
+// Original kernel (kept for fallback / comparison)
 __global__ void gds_classify_scatter_v2(
     const uint8_t* __restrict__ d_chunk,
     uint64_t chunk_records, uint64_t chunk_global_offset,
@@ -370,10 +437,11 @@ int main(int argc, char** argv) {
         // Reset GPU bucket counters for this stage
         CUDA_CHECK(cudaMemsetAsync(d_bucket_counts[stage_idx], 0, K * sizeof(uint64_t), s_classify));
 
-        // Classify on s_classify
+        // Classify on s_classify (v3 kernel: 4 records/thread + shared mem splitters)
         int threads = 256;
-        int blocks = (int)((n_recs + threads - 1) / threads);
-        gds_classify_scatter_v2<<<blocks, threads, 0, s_classify>>>(
+        int blocks = (int)((n_recs + (4 * threads) - 1) / (4 * threads));
+        size_t shmem_bytes = (K - 1) * KEY_SIZE;
+        gds_classify_scatter_v3<<<blocks, threads, shmem_bytes, s_classify>>>(
             slots[slot_idx].d_buf, n_recs, global_off,
             d_splitters, K, n_cmap, d_cmap,
             d_bucket_buf[stage_idx], stage_records, d_bucket_counts[stage_idx]);
