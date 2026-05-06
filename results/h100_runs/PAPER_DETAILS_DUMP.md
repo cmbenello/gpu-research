@@ -12,8 +12,17 @@ total), 1 TB DDR5, single 3.5 TB NVMe at /mnt/data.
 
 ## Headline result
 
-**SF1500 (1.08 TB, 9 billion records) globally sorted in 5m51s, 88% faster than
-49m15s baseline. End-to-end 3.08 GB/s on a single SSD.**
+**SF1500 (1.08 TB, 9 billion records) globally sorted on a 4×H100 / 1 TB RAM /
+single-NVMe box.**
+
+| Cache state | Best | Mean | n | Variance | vs 49m15s baseline |
+|-------------|------|------|---|----------|---------------------|
+| Warm (input partly cached) | 5m51s | 6m06s | 3 | ±15s | 88% faster |
+| **Cold (drop_caches between runs)** | **6m34s** | **7m02s** | **10** | **±31s** | **86.7% / 85.7% faster** |
+
+**The COLD number is the paper-honest one.** All 10 cold runs PASS (1M pairs each).
+Hardware floor on this single-SSD box: 1.08 TB / 3.1 GB/s NVMe peak read = 5.8 min.
+Cold mean 7m02s = 1.21× of hardware floor.
 
 ## Hardware ceilings (measured)
 
