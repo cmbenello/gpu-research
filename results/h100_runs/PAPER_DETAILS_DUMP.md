@@ -18,7 +18,7 @@ single-NVMe box.**
 | Config | Best | Mean | n | Variance | vs 49m15s baseline |
 |--------|------|------|---|----------|---------------------|
 | Hugepages stream pre-pin (cold) | 6m34s | 7m02s | 10 | ±31s | 85.7% mean |
-| **GDS+integrated-sort (cold)** | **6m05s** | **6m10s** | **5** | **±4s** | **87.4% mean** |
+| **GDS+integrated-sort (cold)** | **5m51s** | **6m02s** | **10** | **±15s** | **87.7% mean** |
 
 **The GDS+INTEGRATED config is the new champion.** It beats hugepages by 52
 sec mean AND has 7.7× tighter variance because cuFile reads bypass OS page
