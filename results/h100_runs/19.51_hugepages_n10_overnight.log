@@ -1,0 +1,164 @@
+08:27:40 — n=10 hugepages start
+==========================================
+Run 1 at 08:27:40
+==========================================
+vm.drop_caches = 3
+/mnt/data/lineitem_sf1500.bin (1080.0 GB): fadvise(DONTNEED) rc=0
+              total        used        free      shared  buff/cache   available
+Mem:           1007         472         534           0           0         530
+HugePages_Total:   240000
+HugePages_Free:    240000
+  round 2 done
+Sort phase: 44866 ms (2 rounds)
+
+Total wall: 408321 ms (2.64 GB/s end-to-end)
+CSV,stream_partition_sort,records=9000021272,K=8,n_cmap=28,partition_ms=337663,sort_ms=44866,total_ms=408321
+Run 1 wall: 418.055234465 s
+PASS
+==========================================
+Run 2 at 08:35:23
+==========================================
+vm.drop_caches = 3
+/mnt/data/lineitem_sf1500.bin (1080.0 GB): fadvise(DONTNEED) rc=0
+              total        used        free      shared  buff/cache   available
+Mem:           1007         472         534           0           0         530
+HugePages_Total:   240000
+HugePages_Free:    240000
+  round 2 done
+Sort phase: 46157 ms (2 rounds)
+
+Total wall: 410604 ms (2.63 GB/s end-to-end)
+CSV,stream_partition_sort,records=9000021272,K=8,n_cmap=28,partition_ms=338777,sort_ms=46157,total_ms=410604
+Run 2 wall: 420.213338763 s
+PASS
+==========================================
+Run 3 at 08:42:59
+==========================================
+vm.drop_caches = 3
+/mnt/data/lineitem_sf1500.bin (1080.0 GB): fadvise(DONTNEED) rc=0
+              total        used        free      shared  buff/cache   available
+Mem:           1007         472         534           0           0         530
+HugePages_Total:   240000
+HugePages_Free:    240000
+  round 2 done
+Sort phase: 43842 ms (2 rounds)
+
+Total wall: 407782 ms (2.65 GB/s end-to-end)
+CSV,stream_partition_sort,records=9000021272,K=8,n_cmap=28,partition_ms=338227,sort_ms=43842,total_ms=407782
+Run 3 wall: 417.480976977 s
+PASS
+==========================================
+Run 4 at 08:50:30
+==========================================
+vm.drop_caches = 3
+/mnt/data/lineitem_sf1500.bin (1080.0 GB): fadvise(DONTNEED) rc=0
+              total        used        free      shared  buff/cache   available
+Mem:           1007         472         534           0           0         530
+HugePages_Total:   240000
+HugePages_Free:    240000
+  round 2 done
+Sort phase: 44222 ms (2 rounds)
+
+Total wall: 409353 ms (2.64 GB/s end-to-end)
+CSV,stream_partition_sort,records=9000021272,K=8,n_cmap=28,partition_ms=339168,sort_ms=44222,total_ms=409353
+Run 4 wall: 419.250123801 s
+PASS
+==========================================
+Run 5 at 08:58:04
+==========================================
+vm.drop_caches = 3
+/mnt/data/lineitem_sf1500.bin (1080.0 GB): fadvise(DONTNEED) rc=0
+              total        used        free      shared  buff/cache   available
+Mem:           1007         472         534           0           0         530
+HugePages_Total:   240000
+HugePages_Free:    240000
+  round 2 done
+Sort phase: 44440 ms (2 rounds)
+
+Total wall: 408844 ms (2.64 GB/s end-to-end)
+CSV,stream_partition_sort,records=9000021272,K=8,n_cmap=28,partition_ms=338513,sort_ms=44440,total_ms=408844
+Run 5 wall: 418.660824991 s
+PASS
+==========================================
+Run 6 at 09:05:37
+==========================================
+vm.drop_caches = 3
+/mnt/data/lineitem_sf1500.bin (1080.0 GB): fadvise(DONTNEED) rc=0
+              total        used        free      shared  buff/cache   available
+Mem:           1007         472         534           0           0         530
+HugePages_Total:   240000
+HugePages_Free:    240000
+  round 2 done
+Sort phase: 45279 ms (2 rounds)
+
+Total wall: 384499 ms (2.81 GB/s end-to-end)
+CSV,stream_partition_sort,records=9000021272,K=8,n_cmap=28,partition_ms=313535,sort_ms=45279,total_ms=384499
+Run 6 wall: 394.027910858 s
+PASS
+==========================================
+Run 7 at 09:12:47
+==========================================
+vm.drop_caches = 3
+/mnt/data/lineitem_sf1500.bin (1080.0 GB): fadvise(DONTNEED) rc=0
+              total        used        free      shared  buff/cache   available
+Mem:           1007         472         534           0           0         530
+HugePages_Total:   240000
+HugePages_Free:    240000
+  round 2 done
+Sort phase: 46628 ms (2 rounds)
+
+Total wall: 445904 ms (2.42 GB/s end-to-end)
+CSV,stream_partition_sort,records=9000021272,K=8,n_cmap=28,partition_ms=338296,sort_ms=46628,total_ms=445904
+Run 7 wall: 455.541705401 s
+PASS
+==========================================
+Run 8 at 09:20:52
+==========================================
+vm.drop_caches = 3
+/mnt/data/lineitem_sf1500.bin (1080.0 GB): fadvise(DONTNEED) rc=0
+              total        used        free      shared  buff/cache   available
+Mem:           1007         472         534           0           0         530
+HugePages_Total:   240000
+HugePages_Free:    240000
+  round 2 done
+Sort phase: 44382 ms (2 rounds)
+
+Total wall: 409765 ms (2.64 GB/s end-to-end)
+CSV,stream_partition_sort,records=9000021272,K=8,n_cmap=28,partition_ms=339431,sort_ms=44382,total_ms=409765
+Run 8 wall: 419.681991337 s
+PASS
+==========================================
+Run 9 at 09:28:27
+==========================================
+vm.drop_caches = 3
+/mnt/data/lineitem_sf1500.bin (1080.0 GB): fadvise(DONTNEED) rc=0
+              total        used        free      shared  buff/cache   available
+Mem:           1007         472         533           0           0         530
+HugePages_Total:   240000
+HugePages_Free:    240000
+  round 2 done
+Sort phase: 51972 ms (2 rounds)
+
+Total wall: 434505 ms (2.49 GB/s end-to-end)
+CSV,stream_partition_sort,records=9000021272,K=8,n_cmap=28,partition_ms=321315,sort_ms=51972,total_ms=434505
+Run 9 wall: 443.900864461 s
+PASS
+==========================================
+Run 10 at 09:36:20
+==========================================
+vm.drop_caches = 3
+/mnt/data/lineitem_sf1500.bin (1080.0 GB): fadvise(DONTNEED) rc=0
+              total        used        free      shared  buff/cache   available
+Mem:           1007         472         534           0           0         530
+HugePages_Total:   240000
+HugePages_Free:    240000
+  round 2 done
+Sort phase: 44419 ms (2 rounds)
+
+Total wall: 407797 ms (2.65 GB/s end-to-end)
+CSV,stream_partition_sort,records=9000021272,K=8,n_cmap=28,partition_ms=337648,sort_ms=44419,total_ms=407797
+Run 10 wall: 417.893189848 s
+PASS
+==========================================
+n=10 walls: 418.055234465 420.213338763 417.480976977 419.250123801 418.660824991 394.027910858 455.541705401 419.681991337 443.900864461 417.893189848
+09:43:53 — n=10 hugepages done
