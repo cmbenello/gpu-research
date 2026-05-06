@@ -471,9 +471,15 @@ int main(int argc, char** argv) {
     } else {
         // Run sort phase in-process: 4-GPU concurrent on bucket buffers in host RAM.
         // No bucket file write — saves ~3 min on SF1500.
+        // Sync each GPU between rounds so round N+1's threads start on a clean GPU.
         auto t_sort0 = std::chrono::high_resolution_clock::now();
         int rounds = (K + 3) / 4;
         for (int round = 0; round < rounds; round++) {
+            // Sync all GPUs from any previous work
+            for (int g = 0; g < 4; g++) {
+                cudaSetDevice(g);
+                cudaDeviceSynchronize();
+            }
             std::vector<std::thread> sort_threads;
             for (int slot = 0; slot < 4 && (round * 4 + slot) < K; slot++) {
                 int b = round * 4 + slot;
