@@ -31,6 +31,7 @@
 #include <unistd.h>
 #include <cuda_runtime.h>
 #include <cufile.h>
+#include <cub/cub.cuh>
 
 static constexpr int KEY_SIZE = 66;
 static constexpr int RECORD_SIZE = 120;
@@ -41,6 +42,82 @@ static constexpr int N_READERS = 2;     // reader threads
 
 #define CUDA_CHECK(x) do { cudaError_t e = (x); if (e != cudaSuccess) { \
     fprintf(stderr, "CUDA %s:%d: %s\n", __FILE__, __LINE__, cudaGetErrorString(e)); exit(1); } } while(0)
+
+__global__ void extract_chunk_kernel(const uint8_t* records, const uint32_t* perm,
+                                       uint64_t* out, uint64_t n, int byte_off, int chunk_bytes) {
+    uint64_t i = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    uint32_t idx = perm[i];
+    const uint8_t* k = records + (uint64_t)idx * COMPACT_REC_SIZE + byte_off;
+    uint64_t v = 0;
+    for (int b = 0; b < chunk_bytes; b++) v = (v << 8) | k[b];
+    v <<= (8 - chunk_bytes) * 8;
+    out[i] = v;
+}
+
+__global__ void init_identity_kernel(uint32_t* perm, uint64_t n) {
+    uint64_t i = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) perm[i] = (uint32_t)i;
+}
+
+__global__ void gather_offsets_kernel(const uint8_t* records, const uint32_t* perm,
+                                       uint64_t* out_offsets, uint64_t n) {
+    uint64_t i = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    uint32_t idx = perm[i];
+    out_offsets[i] = *(const uint64_t*)(records + (uint64_t)idx * COMPACT_REC_SIZE + COMPACT_KEY_SIZE);
+}
+
+// Sort one bucket on a given GPU. Pin host bucket buffer, upload, sort with
+// CUB radix (4 LSD passes on 32-byte keys), gather offsets, write to file.
+static void sort_one_bucket(int gpu_id, uint8_t* h_records, uint64_t n,
+                             const char* output_path) {
+    cudaSetDevice(gpu_id);
+    uint64_t bytes = n * COMPACT_REC_SIZE;
+    cudaHostRegister(h_records, bytes, cudaHostRegisterDefault);
+    uint8_t* d_records;
+    cudaMalloc(&d_records, bytes);
+    cudaMemcpy(d_records, h_records, bytes, cudaMemcpyHostToDevice);
+    cudaHostUnregister(h_records);
+
+    uint32_t *d_perm_a, *d_perm_b;
+    cudaMalloc(&d_perm_a, n * sizeof(uint32_t));
+    cudaMalloc(&d_perm_b, n * sizeof(uint32_t));
+    init_identity_kernel<<<(n+255)/256, 256>>>(d_perm_a, n);
+
+    uint64_t *d_keys_a, *d_keys_b;
+    cudaMalloc(&d_keys_a, n * sizeof(uint64_t));
+    cudaMalloc(&d_keys_b, n * sizeof(uint64_t));
+
+    size_t cub_temp_bytes = 0;
+    cub::DoubleBuffer<uint64_t> kb(d_keys_a, d_keys_b);
+    cub::DoubleBuffer<uint32_t> vb(d_perm_a, d_perm_b);
+    cub::DeviceRadixSort::SortPairs(nullptr, cub_temp_bytes, kb, vb, (int)n, 0, 64);
+    void* d_cub_temp;
+    cudaMalloc(&d_cub_temp, cub_temp_bytes);
+
+    for (int chunk = 3; chunk >= 0; chunk--) {
+        int byte_off = chunk * 8;
+        extract_chunk_kernel<<<(n+255)/256, 256>>>(d_records, vb.Current(), kb.Current(), n, byte_off, 8);
+        cub::DeviceRadixSort::SortPairs(d_cub_temp, cub_temp_bytes, kb, vb, (int)n, 0, 64);
+    }
+
+    uint64_t* d_offsets;
+    cudaMalloc(&d_offsets, n * sizeof(uint64_t));
+    gather_offsets_kernel<<<(n+255)/256, 256>>>(d_records, vb.Current(), d_offsets, n);
+    cudaDeviceSynchronize();
+
+    uint64_t* h_offsets = (uint64_t*)malloc(n * sizeof(uint64_t));
+    cudaMemcpy(h_offsets, d_offsets, n * sizeof(uint64_t), cudaMemcpyDeviceToHost);
+    FILE* fp = fopen(output_path, "wb");
+    if (fp) { fwrite(h_offsets, sizeof(uint64_t), n, fp); fclose(fp); }
+    free(h_offsets);
+
+    cudaFree(d_records);
+    cudaFree(d_perm_a); cudaFree(d_perm_b);
+    cudaFree(d_keys_a); cudaFree(d_keys_b);
+    cudaFree(d_offsets); cudaFree(d_cub_temp);
+}
 
 __global__ void gds_classify_scatter_v2(
     const uint8_t* __restrict__ d_chunk,
@@ -257,9 +334,12 @@ int main(int argc, char** argv) {
     }
 
     // Main thread: process slots in order of chunk_id
+    // Two separate events, one per stage_idx — so iter N waits for iter N-2's D2H
+    // (not just N-1's). Bug fix: previously single event caused stage[0] reuse
+    // before its D2H completed when iter 2 came around.
     uint64_t next_chunk_to_process = 0;
     int stage_idx = 0;
-    cudaEvent_t prev_d2h_done = nullptr;
+    cudaEvent_t stage_d2h_done[2] = {nullptr, nullptr};
     while (next_chunk_to_process < total_chunks) {
         // Find a FULL slot with chunk_id == next_chunk_to_process
         int slot_idx = -1;
@@ -279,10 +359,12 @@ int main(int argc, char** argv) {
         uint64_t n_recs = slots[slot_idx].bytes_filled / RECORD_SIZE;
         uint64_t global_off = slots[slot_idx].global_offset_records;
 
-        // Wait for previous D2H to finish (so staging buf [stage_idx] is free)
-        if (prev_d2h_done != nullptr) {
-            cudaEventSynchronize(prev_d2h_done);
-            cudaEventDestroy(prev_d2h_done);
+        // Wait for prior D2H using THIS stage_idx's buffer to finish.
+        // (Iter N uses stage[stage_idx], which was last used by iter N-2.)
+        if (stage_d2h_done[stage_idx] != nullptr) {
+            cudaEventSynchronize(stage_d2h_done[stage_idx]);
+            cudaEventDestroy(stage_d2h_done[stage_idx]);
+            stage_d2h_done[stage_idx] = nullptr;
         }
         // Reset GPU bucket counters for this stage
         CUDA_CHECK(cudaMemsetAsync(d_bucket_counts[stage_idx], 0, K * sizeof(uint64_t), s_classify));
@@ -309,9 +391,9 @@ int main(int argc, char** argv) {
                                        bytes, cudaMemcpyDeviceToHost, s_d2h));
             host_bucket_offset[b] += bytes;
         }
-        // Record event for next iter to wait on
-        cudaEventCreate(&prev_d2h_done);
-        cudaEventRecord(prev_d2h_done, s_d2h);
+        // Record event for the next iter that uses this stage_idx to wait on.
+        cudaEventCreate(&stage_d2h_done[stage_idx]);
+        cudaEventRecord(stage_d2h_done[stage_idx], s_d2h);
 
         // Mark slot EMPTY (slot d_buf is no longer needed for this chunk)
         {
@@ -324,8 +406,13 @@ int main(int argc, char** argv) {
         stage_idx = 1 - stage_idx;  // alternate staging buffer
     }
 
-    // Final wait
-    if (prev_d2h_done) cudaEventSynchronize(prev_d2h_done);
+    // Final wait — both stage events must complete
+    for (int i = 0; i < 2; i++) {
+        if (stage_d2h_done[i]) {
+            cudaEventSynchronize(stage_d2h_done[i]);
+            cudaEventDestroy(stage_d2h_done[i]);
+        }
+    }
     all_done.store(true);
     for (auto& t : readers) t.join();
 
@@ -359,6 +446,52 @@ int main(int argc, char** argv) {
         close(reader_fds[r]);
     }
     cuFileDriverClose();
+
+    // SKIP_SORT=1 to skip the in-process sort phase (writes bucket files instead).
+    const char* out_prefix = argv[2];
+    bool skip_sort = getenv("SKIP_SORT") && atoi(getenv("SKIP_SORT")) > 0;
+
+    if (skip_sort) {
+        // Write bucket files for downstream sort tool
+        auto t_write0 = std::chrono::high_resolution_clock::now();
+        for (int b = 0; b < K; b++) {
+            char path[512];
+            snprintf(path, sizeof(path), "%s.bucket_%d.bin", out_prefix, b);
+            FILE* fp = fopen(path, "wb");
+            if (fp) {
+                fwrite(bucket_bufs[b], 1, host_bucket_offset[b], fp);
+                fclose(fp);
+            }
+        }
+        auto t_write1 = std::chrono::high_resolution_clock::now();
+        printf("Bucket files written in %.0f ms\n",
+               std::chrono::duration<double, std::milli>(t_write1 - t_write0).count());
+    } else {
+        // Run sort phase in-process: 4-GPU concurrent on bucket buffers in host RAM.
+        // No bucket file write — saves ~3 min on SF1500.
+        auto t_sort0 = std::chrono::high_resolution_clock::now();
+        int rounds = (K + 3) / 4;
+        for (int round = 0; round < rounds; round++) {
+            std::vector<std::thread> sort_threads;
+            for (int slot = 0; slot < 4 && (round * 4 + slot) < K; slot++) {
+                int b = round * 4 + slot;
+                int gpu = slot;
+                uint64_t n_recs = host_bucket_offset[b] / COMPACT_REC_SIZE;
+                if (n_recs == 0) continue;
+                char path[512];
+                snprintf(path, sizeof(path), "%s.sorted_%d.bin", out_prefix, b);
+                std::string spath = path;
+                uint8_t* hbuf = bucket_bufs[b];
+                sort_threads.emplace_back([gpu, hbuf, n_recs, spath]() {
+                    sort_one_bucket(gpu, hbuf, n_recs, spath.c_str());
+                });
+            }
+            for (auto& th : sort_threads) th.join();
+        }
+        auto t_sort1 = std::chrono::high_resolution_clock::now();
+        printf("Sort phase: %.0f ms (%d rounds)\n",
+               std::chrono::duration<double, std::milli>(t_sort1 - t_sort0).count(), rounds);
+    }
 
     auto t_end = std::chrono::high_resolution_clock::now();
     double total_ms = std::chrono::duration<double, std::milli>(t_end - t0).count();
