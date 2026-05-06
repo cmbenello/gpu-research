@@ -1,0 +1,53 @@
+14:01:29 — start
+/mnt/data/lineitem_sf1500.bin (1080.0 GB): fadvise(DONTNEED) rc=0
+              total        used        free      shared  buff/cache   available
+Mem:           1007           3         629           0         374         997
+Input: /mnt/data/lineitem_sf1500.bin, 9000021272 records (1080.00 GB)
+cmap: 28 bytes in 6820 ms
+Allocating 16 × 24.75 GB pinned bucket buffers = 396.00 GB total
+Unpinned mmap alloc: 0 ms (will pin lazily per bucket)
+  bucket[0]: 552476095 records (22.10 GB)
+  bucket[1]: 566449690 records (22.66 GB)
+  bucket[2]: 543612294 records (21.74 GB)
+  bucket[3]: 561393154 records (22.46 GB)
+  bucket[4]: 574158467 records (22.97 GB)
+  bucket[5]: 571009668 records (22.84 GB)
+  bucket[6]: 570716848 records (22.83 GB)
+  bucket[7]: 531079435 records (21.24 GB)
+  bucket[8]: 555772930 records (22.23 GB)
+  bucket[9]: 571023983 records (22.84 GB)
+  bucket[10]: 574573498 records (22.98 GB)
+  bucket[11]: 572896401 records (22.92 GB)
+  bucket[12]: 559447325 records (22.38 GB)
+  bucket[13]: 550503169 records (22.02 GB)
+  bucket[14]: 574937581 records (23.00 GB)
+  bucket[15]: 569970734 records (22.80 GB)
+Partition (in-RAM): 287999 ms (1080.00 GB read, 360.00 GB partitioned)
+  round 1 done
+  round 2 done
+  round 3 done
+  round 4 done
+Sort phase: 131135 ms (4 rounds)
+
+Total wall: 436396 ms (2.47 GB/s end-to-end)
+CSV,stream_partition_sort,records=9000021272,K=16,n_cmap=28,partition_ms=287999,sort_ms=131135,total_ms=436396
+14:08:48 — done
+-rw-rw-r-- 1 cc cc 4419808760 May  5 14:06 /mnt/data/19.25_sf1500/sf1500.sorted_0.bin
+-rw-rw-r-- 1 cc cc 4531597520 May  5 14:06 /mnt/data/19.25_sf1500/sf1500.sorted_1.bin
+-rw-rw-r-- 1 cc cc 4596587984 May  5 14:08 /mnt/data/19.25_sf1500/sf1500.sorted_10.bin
+-rw-rw-r-- 1 cc cc 4583171208 May  5 14:08 /mnt/data/19.25_sf1500/sf1500.sorted_11.bin
+-rw-rw-r-- 1 cc cc 4475578600 May  5 14:08 /mnt/data/19.25_sf1500/sf1500.sorted_12.bin
+-rw-rw-r-- 1 cc cc 4404025352 May  5 14:08 /mnt/data/19.25_sf1500/sf1500.sorted_13.bin
+-rw-rw-r-- 1 cc cc 4599500648 May  5 14:08 /mnt/data/19.25_sf1500/sf1500.sorted_14.bin
+-rw-rw-r-- 1 cc cc 4559765872 May  5 14:08 /mnt/data/19.25_sf1500/sf1500.sorted_15.bin
+-rw-rw-r-- 1 cc cc 4348898352 May  5 14:06 /mnt/data/19.25_sf1500/sf1500.sorted_2.bin
+-rw-rw-r-- 1 cc cc 4491145232 May  5 14:06 /mnt/data/19.25_sf1500/sf1500.sorted_3.bin
+-rw-rw-r-- 1 cc cc 4593267736 May  5 14:07 /mnt/data/19.25_sf1500/sf1500.sorted_4.bin
+-rw-rw-r-- 1 cc cc 4568077344 May  5 14:07 /mnt/data/19.25_sf1500/sf1500.sorted_5.bin
+-rw-rw-r-- 1 cc cc 4565734784 May  5 14:07 /mnt/data/19.25_sf1500/sf1500.sorted_6.bin
+-rw-rw-r-- 1 cc cc 4248635480 May  5 14:07 /mnt/data/19.25_sf1500/sf1500.sorted_7.bin
+-rw-rw-r-- 1 cc cc 4446183440 May  5 14:08 /mnt/data/19.25_sf1500/sf1500.sorted_8.bin
+-rw-rw-r-- 1 cc cc 4568191864 May  5 14:08 /mnt/data/19.25_sf1500/sf1500.sorted_9.bin
+Checked 999999 adjacent pairs, 0 violations
+PASS
+14:10:02 — cleaned

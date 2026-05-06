@@ -1,0 +1,55 @@
+01:06:21 — start
+==========================================
+Run 1
+==========================================
+/mnt/data/lineitem_sf1500.bin (1080.0 GB): fadvise(DONTNEED) rc=0
+              total        used        free      shared  buff/cache   available
+Mem:           1007           3         115           0         888         997
+Pre-pin (8 buckets concurrent): 60140 ms
+Sort phase: 59305 ms (2 rounds)
+Total wall: 497505 ms (2.17 GB/s end-to-end)
+Run 1 wrapper wall: 535.896514282 s
+PASS
+==========================================
+Run 2
+==========================================
+/mnt/data/lineitem_sf1500.bin (1080.0 GB): fadvise(DONTNEED) rc=0
+              total        used        free      shared  buff/cache   available
+Mem:           1007           3         537           0         466         997
+Pre-pin (8 buckets concurrent): 5787 ms
+Sort phase: 205025 ms (2 rounds)
+Total wall: 592340 ms (1.82 GB/s end-to-end)
+Run 2 wrapper wall: 592.903630801 s
+==========================================
+Run 3
+==========================================
+/mnt/data/lineitem_sf1500.bin (1080.0 GB): fadvise(DONTNEED) rc=0
+              total        used        free      shared  buff/cache   available
+Mem:           1007           3         570           0         433         997
+Pre-pin (8 buckets concurrent): 40202 ms
+Sort phase: 58248 ms (2 rounds)
+Total wall: 463533 ms (2.33 GB/s end-to-end)
+Run 3 wrapper wall: 492.801275695 s
+==========================================
+Run 4
+==========================================
+/mnt/data/lineitem_sf1500.bin (1080.0 GB): fadvise(DONTNEED) rc=0
+              total        used        free      shared  buff/cache   available
+Mem:           1007           3         645           0         357         998
+Pre-pin (8 buckets concurrent): 43582 ms
+Sort phase: 55357 ms (2 rounds)
+Total wall: 465907 ms (2.32 GB/s end-to-end)
+Run 4 wrapper wall: 498.154541638 s
+==========================================
+Run 5
+==========================================
+/mnt/data/lineitem_sf1500.bin (1080.0 GB): fadvise(DONTNEED) rc=0
+              total        used        free      shared  buff/cache   available
+Mem:           1007          66         940           0           0         936
+Pre-pin (8 buckets concurrent): 77169 ms
+Sort phase: 95763 ms (2 rounds)
+Total wall: 531334 ms (2.03 GB/s end-to-end)
+Run 5 wrapper wall: 567.160496170 s
+==========================================
+n=5 walls: 535.896514282 592.903630801 492.801275695 498.154541638 567.160496170
+01:53:08 — done

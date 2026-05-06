@@ -1,0 +1,18 @@
+[19:30:39] SF1000: need 720GB
+[19:30:39]   disk: 1691GB free of 3519GB (cap 2815GB)
+[19:30:39] SF1000: starting gen via h100/gen_tpch_fast.py...
+     60.0% (3,600,458,312/5,999,989,709, rg 19663/32767)
+     70.0% (4,200,499,763/5,999,989,709, rg 22940/32767)
+     80.0% (4,800,511,631/5,999,989,709, rg 26217/32767)
+     90.0% (5,400,564,870/5,999,989,709, rg 29494/32767)
+  Done: 5,999,989,709 records, 720.00 GB, 3599.7s (0.20 GB/s encode rate)
+[20:35:06] SF1000: done in 3867s (186 MB/s effective)
+[20:35:06] All requested scales attempted.
+[20:35:06] Files in /mnt/data:
+-rw-rw-r-- 1 cc cc  6.8G May  2 19:12 /mnt/data/lineitem_sf10.bin
+-rw-rw-r-- 1 cc cc   68G May  2 19:49 /mnt/data/lineitem_sf100.bin
+-rw-rw-r-- 1 cc cc  671G May  5 20:34 /mnt/data/lineitem_sf1000.bin
+-rw-rw-r-- 1 cc cc 1006G May  3 01:01 /mnt/data/lineitem_sf1500.bin
+-rw-rw-r-- 1 cc cc  202G May  2 20:27 /mnt/data/lineitem_sf300.bin
+-rw-rw-r-- 1 cc cc   34G May  2 19:32 /mnt/data/lineitem_sf50.bin
+-rw-rw-r-- 1 cc cc  336G May  2 21:49 /mnt/data/lineitem_sf500.bin

@@ -1,0 +1,9 @@
+Input: 550503169 records (22.02 GB compact)
+Load: 27129 ms (0.81 GB/s)
+H2D: 401 ms (54.87 GB/s)
+CUB temp: 0.05 GB
+Sort: 320 ms (4 LSD passes)
+Gather + D2H: 1434 ms
+Write: 3924 ms (4.40 GB written)
+Total: 33208 ms
+CSV,sort_compact_bucket,records=550503169,total_ms=33208,load_ms=27129,h2d_ms=401,sort_ms=320,gather_ms=1434,write_ms=3924

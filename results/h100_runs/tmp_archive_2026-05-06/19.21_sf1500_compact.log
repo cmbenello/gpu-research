@@ -1,0 +1,156 @@
+05:45:43 — start
+=== Step 1: COMPACT partition K=16 (40-byte records) ===
+Input: /mnt/data/lineitem_sf1500.bin, 9000021272 records (1080.00 GB)
+Compact map: 28 varying bytes detected in 6724 ms
+  cmap = 0,1,4,5,8,9,12,13,19,20,21,29,37,44,45,49,50,51,52,53,54,55,56,57,59,60,61,65
+Sample + sort + splitters: 514 ms
+Pass 1 (count): 184502 ms
+  bucket[0]: 552476095 records (22.10 GB compact)
+  bucket[1]: 566449690 records (22.66 GB compact)
+  bucket[2]: 543612294 records (21.74 GB compact)
+  bucket[3]: 561393154 records (22.46 GB compact)
+  bucket[4]: 574158467 records (22.97 GB compact)
+  bucket[5]: 571009668 records (22.84 GB compact)
+  bucket[6]: 570716848 records (22.83 GB compact)
+  bucket[7]: 531079435 records (21.24 GB compact)
+  bucket[8]: 555772930 records (22.23 GB compact)
+  bucket[9]: 571023983 records (22.84 GB compact)
+  bucket[10]: 574573498 records (22.98 GB compact)
+  bucket[11]: 572896401 records (22.92 GB compact)
+  bucket[12]: 559447325 records (22.38 GB compact)
+  bucket[13]: 550503169 records (22.02 GB compact)
+  bucket[14]: 574937581 records (23.00 GB compact)
+  bucket[15]: 569970734 records (22.80 GB compact)
+Pass 2 (route + emit compact): 232974 ms (1080.00 GB read, 360.00 GB write)
+Wrote cmap to /mnt/data/19.21_sf1500/part.cmap.bin (28 entries)
+Total partition wall: 451382 ms (2.39 GB/s effective on input read)
+CSV,partition_compact,records=9000021272,K=16,n_cmap=28,sample_ms=514,pass1_ms=184502,pass2_ms=232974,total_ms=451382,read_gb=1080.00,write_gb=360.00
+05:53:15 — partitioned
+Partition wall: 451.384213664 s
+/dev/nvme1n1    3.5T  2.0T  1.4T  60% /mnt/data
+=== Cache eviction ===
+/mnt/data/lineitem_sf1500.bin (1080.0 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/part.bucket_0.bin (22.1 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/part.bucket_1.bin (22.7 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/part.bucket_10.bin (23.0 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/part.bucket_11.bin (22.9 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/part.bucket_12.bin (22.4 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/part.bucket_13.bin (22.0 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/part.bucket_14.bin (23.0 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/part.bucket_15.bin (22.8 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/part.bucket_2.bin (21.7 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/part.bucket_3.bin (22.5 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/part.bucket_4.bin (23.0 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/part.bucket_5.bin (22.8 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/part.bucket_6.bin (22.8 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/part.bucket_7.bin (21.2 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/part.bucket_8.bin (22.2 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/part.bucket_9.bin (22.8 GB): fadvise(DONTNEED) rc=0
+              total        used        free      shared  buff/cache   available
+Mem:           1007           3         991           0          12         998
+=== Step 2: 4-GPU concurrent × 4 rounds, sort_compact_bucket ===
+05:54:47 — round 1 (b0,b1,b2,b3)
+/mnt/data/19.21_sf1500/part.bucket_10.bin (23.0 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/part.bucket_11.bin (22.9 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/part.bucket_12.bin (22.4 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/part.bucket_13.bin (22.0 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/part.bucket_14.bin (23.0 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/part.bucket_15.bin (22.8 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/part.bucket_4.bin (23.0 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/part.bucket_5.bin (22.8 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/part.bucket_6.bin (22.8 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/part.bucket_7.bin (21.2 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/part.bucket_8.bin (22.2 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/part.bucket_9.bin (22.8 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/sorted_offsets_0.bin (4.4 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/sorted_offsets_1.bin (4.5 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/sorted_offsets_2.bin (4.3 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/sorted_offsets_3.bin (4.5 GB): fadvise(DONTNEED) rc=0
+05:55:30 — round 2 (b4,b5,b6,b7)
+/mnt/data/19.21_sf1500/part.bucket_10.bin (23.0 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/part.bucket_11.bin (22.9 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/part.bucket_12.bin (22.4 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/part.bucket_13.bin (22.0 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/part.bucket_14.bin (23.0 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/part.bucket_15.bin (22.8 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/part.bucket_8.bin (22.2 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/part.bucket_9.bin (22.8 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/sorted_offsets_0.bin (4.4 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/sorted_offsets_1.bin (4.5 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/sorted_offsets_2.bin (4.3 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/sorted_offsets_3.bin (4.5 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/sorted_offsets_4.bin (4.6 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/sorted_offsets_5.bin (4.6 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/sorted_offsets_6.bin (4.6 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/sorted_offsets_7.bin (4.2 GB): fadvise(DONTNEED) rc=0
+05:56:15 — round 3 (b8,b9,b10,b11)
+/mnt/data/19.21_sf1500/part.bucket_12.bin (22.4 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/part.bucket_13.bin (22.0 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/part.bucket_14.bin (23.0 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/part.bucket_15.bin (22.8 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/sorted_offsets_0.bin (4.4 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/sorted_offsets_1.bin (4.5 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/sorted_offsets_10.bin (4.6 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/sorted_offsets_11.bin (4.6 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/sorted_offsets_2.bin (4.3 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/sorted_offsets_3.bin (4.5 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/sorted_offsets_4.bin (4.6 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/sorted_offsets_5.bin (4.6 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/sorted_offsets_6.bin (4.6 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/sorted_offsets_7.bin (4.2 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/sorted_offsets_8.bin (4.4 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/sorted_offsets_9.bin (4.6 GB): fadvise(DONTNEED) rc=0
+05:57:03 — round 4 (b12,b13,b14,b15)
+/mnt/data/19.21_sf1500/sorted_offsets_0.bin (4.4 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/sorted_offsets_1.bin (4.5 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/sorted_offsets_10.bin (4.6 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/sorted_offsets_11.bin (4.6 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/sorted_offsets_12.bin (4.5 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/sorted_offsets_13.bin (4.4 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/sorted_offsets_14.bin (4.6 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/sorted_offsets_15.bin (4.6 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/sorted_offsets_2.bin (4.3 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/sorted_offsets_3.bin (4.5 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/sorted_offsets_4.bin (4.6 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/sorted_offsets_5.bin (4.6 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/sorted_offsets_6.bin (4.6 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/sorted_offsets_7.bin (4.2 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/sorted_offsets_8.bin (4.4 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.21_sf1500/sorted_offsets_9.bin (4.6 GB): fadvise(DONTNEED) rc=0
+=== Sort-only wall: 183.062759073 s ===
+b0: CSV,sort_compact_bucket,records=552476095,total_ms=32892,load_ms=26827,h2d_ms=403,sort_ms=321,gather_ms=1470,write_ms=3872
+b1: CSV,sort_compact_bucket,records=566449690,total_ms=33302,load_ms=27084,h2d_ms=413,sort_ms=329,gather_ms=1519,write_ms=3957
+b2: CSV,sort_compact_bucket,records=543612294,total_ms=32185,load_ms=26582,h2d_ms=396,sort_ms=315,gather_ms=1377,write_ms=3515
+b3: CSV,sort_compact_bucket,records=561393154,total_ms=33051,load_ms=26940,h2d_ms=409,sort_ms=326,gather_ms=1451,write_ms=3925
+b4: CSV,sort_compact_bucket,records=574158467,total_ms=32597,load_ms=26421,h2d_ms=418,sort_ms=333,gather_ms=1684,write_ms=3740
+b5: CSV,sort_compact_bucket,records=571009668,total_ms=32417,load_ms=26359,h2d_ms=416,sort_ms=331,gather_ms=1744,write_ms=3568
+b6: CSV,sort_compact_bucket,records=570716848,total_ms=32644,load_ms=26293,h2d_ms=416,sort_ms=331,gather_ms=1811,write_ms=3793
+b7: CSV,sort_compact_bucket,records=531079435,total_ms=28133,load_ms=23902,h2d_ms=388,sort_ms=307,gather_ms=1307,write_ms=2229
+b8: CSV,sort_compact_bucket,records=555772930,total_ms=33215,load_ms=27307,h2d_ms=405,sort_ms=322,gather_ms=1454,write_ms=3727
+b9: CSV,sort_compact_bucket,records=571023983,total_ms=34050,load_ms=27597,h2d_ms=416,sort_ms=331,gather_ms=1610,write_ms=4095
+b10: CSV,sort_compact_bucket,records=574573498,total_ms=33841,load_ms=27629,h2d_ms=419,sort_ms=333,gather_ms=1570,write_ms=3890
+b11: CSV,sort_compact_bucket,records=572896401,total_ms=33816,load_ms=27574,h2d_ms=418,sort_ms=332,gather_ms=1625,write_ms=3867
+b12: CSV,sort_compact_bucket,records=559447325,total_ms=33639,load_ms=27236,h2d_ms=408,sort_ms=325,gather_ms=1541,write_ms=4129
+b13: CSV,sort_compact_bucket,records=550503169,total_ms=33035,load_ms=27060,h2d_ms=401,sort_ms=320,gather_ms=1435,write_ms=3819
+b14: CSV,sort_compact_bucket,records=574937581,total_ms=33663,load_ms=27418,h2d_ms=419,sort_ms=333,gather_ms=1490,write_ms=4002
+b15: CSV,sort_compact_bucket,records=569970734,total_ms=33464,load_ms=27309,h2d_ms=415,sort_ms=331,gather_ms=1477,write_ms=3932
+=== 16 PASS / 0 FAIL ===
+-rw-rw-r-- 1 cc cc 4419808760 May  5 05:55 /mnt/data/19.21_sf1500/sorted_offsets_0.bin
+-rw-rw-r-- 1 cc cc 4531597520 May  5 05:55 /mnt/data/19.21_sf1500/sorted_offsets_1.bin
+-rw-rw-r-- 1 cc cc 4596587984 May  5 05:56 /mnt/data/19.21_sf1500/sorted_offsets_10.bin
+-rw-rw-r-- 1 cc cc 4583171208 May  5 05:56 /mnt/data/19.21_sf1500/sorted_offsets_11.bin
+-rw-rw-r-- 1 cc cc 4475578600 May  5 05:57 /mnt/data/19.21_sf1500/sorted_offsets_12.bin
+-rw-rw-r-- 1 cc cc 4404025352 May  5 05:57 /mnt/data/19.21_sf1500/sorted_offsets_13.bin
+-rw-rw-r-- 1 cc cc 4599500648 May  5 05:57 /mnt/data/19.21_sf1500/sorted_offsets_14.bin
+-rw-rw-r-- 1 cc cc 4559765872 May  5 05:57 /mnt/data/19.21_sf1500/sorted_offsets_15.bin
+-rw-rw-r-- 1 cc cc 4348898352 May  5 05:55 /mnt/data/19.21_sf1500/sorted_offsets_2.bin
+-rw-rw-r-- 1 cc cc 4491145232 May  5 05:55 /mnt/data/19.21_sf1500/sorted_offsets_3.bin
+-rw-rw-r-- 1 cc cc 4593267736 May  5 05:56 /mnt/data/19.21_sf1500/sorted_offsets_4.bin
+-rw-rw-r-- 1 cc cc 4568077344 May  5 05:56 /mnt/data/19.21_sf1500/sorted_offsets_5.bin
+-rw-rw-r-- 1 cc cc 4565734784 May  5 05:56 /mnt/data/19.21_sf1500/sorted_offsets_6.bin
+-rw-rw-r-- 1 cc cc 4248635480 May  5 05:55 /mnt/data/19.21_sf1500/sorted_offsets_7.bin
+-rw-rw-r-- 1 cc cc 4446183440 May  5 05:56 /mnt/data/19.21_sf1500/sorted_offsets_8.bin
+-rw-rw-r-- 1 cc cc 4568191864 May  5 05:56 /mnt/data/19.21_sf1500/sorted_offsets_9.bin
+Total offsets size: 68G	/mnt/data/19.21_sf1500
+Terminated
+06:01:49 — done

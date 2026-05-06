@@ -1,0 +1,50 @@
+19:02:47 — start
+/mnt/data/lineitem_sf300.bin (216.0 GB): fadvise(DONTNEED) rc=0
+=== Stream sort (SF300) ===
+Input: /mnt/data/lineitem_sf300.bin, 1799989091 records (216.00 GB)
+cmap: 27 bytes in 6229 ms
+Allocating 8 × 9.90 GB pinned bucket buffers = 79.20 GB total
+Unpinned mmap alloc: 0 ms (will pin lazily per bucket)
+  bucket[0]: 236930317 records (9.48 GB)
+  bucket[1]: 218870299 records (8.75 GB)
+  bucket[2]: 213564113 records (8.54 GB)
+  bucket[3]: 226952634 records (9.08 GB)
+  bucket[4]: 232253994 records (9.29 GB)
+  bucket[5]: 225659585 records (9.03 GB)
+  bucket[6]: 221707506 records (8.87 GB)
+  bucket[7]: 224050643 records (8.96 GB)
+Partition (in-RAM): 38534 ms (216.00 GB read, 72.00 GB partitioned)
+Pre-pin (8 buckets concurrent): 9542 ms
+  round 1 done
+  round 2 done
+Sort phase: 12658 ms (2 rounds)
+
+Total wall: 70325 ms (3.07 GB/s end-to-end)
+CSV,stream_partition_sort,records=1799989091,K=8,n_cmap=27,partition_ms=38534,sort_ms=12658,total_ms=70325
+Stream wall: 77.129853625 s
+=== gather_records (random reads) ===
+Input: 1799989091 records (216.00 GB)
+Output: 1799989091 records (216.00 GB) across 8 offsets files
+  gathered file 0: 236930317 records (cumulative 236930317)
+  gathered file 1: 218870299 records (cumulative 455800616)
+  gathered file 2: 213564113 records (cumulative 669364729)
+  gathered file 3: 226952634 records (cumulative 896317363)
+  gathered file 4: 232253994 records (cumulative 1128571357)
+  gathered file 5: 225659585 records (cumulative 1354230942)
+  gathered file 6: 221707506 records (cumulative 1575938448)
+  gathered file 7: 224050643 records (cumulative 1799989091)
+Gather: 90203 ms (2.39 GB/s effective)
+Total wall: 103241 ms (2.09 GB/s)
+CSV,gather_records,records=1799989091,gather_ms=90203,total_ms=103241,gb_per_s=2.09
+Random gather: 103.243682704 s
+/mnt/data/lineitem_sf300.bin (216.0 GB): fadvise(DONTNEED) rc=0
+=== gather_records_seq (sequential reads) ===
+Terminated
+Sequential gather: 768.834282120 s
+==========================
+Random: 103.243682704 s
+Sequential: 768.834282120 s
+Traceback (most recent call last):
+  File "<string>", line 4, in <module>
+FileNotFoundError: [Errno 2] No such file or directory: '/mnt/data/19.33_sf300/sorted_records_seq.bin'
+19:19:25 — done

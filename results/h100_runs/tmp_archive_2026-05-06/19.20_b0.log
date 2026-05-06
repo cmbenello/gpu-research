@@ -1,0 +1,45 @@
+[slice] file has 552476095 records (66.30 GB); sorting [0, 552476095) = 552476095 records (66.30 GB)
+════════════════════════════════════════════════════
+  GPU External Merge Sort — Streaming Benchmark
+════════════════════════════════════════════════════
+GPU: NVIDIA H100 (99.9 GB HBM, 132 SMs, 2447 GB/s BW)
+Data: 66.30 GB (552476095 records × 120 bytes) (from file)
+
+Allocating 66.30 GB pinned host memory...
+  Using mmap + huge pages + cudaHostRegister
+Loading from /mnt/data/19.20_sf1500/part.bucket_0.bin...
+  Loaded 66.30 GB in 41448 ms (1.60 GB/s)
+
+[ExternalSort] GPU: 99.18 GB free, budget: 64.47 GB
+[ExternalSort] Triple-buffer: 3 × 21.49 GB (179 M records each)
+[ExternalSort] Sorting 552476095 records (66.30 GB)
+
+== Step 1+2: Key Upload ==
+  Runtime compact map: 26/66 bytes vary, 32B compact key (4 LSD passes)
+  Output buffer mmap: lazy fault (input 66 GB + output 66 GB + 64 GB headroom > host RAM 1082 GB)
+== Step 1+2: Key Upload ==
+  (0.3.1) Compact key upload: 32 B/record (26 B varying) instead of 66 B → 17.7 GB H2D vs 36.5 GB; 4 LSD passes vs 9
+  Pipelined extract+H2D: 565 ms (117.42 GB/s effective vs raw record traffic)
+  Uploaded 17.68 GB keys (compact CPU-extract+H2D) in 1254 ms (52.86 GB/s effective)
+== Step 3: GPU CUB Radix Sort ==
+  LSD sort: 4 passes for 32-byte key (compact)
+    Pass 1 (bytes 24-31): 66.8 ms
+    Pass 2 (bytes 16-23): 91.3 ms
+    Pass 3 (bytes 8-15): 77.1 ms
+    Pass 4 (bytes 0-7): 88.3 ms
+  Sorted 552476095 keys in 331 ms
+== Step 4: Download Permutation ==
+  Downloaded 2.21 GB perm in 44 ms
+== Step 5: SKIPPED (PERM_ONLY=1) — emitting 2.21 GB perm instead of 66.30 GB records ==
+  Copied perm to output buffer in 1446 ms
+
+[ExternalSort] ═══════════════════════════════════════
+  DONE: 3075 ms (gen: 1629 + merge: 1446)
+  Throughput: 21.56 GB/s
+  Runs: 1 | Merge passes: 1
+  PCIe: 17.7 GB H2D + 2.2 GB D2H = 19.9 GB total (0.3x amplification)
+═══════════════════════════════════════════════════════
+
+CSV,NVIDIA H100,66.30,552476095,1,1,1629.25,1446.19,3075.44,21.5570,17.68,2.21,19.89,0.3
+Writing 2.21 GB sorted output to /mnt/data/19.20_sf1500/perm_0.bin ...
+  Wrote 2.21 GB in 1515 ms (1.46 GB/s)

@@ -1,0 +1,45 @@
+[slice] file has 2274266812 records (272.91 GB); sorting [0, 2274266812) = 2274266812 records (272.91 GB)
+════════════════════════════════════════════════════
+  GPU External Merge Sort — Streaming Benchmark
+════════════════════════════════════════════════════
+GPU: NVIDIA H100 (99.9 GB HBM, 132 SMs, 2447 GB/s BW)
+Data: 272.91 GB (2274266812 records × 120 bytes) (from file)
+
+Allocating 272.91 GB pinned host memory...
+  Using mmap + huge pages + cudaHostRegister
+Loading from /mnt/data/19.1.3_sf1500/part.bucket_2.bin...
+  Loaded 272.91 GB in 129577 ms (2.11 GB/s)
+
+[ExternalSort] GPU: 98.77 GB free, budget: 64.20 GB
+[ExternalSort] Triple-buffer: 3 × 21.40 GB (178 M records each)
+[ExternalSort] Sorting 2274266812 records (272.91 GB)
+
+== Step 1+2: Key Upload ==
+  Runtime compact map: 26/66 bytes vary, 32B compact key (4 LSD passes)
+  Output buffer mmap: lazy fault (input 273 GB + output 273 GB + 64 GB headroom > host RAM 1082 GB)
+== Step 1+2: Key Upload ==
+  Keys too large for single-pass (150.1 GB > 88.9 GB)
+  Using OVC ARCHITECTURE: run-gen + GPU OVC merge + CPU gather
+  OVC buffers: 45.5 GB (4B OVC + 8B prefix + 4B perm per record)
+  COMPACT UPLOAD: 669M rec/chunk, 4 chunks, PCIe 72.8 GB (vs 272.9 GB full), CUB scratch 134 MB
+
+== Phase 1: Run Generation (chunked LSD sort) ==
+  Run 1/4: 76536.6 MB (compact upload 20409.8 MB)      Run 2/4: 76536.6 MB (compact upload 20409.8 MB)      Run 3/4: 76536.6 MB (compact upload 20409.8 MB)      Run 4/4: 30659.4 MB (compact upload 8175.8 MB)    
+  4 runs in 16049 ms (17.00 GB/s)
+
+== Phase 2: GPU 16B Prefix Merge (2 CUB LSD passes) ==
+  GPU free before merge alloc: 53.18 GB
+  GPU free after merge alloc: 16.74 GB
+  Pass 1 (sort by pfx2 + gather): 493 ms
+  GPU 16B tie check: NO TIES — fixup skipped
+  Pass 2 (sort by pfx1): 247 ms
+  GPU 16B prefix merge total: 739 ms
+  Downloaded perm in 166 ms
+== Phase 3: CPU Gather ==
+  Gathered 272.91 GB in 26276 ms (10.39 GB/s)
+== Phase 4: CPU Fixup (skipped — no pfx1 ties) ==
+  Total merge+gather+fixup: 27181 ms
+
+CSV,NVIDIA H100,272.91,2274266812,4,2,16049.48,27181.14,43230.63,6.3129,72.78,9.10,81.87,0.3
+Writing 272.91 GB sorted output to /mnt/data/19.1.3_sf1500/sorted_2.bin ...
+  Wrote 272.91 GB in 222278 ms (1.23 GB/s)

@@ -1,0 +1,45 @@
+[slice] file has 574158467 records (68.90 GB); sorting [0, 574158467) = 574158467 records (68.90 GB)
+════════════════════════════════════════════════════
+  GPU External Merge Sort — Streaming Benchmark
+════════════════════════════════════════════════════
+GPU: NVIDIA H100 (99.9 GB HBM, 132 SMs, 2447 GB/s BW)
+Data: 68.90 GB (574158467 records × 120 bytes) (from file)
+
+Allocating 68.90 GB pinned host memory...
+  Using mmap + huge pages + cudaHostRegister
+Loading from /mnt/data/19.15.1_sf1500_k16/part.bucket_4.bin...
+  Loaded 68.90 GB in 26162 ms (2.63 GB/s)
+
+[ExternalSort] GPU: 99.18 GB free, budget: 64.46 GB
+[ExternalSort] Triple-buffer: 3 × 21.49 GB (179 M records each)
+[ExternalSort] Sorting 574158467 records (68.90 GB)
+
+== Step 1+2: Key Upload ==
+  Runtime compact map: 25/66 bytes vary, 32B compact key (4 LSD passes)
+  Output buffer mmap: lazy fault (input 69 GB + output 69 GB + 64 GB headroom > host RAM 1082 GB)
+== Step 1+2: Key Upload ==
+  (0.3.1) Compact key upload: 32 B/record (25 B varying) instead of 66 B → 18.4 GB H2D vs 37.9 GB; 4 LSD passes vs 9
+  Pipelined extract+H2D: 566 ms (121.78 GB/s effective vs raw record traffic)
+  Uploaded 18.37 GB keys (compact CPU-extract+H2D) in 1234 ms (55.81 GB/s effective)
+== Step 3: GPU CUB Radix Sort ==
+  LSD sort: 4 passes for 32-byte key (compact)
+    Pass 1 (bytes 24-31): 68.1 ms
+    Pass 2 (bytes 16-23): 83.7 ms
+    Pass 3 (bytes 8-15): 91.4 ms
+    Pass 4 (bytes 0-7): 91.8 ms
+  Sorted 574158467 keys in 344 ms
+== Step 4: Download Permutation ==
+  Downloaded 2.30 GB perm in 45 ms
+== Step 5: CPU Gather ==
+  Gathered 68.90 GB in 3252 ms (21.19 GB/s)
+
+[ExternalSort] ═══════════════════════════════════════
+  DONE: 4875 ms (gen: 1623 + merge: 3252)
+  Throughput: 14.13 GB/s
+  Runs: 1 | Merge passes: 1
+  PCIe: 18.4 GB H2D + 2.3 GB D2H = 20.7 GB total (0.3x amplification)
+═══════════════════════════════════════════════════════
+
+CSV,NVIDIA H100,68.90,574158467,1,1,1623.16,3252.02,4875.18,14.1326,18.37,2.30,20.67,0.3
+Writing 68.90 GB sorted output to /mnt/data/19.15.1_sf1500_k16/sorted_4.bin ...
+  Wrote 68.90 GB in 58183 ms (1.18 GB/s)

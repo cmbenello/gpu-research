@@ -1,0 +1,60 @@
+14:16:00 — start
+/mnt/data/lineitem_sf1500.bin (1080.0 GB): fadvise(DONTNEED) rc=0
+=== Phase 1: stream partition + sort (offsets only) ===
+Input: /mnt/data/lineitem_sf1500.bin, 9000021272 records (1080.00 GB)
+cmap: 28 bytes in 6236 ms
+Allocating 16 × 24.75 GB pinned bucket buffers = 396.00 GB total
+Unpinned mmap alloc: 0 ms (will pin lazily per bucket)
+  bucket[0]: 552476095 records (22.10 GB)
+  bucket[1]: 566449690 records (22.66 GB)
+  bucket[2]: 543612294 records (21.74 GB)
+  bucket[3]: 561393154 records (22.46 GB)
+  bucket[4]: 574158467 records (22.97 GB)
+  bucket[5]: 571009668 records (22.84 GB)
+  bucket[6]: 570716848 records (22.83 GB)
+  bucket[7]: 531079435 records (21.24 GB)
+  bucket[8]: 555772930 records (22.23 GB)
+  bucket[9]: 571023983 records (22.84 GB)
+  bucket[10]: 574573498 records (22.98 GB)
+  bucket[11]: 572896401 records (22.92 GB)
+  bucket[12]: 559447325 records (22.38 GB)
+  bucket[13]: 550503169 records (22.02 GB)
+  bucket[14]: 574937581 records (23.00 GB)
+  bucket[15]: 569970734 records (22.80 GB)
+Partition (in-RAM): 281719 ms (1080.00 GB read, 360.00 GB partitioned)
+  round 1 done
+  round 2 done
+  round 3 done
+  round 4 done
+Sort phase: 154776 ms (4 rounds)
+
+Total wall: 450991 ms (2.39 GB/s end-to-end)
+CSV,stream_partition_sort,records=9000021272,K=16,n_cmap=28,partition_ms=281719,sort_ms=154776,total_ms=450991
+Stream wall: 451.538909651 s
+=== Phase 2: gather records (sorted offsets → full sorted records) ===
+Input: 9000021272 records (1080.00 GB)
+Output: 9000021272 records (1080.00 GB) across 16 offsets files
+  gathered file 0: 552476095 records (cumulative 552476095)
+  gathered file 1: 566449690 records (cumulative 1118925785)
+  gathered file 2: 543612294 records (cumulative 1662538079)
+  gathered file 3: 561393154 records (cumulative 2223931233)
+  gathered file 4: 574158467 records (cumulative 2798089700)
+  gathered file 5: 571009668 records (cumulative 3369099368)
+  gathered file 6: 570716848 records (cumulative 3939816216)
+  gathered file 7: 531079435 records (cumulative 4470895651)
+  gathered file 8: 555772930 records (cumulative 5026668581)
+  gathered file 9: 571023983 records (cumulative 5597692564)
+  gathered file 10: 574573498 records (cumulative 6172266062)
+  gathered file 11: 572896401 records (cumulative 6745162463)
+  gathered file 12: 559447325 records (cumulative 7304609788)
+  gathered file 13: 550503169 records (cumulative 7855112957)
+  gathered file 14: 574937581 records (cumulative 8430050538)
+  gathered file 15: 569970734 records (cumulative 9000021272)
+Gather: 1853187 ms (0.58 GB/s effective)
+Total wall: 1906481 ms (0.57 GB/s)
+CSV,gather_records,records=9000021272,gather_ms=1853187,total_ms=1906481,gb_per_s=0.57
+Gather wall: 1906.488761941 s
+=== TOTAL E2E (stream + gather): 2358.031053908 s ===
+-rw-r--r-- 1 cc cc 1080002552640 May  5 14:55 /mnt/data/19.26_sf1500/sorted_records.bin
+=== Verifying sorted_records.bin (1M record sample) ===
+/tmp/run_19.26_stream_plus_gather.sh: line 44: N_CHECK: unbound variable

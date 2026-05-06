@@ -1,0 +1,24 @@
+13:56:42 — start
+=== Step 1: SINGLE-PASS compact partition K=16 ===
+Input: /mnt/data/lineitem_sf500.bin, 3000028242 records (360.00 GB)
+Compact map: 27 bytes detected in 4910 ms
+Splitter sort: 400 ms
+  bucket[0]: 187088855 records (7.48 GB compact)
+  bucket[1]: 181089591 records (7.24 GB compact)
+  bucket[2]: 188840546 records (7.55 GB compact)
+  bucket[3]: 181806029 records (7.27 GB compact)
+  bucket[4]: 198574548 records (7.94 GB compact)
+  bucket[5]: 198092932 records (7.92 GB compact)
+  bucket[6]: 183080784 records (7.32 GB compact)
+  bucket[7]: 176351302 records (7.05 GB compact)
+  bucket[8]: 198150829 records (7.93 GB compact)
+  bucket[9]: 188532474 records (7.54 GB compact)
+  bucket[10]: 187016737 records (7.48 GB compact)
+  bucket[11]: 189573358 records (7.58 GB compact)
+  bucket[12]: 190158935 records (7.61 GB compact)
+  bucket[13]: 188216524 records (7.53 GB compact)
+  bucket[14]: 171681170 records (6.87 GB compact)
+  bucket[15]: 191773628 records (7.67 GB compact)
+Single-pass (classify + write): 61182 ms (360.00 GB read, 120.00 GB write)
+Total partition wall: 80675 ms (4.46 GB/s effective on input read)
+CSV,partition_compact_v2,records=3000028242,K=16,n_cmap=27,sample_ms=400,pass_ms=61182,total_ms=80675,read_gb=360.00,write_gb=120.00

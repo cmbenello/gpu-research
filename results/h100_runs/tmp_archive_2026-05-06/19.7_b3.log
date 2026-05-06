@@ -1,0 +1,47 @@
+[slice] file has 2254858809 records (270.58 GB); sorting [0, 2254858809) = 2254858809 records (270.58 GB)
+════════════════════════════════════════════════════
+  GPU External Merge Sort — Streaming Benchmark
+════════════════════════════════════════════════════
+GPU: NVIDIA H100 (99.9 GB HBM, 132 SMs, 2447 GB/s BW)
+Data: 270.58 GB (2254858809 records × 120 bytes) (from file)
+
+Allocating 270.58 GB pinned host memory...
+  Using mmap + huge pages (SKIP_HOST_PIN=1, no cudaHostRegister)
+Loading from /mnt/data/19.7_sf1500/part.bucket_3.bin...
+  Loaded 270.58 GB in 132243 ms (2.05 GB/s)
+
+[ExternalSort] GPU: 99.31 GB free, budget: 64.55 GB
+[ExternalSort] Triple-buffer: 3 × 21.52 GB (179 M records each)
+[ExternalSort] Sorting 2254858809 records (270.58 GB)
+
+== Step 1+2: Key Upload ==
+  Runtime compact map: 28/66 bytes vary, 32B compact key (4 LSD passes)
+  Output buffer mmap: lazy fault (input 271 GB + output 271 GB + 64 GB headroom > host RAM 1082 GB)
+== Step 1+2: Key Upload ==
+  Keys too large for single-pass (148.8 GB > 89.4 GB)
+  Using OVC ARCHITECTURE: run-gen + GPU OVC merge + CPU gather
+  OVC buffers: 45.1 GB (4B OVC + 8B prefix + 4B perm per record)
+  COMPACT UPLOAD: 672M rec/chunk, 4 chunks, PCIe 72.2 GB (vs 270.6 GB full), CUB scratch 134 MB
+
+== Phase 1: Run Generation (chunked LSD sort) ==
+  Run 1/4: 76951.0 MB (compact upload 20520.3 MB)      Run 2/4: 76951.0 MB (compact upload 20520.3 MB)      Run 3/4: 76951.0 MB (compact upload 20520.3 MB)      Run 4/4: 27195.2 MB (compact upload 7252.1 MB)    
+  4 runs in 17155 ms (15.77 GB/s)
+
+== Phase 2: GPU 16B Prefix Merge (2 CUB LSD passes) ==
+  GPU free before merge alloc: 54.10 GB
+  GPU free after merge alloc: 17.97 GB
+  Pass 1 (sort by pfx2 + gather): 485 ms
+  GPU 16B tie check: TIES FOUND — CPU fixup needed
+  Pass 2 (sort by pfx1): 239 ms
+  GPU 16B prefix merge total: 724 ms
+  Downloaded perm in 185 ms
+== Phase 3: CPU Gather ==
+  Gathered 270.58 GB in 27863 ms (9.71 GB/s)
+== Phase 4: CPU Prefix Fixup (16B prefix, ties detected) ==
+  821267 groups with ties (1642685 records total, largest=3)
+  Fixup: 23 ms
+  Total merge+gather+fixup: 28795 ms
+
+CSV,NVIDIA H100,270.58,2254858809,4,2,17154.92,28795.02,45949.94,5.8886,72.16,9.02,81.17,0.3
+Writing 270.58 GB sorted output to /mnt/data/19.7_sf1500/sorted_3.bin ...
+  Wrote 270.58 GB in 213745 ms (1.27 GB/s)

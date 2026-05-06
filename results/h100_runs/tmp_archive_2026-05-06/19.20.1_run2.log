@@ -1,0 +1,149 @@
+04:42:42 — start
+=== Step 1: partition K=16 ===
+Input: /mnt/data/lineitem_sf1500.bin, 9000021272 records (1080.00 GB)
+Sample + sort + splitters: 694 ms
+Pass 1 (count): 189483 ms
+  bucket[0]: 552476095 records (66.30 GB)
+  bucket[1]: 566449690 records (67.97 GB)
+  bucket[2]: 543612294 records (65.23 GB)
+  bucket[3]: 561393154 records (67.37 GB)
+  bucket[4]: 574158467 records (68.90 GB)
+  bucket[5]: 571009668 records (68.52 GB)
+  bucket[6]: 570716848 records (68.49 GB)
+  bucket[7]: 531079435 records (63.73 GB)
+  bucket[8]: 555772930 records (66.69 GB)
+  bucket[9]: 571023983 records (68.52 GB)
+  bucket[10]: 574573498 records (68.95 GB)
+  bucket[11]: 572896401 records (68.75 GB)
+  bucket[12]: 559447325 records (67.13 GB)
+  bucket[13]: 550503169 records (66.06 GB)
+  bucket[14]: 574937581 records (68.99 GB)
+  bucket[15]: 569970734 records (68.40 GB)
+Pass 2 (route): 662707 ms (1.63 GB/s)
+Total partition wall: 885283 ms (1.22 GB/s end-to-end)
+CSV,partition_by_range,records=9000021272,K=16,sample_ms=694,pass1_ms=189483,pass2_ms=662707,total_ms=885283,gb_per_s=1.22
+04:57:27 — partitioned
+Partition wall: 885.285617924 s
+=== Cache eviction after partition ===
+/mnt/data/lineitem_sf1500.bin (1080.0 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/part.bucket_0.bin (66.3 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/part.bucket_1.bin (68.0 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/part.bucket_10.bin (68.9 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/part.bucket_11.bin (68.7 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/part.bucket_12.bin (67.1 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/part.bucket_13.bin (66.1 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/part.bucket_14.bin (69.0 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/part.bucket_15.bin (68.4 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/part.bucket_2.bin (65.2 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/part.bucket_3.bin (67.4 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/part.bucket_4.bin (68.9 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/part.bucket_5.bin (68.5 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/part.bucket_6.bin (68.5 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/part.bucket_7.bin (63.7 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/part.bucket_8.bin (66.7 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/part.bucket_9.bin (68.5 GB): fadvise(DONTNEED) rc=0
+=== Step 2: 4-GPU concurrent × 4 rounds, PERM_ONLY=1 ===
+04:59:30 — round 1 (b0,b1,b2,b3)
+/mnt/data/19.20_sf1500/part.bucket_10.bin (68.9 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/part.bucket_11.bin (68.7 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/part.bucket_12.bin (67.1 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/part.bucket_13.bin (66.1 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/part.bucket_14.bin (69.0 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/part.bucket_15.bin (68.4 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/part.bucket_4.bin (68.9 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/part.bucket_5.bin (68.5 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/part.bucket_6.bin (68.5 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/part.bucket_7.bin (63.7 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/part.bucket_8.bin (66.7 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/part.bucket_9.bin (68.5 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/perm_0.bin (2.2 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/perm_1.bin (2.3 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/perm_2.bin (2.2 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/perm_3.bin (2.2 GB): fadvise(DONTNEED) rc=0
+05:00:59 — round 2 (b4,b5,b6,b7)
+/mnt/data/19.20_sf1500/part.bucket_10.bin (68.9 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/part.bucket_11.bin (68.7 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/part.bucket_12.bin (67.1 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/part.bucket_13.bin (66.1 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/part.bucket_14.bin (69.0 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/part.bucket_15.bin (68.4 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/part.bucket_8.bin (66.7 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/part.bucket_9.bin (68.5 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/perm_0.bin (2.2 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/perm_1.bin (2.3 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/perm_2.bin (2.2 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/perm_3.bin (2.2 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/perm_4.bin (2.3 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/perm_5.bin (2.3 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/perm_6.bin (2.3 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/perm_7.bin (2.1 GB): fadvise(DONTNEED) rc=0
+05:02:26 — round 3 (b8,b9,b10,b11)
+/mnt/data/19.20_sf1500/part.bucket_12.bin (67.1 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/part.bucket_13.bin (66.1 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/part.bucket_14.bin (69.0 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/part.bucket_15.bin (68.4 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/perm_0.bin (2.2 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/perm_1.bin (2.3 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/perm_10.bin (2.3 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/perm_11.bin (2.3 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/perm_2.bin (2.2 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/perm_3.bin (2.2 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/perm_4.bin (2.3 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/perm_5.bin (2.3 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/perm_6.bin (2.3 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/perm_7.bin (2.1 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/perm_8.bin (2.2 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/perm_9.bin (2.3 GB): fadvise(DONTNEED) rc=0
+05:03:57 — round 4 (b12,b13,b14,b15)
+/mnt/data/19.20_sf1500/perm_0.bin (2.2 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/perm_1.bin (2.3 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/perm_10.bin (2.3 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/perm_11.bin (2.3 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/perm_12.bin (2.2 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/perm_13.bin (2.2 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/perm_14.bin (2.3 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/perm_15.bin (2.3 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/perm_2.bin (2.2 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/perm_3.bin (2.2 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/perm_4.bin (2.3 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/perm_5.bin (2.3 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/perm_6.bin (2.3 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/perm_7.bin (2.1 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/perm_8.bin (2.2 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.20_sf1500/perm_9.bin (2.3 GB): fadvise(DONTNEED) rc=0
+=== Sort-only wall: 357.516040879 s ===
+b0: CSV,NVIDIA H100,66.30,552476095,1,1,1596.42,1477.12,3073.55,21.5702,17.68,2.21,19.89,0.3
+b1: CSV,NVIDIA H100,67.97,566449690,1,1,1845.92,1155.83,3001.76,22.6447,18.13,2.27,20.39,0.3
+b2: CSV,NVIDIA H100,65.23,543612294,1,1,1906.28,1145.56,3051.84,21.3751,17.40,2.17,19.57,0.3
+b3: CSV,NVIDIA H100,67.37,561393154,1,1,1644.49,1498.19,3142.68,21.4362,17.96,2.25,20.21,0.3
+b4: CSV,NVIDIA H100,68.90,574158467,1,1,2096.54,1501.76,3598.30,19.1476,18.37,2.30,20.67,0.3
+b5: CSV,NVIDIA H100,68.52,571009668,1,1,1645.49,1180.12,2825.61,24.2500,18.27,2.28,20.56,0.3
+b6: CSV,NVIDIA H100,68.49,570716848,1,1,1647.32,1212.74,2860.06,23.9456,18.26,2.28,20.55,0.3
+b7: CSV,NVIDIA H100,63.73,531079435,1,1,1322.20,1070.01,2392.21,26.6404,12.75,2.12,14.87,0.2
+b8: CSV,NVIDIA H100,66.69,555772930,1,1,1569.49,1115.69,2685.18,24.8374,17.78,2.22,20.01,0.3
+b9: CSV,NVIDIA H100,68.52,571023983,1,1,2598.93,1228.46,3827.39,17.9033,13.70,2.28,15.99,0.2
+b10: CSV,NVIDIA H100,68.95,574573498,1,1,1612.34,1509.17,3121.51,22.0883,18.39,2.30,20.68,0.3
+b11: CSV,NVIDIA H100,68.75,572896401,1,1,2880.79,1226.35,4107.14,16.7386,18.33,2.29,20.62,0.3
+b12: CSV,NVIDIA H100,67.13,559447325,1,1,1607.57,1135.04,2742.61,24.4780,17.90,2.24,20.14,0.3
+b13: CSV,NVIDIA H100,66.06,550503169,1,1,2004.11,1122.53,3126.64,21.1282,17.62,2.20,19.82,0.3
+b14: CSV,NVIDIA H100,68.99,574937581,1,1,2016.42,1198.77,3215.20,21.4583,18.40,2.30,20.70,0.3
+b15: CSV,NVIDIA H100,68.40,569970734,1,1,1880.32,1178.28,3058.60,22.3620,18.24,2.28,20.52,0.3
+=== 16 PASS / 0 FAIL ===
+-rw-rw-r-- 1 cc cc 2209904380 May  5 05:00 /mnt/data/19.20_sf1500/perm_0.bin
+-rw-rw-r-- 1 cc cc 2265798760 May  5 05:00 /mnt/data/19.20_sf1500/perm_1.bin
+-rw-rw-r-- 1 cc cc 2298293992 May  5 05:03 /mnt/data/19.20_sf1500/perm_10.bin
+-rw-rw-r-- 1 cc cc 2291585604 May  5 05:03 /mnt/data/19.20_sf1500/perm_11.bin
+-rw-rw-r-- 1 cc cc 2237789300 May  5 05:05 /mnt/data/19.20_sf1500/perm_12.bin
+-rw-rw-r-- 1 cc cc 2202012676 May  5 05:05 /mnt/data/19.20_sf1500/perm_13.bin
+-rw-rw-r-- 1 cc cc 2299750324 May  5 05:05 /mnt/data/19.20_sf1500/perm_14.bin
+-rw-rw-r-- 1 cc cc 2279882936 May  5 05:05 /mnt/data/19.20_sf1500/perm_15.bin
+-rw-rw-r-- 1 cc cc 2174449176 May  5 05:00 /mnt/data/19.20_sf1500/perm_2.bin
+-rw-rw-r-- 1 cc cc 2245572616 May  5 05:00 /mnt/data/19.20_sf1500/perm_3.bin
+-rw-rw-r-- 1 cc cc 2296633868 May  5 05:02 /mnt/data/19.20_sf1500/perm_4.bin
+-rw-rw-r-- 1 cc cc 2284038672 May  5 05:02 /mnt/data/19.20_sf1500/perm_5.bin
+-rw-rw-r-- 1 cc cc 2282867392 May  5 05:02 /mnt/data/19.20_sf1500/perm_6.bin
+-rw-rw-r-- 1 cc cc 2124317740 May  5 05:02 /mnt/data/19.20_sf1500/perm_7.bin
+-rw-rw-r-- 1 cc cc 2223091720 May  5 05:03 /mnt/data/19.20_sf1500/perm_8.bin
+-rw-rw-r-- 1 cc cc 2284095932 May  5 05:03 /mnt/data/19.20_sf1500/perm_9.bin
+Total perm output size: 34G	/mnt/data/19.20_sf1500
+05:05:27 — done

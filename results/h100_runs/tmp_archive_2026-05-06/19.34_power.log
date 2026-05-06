@@ -1,0 +1,22 @@
+19:19:39 — start
+/mnt/data/lineitem_sf1500.bin (1080.0 GB): fadvise(DONTNEED) rc=0
+=== Idle GPU power (5 samples) ===
+ERROR: Option --query-gpu=index,power.draw is not recognized. Please run 'nvidia-smi -h' for help.
+
+  round 2 done
+Sort phase: 60627 ms (2 rounds)
+
+Total wall: 420036 ms (2.57 GB/s end-to-end)
+CSV,stream_partition_sort,records=9000021272,K=8,n_cmap=28,partition_ms=284660,sort_ms=60627,total_ms=420036
+Wall: 457.066080715 s
+GPU avg power (W) during run:
+  GPU 0: avg=84W, peak=310W, samples=2288
+  GPU 1: avg=74W, peak=313W, samples=2288
+  GPU 2: avg=75W, peak=315W, samples=2288
+  GPU 3: avg=74W, peak=312W, samples=2288
+
+Total 4-GPU avg power: 308W
+GPU energy (run): 140577 J (39.049 Wh)
+Per byte sorted: 130.164 nJ/byte
+Per record sorted: 15.620 uJ/record
+19:27:51 — done

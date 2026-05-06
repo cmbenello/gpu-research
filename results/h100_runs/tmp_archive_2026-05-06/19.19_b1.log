@@ -1,0 +1,43 @@
+[slice] file has 566449690 records (67.97 GB); sorting [0, 566449690) = 566449690 records (67.97 GB)
+════════════════════════════════════════════════════
+  GPU External Merge Sort — Streaming Benchmark
+════════════════════════════════════════════════════
+GPU: NVIDIA H100 (99.9 GB HBM, 132 SMs, 2447 GB/s BW)
+Data: 67.97 GB (566449690 records × 120 bytes) (from file)
+
+Allocating 67.97 GB pinned host memory...
+  Using mmap + huge pages + cudaHostRegister
+Loading from /mnt/data/19.19_sf1500/part.bucket_1.bin...
+  Loaded 67.97 GB in 40959 ms (1.66 GB/s)
+
+[ExternalSort] GPU: 99.18 GB free, budget: 64.47 GB
+[ExternalSort] Triple-buffer: 3 × 21.49 GB (179 M records each)
+[ExternalSort] Sorting 566449690 records (67.97 GB)
+
+== Step 1+2: Key Upload ==
+  Runtime compact map: 26/66 bytes vary, 32B compact key (4 LSD passes)
+  Output buffer mmap: lazy fault (input 68 GB + output 68 GB + 64 GB headroom > host RAM 1082 GB)
+== Step 1+2: Key Upload ==
+  (0.3.1) Compact key upload: 32 B/record (26 B varying) instead of 66 B → 18.1 GB H2D vs 37.4 GB; 4 LSD passes vs 9
+  Pipelined extract+H2D: 699 ms (97.23 GB/s effective vs raw record traffic)
+  Uploaded 18.13 GB keys (compact CPU-extract+H2D) in 1364 ms (49.82 GB/s effective)
+== Step 3: GPU CUB Radix Sort ==
+  LSD sort: 4 passes for 32-byte key (compact)
+    Pass 1 (bytes 24-31): 68.3 ms
+    Pass 2 (bytes 16-23): 93.7 ms
+    Pass 3 (bytes 8-15): 79.0 ms
+    Pass 4 (bytes 0-7): 90.6 ms
+  Sorted 566449690 keys in 377 ms
+== Step 4: Download Permutation ==
+  Downloaded 2.27 GB perm in 48 ms
+== Step 5: CPU Gather ==
+  Gathered 67.97 GB in 3340 ms (20.35 GB/s)
+
+[ExternalSort] ═══════════════════════════════════════
+  DONE: 5130 ms (gen: 1790 + merge: 3340)
+  Throughput: 13.25 GB/s
+  Runs: 1 | Merge passes: 1
+  PCIe: 18.1 GB H2D + 2.3 GB D2H = 20.4 GB total (0.3x amplification)
+═══════════════════════════════════════════════════════
+
+CSV,NVIDIA H100,67.97,566449690,1,1,1789.71,3340.28,5129.99,13.2503,18.13,2.27,20.39,0.3

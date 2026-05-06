@@ -1,0 +1,13 @@
+Polars version: 1.8.2
+SF300: 1,799,989,091 records (216.0 GB)
+mmap: 0.0s
+prefix extract: 226.7s, mem ~28.8 GB
+DataFrame built: 247.1s
+Sort 1...
+  sort 1: 108.7s
+Sort 2 (warm)...
+  sort 2: 106.7s
+
+CSV,polars_sf300,records=1799989091,warm_s=106.7,record_gb_per_s=2.03
+vs gpu_crocsort SF300 stream pre-pin: 90.1s, 2.59 GB/s
+Polars 107s vs gpu_crocsort 90s = 1.2x slower

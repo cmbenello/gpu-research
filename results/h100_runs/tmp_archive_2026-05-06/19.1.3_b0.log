@@ -1,0 +1,45 @@
+[slice] file has 2223931233 records (266.87 GB); sorting [0, 2223931233) = 2223931233 records (266.87 GB)
+════════════════════════════════════════════════════
+  GPU External Merge Sort — Streaming Benchmark
+════════════════════════════════════════════════════
+GPU: NVIDIA H100 (99.9 GB HBM, 132 SMs, 2447 GB/s BW)
+Data: 266.87 GB (2223931233 records × 120 bytes) (from file)
+
+Allocating 266.87 GB pinned host memory...
+  Using mmap + huge pages + cudaHostRegister
+Loading from /mnt/data/19.1.3_sf1500/part.bucket_0.bin...
+  Loaded 266.87 GB in 116697 ms (2.29 GB/s)
+
+[ExternalSort] GPU: 98.79 GB free, budget: 64.21 GB
+[ExternalSort] Triple-buffer: 3 × 21.40 GB (178 M records each)
+[ExternalSort] Sorting 2223931233 records (266.87 GB)
+
+== Step 1+2: Key Upload ==
+  Runtime compact map: 27/66 bytes vary, 32B compact key (4 LSD passes)
+  Output buffer mmap: lazy fault (input 267 GB + output 267 GB + 64 GB headroom > host RAM 1082 GB)
+== Step 1+2: Key Upload ==
+  Keys too large for single-pass (146.8 GB > 88.9 GB)
+  Using OVC ARCHITECTURE: run-gen + GPU OVC merge + CPU gather
+  OVC buffers: 44.5 GB (4B OVC + 8B prefix + 4B perm per record)
+  COMPACT UPLOAD: 669M rec/chunk, 4 chunks, PCIe 71.2 GB (vs 266.9 GB full), CUB scratch 134 MB
+
+== Phase 1: Run Generation (chunked LSD sort) ==
+  Run 1/4: 76546.3 MB (compact upload 20412.4 MB)      Run 2/4: 76546.3 MB (compact upload 20412.4 MB)      Run 3/4: 76546.3 MB (compact upload 20412.4 MB)      Run 4/4: 24869.7 MB (compact upload 6631.9 MB)    
+  4 runs in 20614 ms (12.95 GB/s)
+
+== Phase 2: GPU 16B Prefix Merge (2 CUB LSD passes) ==
+  GPU free before merge alloc: 54.20 GB
+  GPU free after merge alloc: 18.56 GB
+  Pass 1 (sort by pfx2 + gather): 482 ms
+  GPU 16B tie check: NO TIES — fixup skipped
+  Pass 2 (sort by pfx1): 237 ms
+  GPU 16B prefix merge total: 719 ms
+  Downloaded perm in 180 ms
+== Phase 3: CPU Gather ==
+  Gathered 266.87 GB in 27856 ms (9.58 GB/s)
+== Phase 4: CPU Fixup (skipped — no pfx1 ties) ==
+  Total merge+gather+fixup: 28755 ms
+
+CSV,NVIDIA H100,266.87,2223931233,4,2,20614.28,28754.99,49369.28,5.4056,71.17,8.90,80.06,0.3
+Writing 266.87 GB sorted output to /mnt/data/19.1.3_sf1500/sorted_0.bin ...
+  Wrote 266.87 GB in 211232 ms (1.26 GB/s)

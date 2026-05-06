@@ -1,0 +1,219 @@
+23:01:57 — start
+=== Step 1: partition K=16 ===
+Input: /mnt/data/lineitem_sf1500.bin, 9000021272 records (1080.00 GB)
+Sample + sort + splitters: 686 ms
+Pass 1 (count): 184735 ms
+  bucket[0]: 552476095 records (66.30 GB)
+  bucket[1]: 566449690 records (67.97 GB)
+  bucket[2]: 543612294 records (65.23 GB)
+  bucket[3]: 561393154 records (67.37 GB)
+  bucket[4]: 574158467 records (68.90 GB)
+  bucket[5]: 571009668 records (68.52 GB)
+  bucket[6]: 570716848 records (68.49 GB)
+  bucket[7]: 531079435 records (63.73 GB)
+  bucket[8]: 555772930 records (66.69 GB)
+  bucket[9]: 571023983 records (68.52 GB)
+  bucket[10]: 574573498 records (68.95 GB)
+  bucket[11]: 572896401 records (68.75 GB)
+  bucket[12]: 559447325 records (67.13 GB)
+  bucket[13]: 550503169 records (66.06 GB)
+  bucket[14]: 574937581 records (68.99 GB)
+  bucket[15]: 569970734 records (68.40 GB)
+Pass 2 (route): 651500 ms (1.66 GB/s)
+Total partition wall: 866349 ms (1.25 GB/s end-to-end)
+CSV,partition_by_range,records=9000021272,K=16,sample_ms=686,pass1_ms=184735,pass2_ms=651500,total_ms=866349,gb_per_s=1.25
+23:16:23 — partitioned
+Partition wall: 866.351829735 s
+/dev/nvme1n1    3.5T  2.6T  686G  80% /mnt/data
+-rw-r--r-- 1 cc cc 66297131400 May  4 23:15 /mnt/data/19.15.1_sf1500_k16/part.bucket_0.bin
+-rw-r--r-- 1 cc cc 67973962800 May  4 23:15 /mnt/data/19.15.1_sf1500_k16/part.bucket_1.bin
+-rw-r--r-- 1 cc cc 68948819760 May  4 23:15 /mnt/data/19.15.1_sf1500_k16/part.bucket_10.bin
+-rw-r--r-- 1 cc cc 68747568120 May  4 23:15 /mnt/data/19.15.1_sf1500_k16/part.bucket_11.bin
+-rw-r--r-- 1 cc cc 67133679000 May  4 23:15 /mnt/data/19.15.1_sf1500_k16/part.bucket_12.bin
+-rw-r--r-- 1 cc cc 66060380280 May  4 23:15 /mnt/data/19.15.1_sf1500_k16/part.bucket_13.bin
+-rw-r--r-- 1 cc cc 68992509720 May  4 23:15 /mnt/data/19.15.1_sf1500_k16/part.bucket_14.bin
+-rw-r--r-- 1 cc cc 68396488080 May  4 23:15 /mnt/data/19.15.1_sf1500_k16/part.bucket_15.bin
+-rw-r--r-- 1 cc cc 65233475280 May  4 23:15 /mnt/data/19.15.1_sf1500_k16/part.bucket_2.bin
+-rw-r--r-- 1 cc cc 67367178480 May  4 23:15 /mnt/data/19.15.1_sf1500_k16/part.bucket_3.bin
+-rw-r--r-- 1 cc cc 68899016040 May  4 23:15 /mnt/data/19.15.1_sf1500_k16/part.bucket_4.bin
+-rw-r--r-- 1 cc cc 68521160160 May  4 23:15 /mnt/data/19.15.1_sf1500_k16/part.bucket_5.bin
+-rw-r--r-- 1 cc cc 68486021760 May  4 23:15 /mnt/data/19.15.1_sf1500_k16/part.bucket_6.bin
+-rw-r--r-- 1 cc cc 63729532200 May  4 23:15 /mnt/data/19.15.1_sf1500_k16/part.bucket_7.bin
+-rw-r--r-- 1 cc cc 66692751600 May  4 23:15 /mnt/data/19.15.1_sf1500_k16/part.bucket_8.bin
+-rw-r--r-- 1 cc cc 68522877960 May  4 23:15 /mnt/data/19.15.1_sf1500_k16/part.bucket_9.bin
+=== Cache eviction after partition ===
+/mnt/data/lineitem_sf1500.bin (1080.0 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/part.bucket_0.bin (66.3 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/part.bucket_1.bin (68.0 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/part.bucket_10.bin (68.9 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/part.bucket_11.bin (68.7 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/part.bucket_12.bin (67.1 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/part.bucket_13.bin (66.1 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/part.bucket_14.bin (69.0 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/part.bucket_15.bin (68.4 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/part.bucket_2.bin (65.2 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/part.bucket_3.bin (67.4 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/part.bucket_4.bin (68.9 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/part.bucket_5.bin (68.5 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/part.bucket_6.bin (68.5 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/part.bucket_7.bin (63.7 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/part.bucket_8.bin (66.7 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/part.bucket_9.bin (68.5 GB): fadvise(DONTNEED) rc=0
+              total        used        free      shared  buff/cache   available
+Mem:           1007           3        1002           0           0         999
+=== Step 2: 2-GPU one-per-node × 8 rounds ===
+23:18:33 — round 1 (GPU 0 → b0, GPU 2 → b1)
+/mnt/data/19.15.1_sf1500_k16/part.bucket_10.bin (68.9 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/part.bucket_11.bin (68.7 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/part.bucket_12.bin (67.1 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/part.bucket_13.bin (66.1 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/part.bucket_14.bin (69.0 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/part.bucket_15.bin (68.4 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/part.bucket_2.bin (65.2 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/part.bucket_3.bin (67.4 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/part.bucket_4.bin (68.9 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/part.bucket_5.bin (68.5 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/part.bucket_6.bin (68.5 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/part.bucket_7.bin (63.7 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/part.bucket_8.bin (66.7 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/part.bucket_9.bin (68.5 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_0.bin (66.3 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_1.bin (68.0 GB): fadvise(DONTNEED) rc=0
+23:20:40 — round 2 (GPU 0 → b2, GPU 2 → b3)
+/mnt/data/19.15.1_sf1500_k16/part.bucket_10.bin (68.9 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/part.bucket_11.bin (68.7 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/part.bucket_12.bin (67.1 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/part.bucket_13.bin (66.1 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/part.bucket_14.bin (69.0 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/part.bucket_15.bin (68.4 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/part.bucket_4.bin (68.9 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/part.bucket_5.bin (68.5 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/part.bucket_6.bin (68.5 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/part.bucket_7.bin (63.7 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/part.bucket_8.bin (66.7 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/part.bucket_9.bin (68.5 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_0.bin (66.3 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_1.bin (68.0 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_2.bin (65.2 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_3.bin (67.4 GB): fadvise(DONTNEED) rc=0
+23:22:43 — round 3 (GPU 0 → b4, GPU 2 → b5)
+/mnt/data/19.15.1_sf1500_k16/part.bucket_10.bin (68.9 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/part.bucket_11.bin (68.7 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/part.bucket_12.bin (67.1 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/part.bucket_13.bin (66.1 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/part.bucket_14.bin (69.0 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/part.bucket_15.bin (68.4 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/part.bucket_6.bin (68.5 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/part.bucket_7.bin (63.7 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/part.bucket_8.bin (66.7 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/part.bucket_9.bin (68.5 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_0.bin (66.3 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_1.bin (68.0 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_2.bin (65.2 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_3.bin (67.4 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_4.bin (68.9 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_5.bin (68.5 GB): fadvise(DONTNEED) rc=0
+23:24:55 — round 4 (GPU 0 → b6, GPU 2 → b7)
+/mnt/data/19.15.1_sf1500_k16/part.bucket_10.bin (68.9 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/part.bucket_11.bin (68.7 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/part.bucket_12.bin (67.1 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/part.bucket_13.bin (66.1 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/part.bucket_14.bin (69.0 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/part.bucket_15.bin (68.4 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/part.bucket_8.bin (66.7 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/part.bucket_9.bin (68.5 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_0.bin (66.3 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_1.bin (68.0 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_2.bin (65.2 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_3.bin (67.4 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_4.bin (68.9 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_5.bin (68.5 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_6.bin (68.5 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_7.bin (63.7 GB): fadvise(DONTNEED) rc=0
+23:27:03 — round 5 (GPU 0 → b8, GPU 2 → b9)
+/mnt/data/19.15.1_sf1500_k16/part.bucket_10.bin (68.9 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/part.bucket_11.bin (68.7 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/part.bucket_12.bin (67.1 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/part.bucket_13.bin (66.1 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/part.bucket_14.bin (69.0 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/part.bucket_15.bin (68.4 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_0.bin (66.3 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_1.bin (68.0 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_2.bin (65.2 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_3.bin (67.4 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_4.bin (68.9 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_5.bin (68.5 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_6.bin (68.5 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_7.bin (63.7 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_8.bin (66.7 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_9.bin (68.5 GB): fadvise(DONTNEED) rc=0
+23:29:09 — round 6 (GPU 0 → b10, GPU 2 → b11)
+/mnt/data/19.15.1_sf1500_k16/part.bucket_12.bin (67.1 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/part.bucket_13.bin (66.1 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/part.bucket_14.bin (69.0 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/part.bucket_15.bin (68.4 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_0.bin (66.3 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_1.bin (68.0 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_10.bin (68.9 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_11.bin (68.7 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_2.bin (65.2 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_3.bin (67.4 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_4.bin (68.9 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_5.bin (68.5 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_6.bin (68.5 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_7.bin (63.7 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_8.bin (66.7 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_9.bin (68.5 GB): fadvise(DONTNEED) rc=0
+23:31:24 — round 7 (GPU 0 → b12, GPU 2 → b13)
+/mnt/data/19.15.1_sf1500_k16/part.bucket_14.bin (69.0 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/part.bucket_15.bin (68.4 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_0.bin (66.3 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_1.bin (68.0 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_10.bin (68.9 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_11.bin (68.7 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_12.bin (67.1 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_13.bin (66.1 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_2.bin (65.2 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_3.bin (67.4 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_4.bin (68.9 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_5.bin (68.5 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_6.bin (68.5 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_7.bin (63.7 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_8.bin (66.7 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_9.bin (68.5 GB): fadvise(DONTNEED) rc=0
+23:33:33 — round 8 (GPU 0 → b14, GPU 2 → b15)
+/mnt/data/19.15.1_sf1500_k16/sorted_0.bin (66.3 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_1.bin (68.0 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_10.bin (68.9 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_11.bin (68.7 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_12.bin (67.1 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_13.bin (66.1 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_14.bin (69.0 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_15.bin (68.4 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_2.bin (65.2 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_3.bin (67.4 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_4.bin (68.9 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_5.bin (68.5 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_6.bin (68.5 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_7.bin (63.7 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_8.bin (66.7 GB): fadvise(DONTNEED) rc=0
+/mnt/data/19.15.1_sf1500_k16/sorted_9.bin (68.5 GB): fadvise(DONTNEED) rc=0
+=== Sort-only wall: 1032.396869629 s ===
+b0: CSV,NVIDIA H100,66.30,552476095,1,1,1542.33,3233.71,4776.04,13.8812,17.68,2.21,19.89,0.3
+b1: CSV,NVIDIA H100,67.97,566449690,1,1,1620.82,3271.27,4892.09,13.8947,18.13,2.27,20.39,0.3
+b2: CSV,NVIDIA H100,65.23,543612294,1,1,1550.72,3163.63,4714.35,13.8372,17.40,2.17,19.57,0.3
+b3: CSV,NVIDIA H100,67.37,561393154,1,1,1550.64,3268.44,4819.08,13.9793,17.96,2.25,20.21,0.3
+b4: CSV,NVIDIA H100,68.90,574158467,1,1,1623.16,3252.02,4875.18,14.1326,18.37,2.30,20.67,0.3
+b5: CSV,NVIDIA H100,68.52,571009668,1,1,1607.11,3323.69,4930.80,13.8966,18.27,2.28,20.56,0.3
+b6: CSV,NVIDIA H100,68.49,570716848,1,1,1598.29,3375.61,4973.90,13.7691,18.26,2.28,20.55,0.3
+b7: CSV,NVIDIA H100,63.73,531079435,1,1,1310.21,3171.40,4481.61,14.2202,12.75,2.12,14.87,0.2
+b8: CSV,NVIDIA H100,66.69,555772930,1,1,1583.74,3169.76,4753.50,14.0302,17.78,2.22,20.01,0.3
+b9: CSV,NVIDIA H100,68.52,571023983,1,1,1369.42,3365.93,4735.35,14.4705,13.70,2.28,15.99,0.2
+b10: CSV,NVIDIA H100,68.95,574573498,1,1,1612.38,3477.08,5089.46,13.5474,18.39,2.30,20.68,0.3
+b11: CSV,NVIDIA H100,68.75,572896401,1,1,1602.55,3474.70,5077.25,13.5403,18.33,2.29,20.62,0.3
+b12: CSV,NVIDIA H100,67.13,559447325,1,1,1571.52,3344.23,4915.74,13.6569,17.90,2.24,20.14,0.3
+b13: CSV,NVIDIA H100,66.06,550503169,1,1,1550.67,3226.09,4776.76,13.8295,17.62,2.20,19.82,0.3
+b14: CSV,NVIDIA H100,68.99,574937581,1,1,1582.41,3386.87,4969.29,13.8838,18.40,2.30,20.70,0.3
+b15: CSV,NVIDIA H100,68.40,569970734,1,1,1589.00,3374.91,4963.91,13.7788,18.24,2.28,20.52,0.3
+=== 16 PASS / 0 FAIL ===
+23:35:45 — done

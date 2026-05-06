@@ -1,0 +1,45 @@
+[slice] file has 1147469899 records (137.70 GB); sorting [0, 1147469899) = 1147469899 records (137.70 GB)
+════════════════════════════════════════════════════
+  GPU External Merge Sort — Streaming Benchmark
+════════════════════════════════════════════════════
+GPU: NVIDIA H100 (99.9 GB HBM, 132 SMs, 2447 GB/s BW)
+Data: 137.70 GB (1147469899 records × 120 bytes) (from file)
+
+Allocating 137.70 GB pinned host memory...
+  Using mmap + huge pages + cudaHostRegister
+Loading from /mnt/data/19.15_sf1500/part.bucket_5.bin...
+  Loaded 137.70 GB in 52462 ms (2.62 GB/s)
+
+[ExternalSort] GPU: 99.04 GB free, budget: 64.38 GB
+[ExternalSort] Triple-buffer: 3 × 21.46 GB (179 M records each)
+[ExternalSort] Sorting 1147469899 records (137.70 GB)
+
+== Step 1+2: Key Upload ==
+  Runtime compact map: 26/66 bytes vary, 32B compact key (4 LSD passes)
+  Output buffer mmap: lazy fault (input 138 GB + output 138 GB + 64 GB headroom > host RAM 1082 GB)
+== Step 1+2: Key Upload ==
+  Keys too large for single-pass (75.7 GB > 89.1 GB)
+  Using OVC ARCHITECTURE: run-gen + GPU OVC merge + CPU gather
+  OVC buffers: 22.9 GB (4B OVC + 8B prefix + 4B perm per record)
+  COMPACT UPLOAD: 671M rec/chunk, 2 chunks, PCIe 36.7 GB (vs 137.7 GB full), CUB scratch 134 MB
+
+== Phase 1: Run Generation (chunked LSD sort) ==
+  Run 1/2: 76743.0 MB (compact upload 20464.8 MB)      Run 2/2: 54574.5 MB (compact upload 14553.2 MB)    
+  2 runs in 14178 ms (9.71 GB/s)
+
+== Phase 2: GPU 16B Prefix Merge (2 CUB LSD passes) ==
+  GPU free before merge alloc: 75.99 GB
+  GPU free after merge alloc: 57.58 GB
+  Pass 1 (sort by pfx2 + gather): 262 ms
+  GPU 16B tie check: NO TIES — fixup skipped
+  Pass 2 (sort by pfx1): 125 ms
+  GPU 16B prefix merge total: 387 ms
+  Downloaded perm in 83 ms
+== Phase 3: CPU Gather ==
+  Gathered 137.70 GB in 6665 ms (20.66 GB/s)
+== Phase 4: CPU Fixup (skipped — no pfx1 ties) ==
+  Total merge+gather+fixup: 7135 ms
+
+CSV,NVIDIA H100,137.70,1147469899,2,2,14178.49,7134.78,21313.27,6.4606,36.72,4.59,41.31,0.3
+Writing 137.70 GB sorted output to /mnt/data/19.15_sf1500/sorted_5.bin ...
+  Wrote 137.70 GB in 116662 ms (1.18 GB/s)

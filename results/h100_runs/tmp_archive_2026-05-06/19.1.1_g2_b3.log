@@ -1,0 +1,27 @@
+CUDA error at src/external_sort.cu:992: invalid argument
+[slice] file has 2254858809 records (270.58 GB); sorting [0, 2254858809) = 2254858809 records (270.58 GB)
+════════════════════════════════════════════════════
+  GPU External Merge Sort — Streaming Benchmark
+════════════════════════════════════════════════════
+GPU: NVIDIA H100 (99.9 GB HBM, 132 SMs, 2447 GB/s BW)
+Data: 270.58 GB (2254858809 records × 120 bytes) (from file)
+
+Allocating 270.58 GB pinned host memory...
+  Using mmap + huge pages + cudaHostRegister
+Loading from /mnt/data/19.1.1_sf1500/part.bucket_3.bin...
+  Loaded 270.58 GB in 117114 ms (2.31 GB/s)
+
+[ExternalSort] GPU: 98.78 GB free, budget: 64.21 GB
+[ExternalSort] Triple-buffer: 3 × 21.40 GB (178 M records each)
+[ExternalSort] Sorting 2254858809 records (270.58 GB)
+
+== Step 1+2: Key Upload ==
+  Runtime compact map: 28/66 bytes vary, 32B compact key (4 LSD passes)
+  Output buffer mmap: lazy fault (input 271 GB + output 271 GB + 64 GB headroom > host RAM 1082 GB)
+== Step 1+2: Key Upload ==
+  Keys too large for single-pass (148.8 GB > 88.9 GB)
+  Using OVC ARCHITECTURE: run-gen + GPU OVC merge + CPU gather
+  OVC buffers: 45.1 GB (4B OVC + 8B prefix + 4B perm per record)
+  COMPACT UPLOAD: 669M rec/chunk, 4 chunks, PCIe 72.2 GB (vs 270.6 GB full), CUB scratch 134 MB
+
+== Phase 1: Run Generation (chunked LSD sort) ==
