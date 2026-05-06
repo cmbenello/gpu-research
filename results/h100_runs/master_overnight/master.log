@@ -30,3 +30,11 @@ Master overnight start: Wed May  6 17:02:37 UTC 2026
 [19:09:02] p1_sf1500_run20: 330.683306219s — PASS
  create mode 100644 results/h100_runs/master_overnight/p1_sf1500_run20.log
  create mode 100644 results/h100_runs/master_overnight/phase5.log
+[h100/discoveries-2026-05-02 076883b] h100/master-overnight: p1_sf1500_n20_done — n=20 SF1500 LOCK
+ 1 file changed, 2 insertions(+)
+=== Phase 2: cross-scale n=5 ===
+[19:10:07] p2_sf100_run1: 29.828815292s — PASS
+[19:10:45] p2_sf100_run2: 30.028967901s — PASS
+[19:11:23] p2_sf100_run3: 29.938204772s — PASS
+[19:12:01] p2_sf100_run4: 29.906506823s — PASS
+[19:12:41] p2_sf100_run5: 31.215105505s — PASS

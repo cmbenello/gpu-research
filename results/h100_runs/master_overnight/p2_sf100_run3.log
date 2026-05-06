@@ -1,0 +1,17 @@
+Input: 600037902 records (72.00 GB)
+cmap: 27 varying bytes
+Ring buffer: 4 slots × 4.29 GB = 17.18 GB GPU memory
+GPU staging: 2 × 11.45 GB = 22.91 GB
+Total chunks: 17 (4.29 GB each)
+  bucket[0]: 74472468 records (2.98 GB)
+  bucket[1]: 75054299 records (3.00 GB)
+  bucket[2]: 71134830 records (2.85 GB)
+  bucket[3]: 74254029 records (2.97 GB)
+  bucket[4]: 73074633 records (2.92 GB)
+  bucket[5]: 79608678 records (3.18 GB)
+  bucket[6]: 75728036 records (3.03 GB)
+  bucket[7]: 76710929 records (3.07 GB)
+Multi-stream GDS partition: 14220 ms (5.06 GB/s effective)
+Sort phase: 3890 ms (2 rounds)
+Total wall: 29415 ms (2.45 GB/s end-to-end)
+CSV,gds_partition_multistream,records=600037902,K=8,N_SLOTS=4,N_READERS=2,part_ms=14220,total_ms=29415,gb_per_s=2.45
