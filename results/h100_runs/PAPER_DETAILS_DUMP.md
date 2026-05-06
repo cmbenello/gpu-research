@@ -288,11 +288,39 @@ Round wall (4 GPUs concurrent on 4 buckets, NVMe write contention):
 - Scaling chart: `19.32_cross_scale.log` for SF100/300, `19.31` SF500, `19.36` SF1000, `19.44` SF1500
 - Comparison vs DuckDB/Polars: `4.1_duckdb_baseline.csv`, `19.38_polars_sf300.log`
 
+## GDS final result (added 2026-05-06 morning)
+
+GDS multi-stream prototype is WORKING and CORRECT. Final n=8 SF1500
+overnight run:
+
+  Best: 10m17s, Mean: 10m33s, Worst: 10m40s (±12s tight variance)
+  Phase breakdown:
+    GDS multistream partition + bucket-file write: 521s avg
+    Sort phase (sort_compact_bucket × 8 in 2 rounds): 111s avg
+
+vs hugepages best 5m51s: GDS approach is 4m26s SLOWER.
+
+Why: cuFile reads at 4.4-6.5 GB/s (effective) but the 360 GB bucket-file
+write at 1.3 GB/s adds ~277s that hugepages avoids by keeping buckets in
+pinned RAM.
+
+To break even with hugepages, GDS needs the integrated sort path that
+sorts directly from in-RAM bucket buffers (no bucket file write). This
+path was prototyped (`RUN_SORT=1` env) but hangs at SF300+. Investigation
+deferred.
+
+Bug fixes during GDS work (committed):
+- cmap detection from full file via fseek (was capped to first 1 GB,
+  missed varying bytes → wrong sort order at SF300+)
+- Double event tracking for two-stage ping-pong buffers (single event
+  caused stage[0] reuse before D2H completed at iter N=2)
+
 ## Things that aren't yet done that would strengthen the paper
 
-1. **GDS multi-stream pipelining** — pipelined version at parity with hugepages.
-   Multi-stream classify+D2H + multi-reader-thread cuFile could break parity.
-   Currently building (19.47).
+1. **GDS integrated-sort hang fix** — the win path for GDS to beat
+   hugepages. Hang root cause unknown (works at SF50, fails at SF300+).
+   Likely candidates: CUDA context conflict between partition's resources
+   and sort_thread's allocations, or cuFileBufRegister state interference.
 
 2. **SF2000** — would need to delete SF1000 input first (disk space). Same recipe
    should yield ~7-8m at NVMe peak.
