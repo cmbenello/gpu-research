@@ -167,22 +167,23 @@ int main(int argc, char** argv) {
     uint64_t total_records = total_bytes / RECORD_SIZE;
     printf("Input: %lu records (%.2f GB)\n", total_records, total_bytes/1e9);
 
-    // cmap
+    // cmap — strided sampling across full file via fseek+fread (avoids huge mmap).
     int cmap_h[KEY_SIZE]; int n_cmap = 0;
     {
-        int fd = open(input_path, O_RDONLY);
-        size_t samp_bytes = std::min((size_t)(1ULL << 30), (size_t)total_bytes);
-        const uint8_t* samp = (const uint8_t*)mmap(nullptr, samp_bytes, PROT_READ, MAP_PRIVATE, fd, 0);
-        close(fd);
+        FILE* fp = fopen(input_path, "rb");
         bool varies[KEY_SIZE] = {};
-        const uint8_t* r0 = samp;
-        for (int i = 1; i < 100000; i++) {
-            uint64_t idx = (uint64_t)i * (samp_bytes / RECORD_SIZE) / 100000;
-            const uint8_t* ri = samp + idx * RECORD_SIZE;
+        uint8_t r0[RECORD_SIZE];
+        fread(r0, 1, RECORD_SIZE, fp);
+        const int SAMPLE = 100000;
+        for (int i = 1; i < SAMPLE; i++) {
+            uint64_t idx = (uint64_t)i * total_records / SAMPLE;
+            fseeko(fp, (off_t)idx * (off_t)RECORD_SIZE, SEEK_SET);
+            uint8_t ri[KEY_SIZE];
+            fread(ri, 1, KEY_SIZE, fp);
             for (int b = 0; b < KEY_SIZE; b++) if (!varies[b] && r0[b] != ri[b]) varies[b] = true;
         }
+        fclose(fp);
         for (int b = 0; b < KEY_SIZE; b++) if (varies[b]) cmap_h[n_cmap++] = b;
-        munmap((void*)samp, samp_bytes);
     }
     printf("cmap: %d varying bytes\n", n_cmap);
 
@@ -447,11 +448,12 @@ int main(int argc, char** argv) {
     }
     cuFileDriverClose();
 
-    // SKIP_SORT=1 to skip the in-process sort phase (writes bucket files instead).
+    // SKIP_SORT=1 (default) skips integrated sort phase, writes bucket files.
+    // RUN_SORT=1 enables integrated sort (currently buggy at SF300+).
     const char* out_prefix = argv[2];
-    bool skip_sort = getenv("SKIP_SORT") && atoi(getenv("SKIP_SORT")) > 0;
+    bool run_sort = getenv("RUN_SORT") && atoi(getenv("RUN_SORT")) > 0;
 
-    if (skip_sort) {
+    if (!run_sort) {
         // Write bucket files for downstream sort tool
         auto t_write0 = std::chrono::high_resolution_clock::now();
         for (int b = 0; b < K; b++) {
