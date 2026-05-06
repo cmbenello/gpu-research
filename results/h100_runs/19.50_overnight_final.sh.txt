@@ -1,0 +1,62 @@
+#!/bin/bash
+# 19.50 — Final overnight: GDS partition (writes bucket files) + sort_compact_bucket × 8.
+# n=5 cold runs with drop_caches between.
+set -uo pipefail
+source ~/gpu-research/h100/env.sh
+
+PART=/home/cc/gpu-research/gpu_crocsort/experiments/gds_partition_multistream
+SORT=/home/cc/gpu-research/gpu_crocsort/experiments/sort_compact_bucket
+EVICT=/home/cc/gpu-research/gpu_crocsort/experiments/evict_cache
+VERIFY=/home/cc/gpu-research/gpu_crocsort/experiments/verify_compact_offsets
+INPUT=/mnt/data/lineitem_sf1500.bin
+
+date '+%H:%M:%S — overnight final start'
+
+for RUN in 1 2 3 4 5 6 7 8; do
+    echo "=========================================="
+    echo "Run $RUN at $(date '+%H:%M:%S')"
+    echo "=========================================="
+    sudo sysctl vm.drop_caches=3 2>&1 | tail -1
+    $EVICT $INPUT
+    sleep 3
+    free -g | head -2
+    grep "HugePages_Total\|HugePages_Free" /proc/meminfo
+
+    NVME=/mnt/data/19.50_run${RUN}
+    rm -rf $NVME && mkdir -p $NVME
+
+    T_START=$(date +%s.%N)
+
+    # Phase 1: GDS partition + bucket files written
+    T_P0=$(date +%s.%N)
+    $PART $INPUT $NVME/sf1500 8 2>&1 | tee /tmp/19.50_run${RUN}_part.log | tail -10
+    T_P1=$(date +%s.%N)
+    PART_WALL=$(echo "$T_P1 - $T_P0" | bc)
+    echo "Run $RUN partition+write wall: ${PART_WALL} s"
+
+    # Phase 2: 4-GPU concurrent sort_compact_bucket (2 rounds for K=8)
+    T_S0=$(date +%s.%N)
+    for ROUND in 1 2; do
+        for SLOT in 0 1 2 3; do
+            B=$(( (ROUND-1)*4 + SLOT ))
+            CUDA_VISIBLE_DEVICES=$SLOT numactl --cpunodebind=$((SLOT/2)) --preferred=$((SLOT/2)) \
+                $SORT $NVME/sf1500.bucket_${B}.bin $NVME/sf1500.sorted_${B}.bin > /tmp/19.50_run${RUN}_b${B}.log 2>&1 &
+        done
+        wait
+    done
+    T_S1=$(date +%s.%N)
+    SORT_WALL=$(echo "$T_S1 - $T_S0" | bc)
+    echo "Run $RUN sort wall: ${SORT_WALL} s"
+
+    T_END=$(date +%s.%N)
+    TOTAL=$(echo "$T_END - $T_START" | bc)
+    echo "Run $RUN TOTAL E2E: ${TOTAL} s"
+
+    if [ -f $NVME/sf1500.sorted_0.bin ]; then
+        CHECK_LIMIT=100000 $VERIFY $INPUT $NVME/sf1500.sorted_0.bin 2>&1 | tail -1
+    fi
+
+    rm -rf $NVME
+done
+
+date '+%H:%M:%S — overnight final done'

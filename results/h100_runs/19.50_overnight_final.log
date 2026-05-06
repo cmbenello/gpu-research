@@ -1,0 +1,186 @@
+06:39:19 — overnight final start
+==========================================
+Run 1 at 06:39:19
+==========================================
+vm.drop_caches = 3
+/mnt/data/lineitem_sf1500.bin (1080.0 GB): fadvise(DONTNEED) rc=0
+              total        used        free      shared  buff/cache   available
+Mem:           1007         472         534           0           0         530
+HugePages_Total:   240000
+HugePages_Free:    240000
+  bucket[2]: 1145168135 records (45.81 GB)
+  bucket[3]: 1101796283 records (44.07 GB)
+  bucket[4]: 1126796913 records (45.07 GB)
+  bucket[5]: 1147469899 records (45.90 GB)
+  bucket[6]: 1109950494 records (44.40 GB)
+  bucket[7]: 1144908315 records (45.80 GB)
+Multi-stream GDS partition: 290213 ms (3.72 GB/s effective)
+Bucket files written in 213384 ms
+Total wall: 515066 ms (2.10 GB/s end-to-end)
+CSV,gds_partition_multistream,records=9000021272,K=8,N_SLOTS=4,N_READERS=2,part_ms=290213,total_ms=515066,gb_per_s=2.10
+Run 1 partition+write wall: 515.647525618 s
+Run 1 sort wall: 115.336373698 s
+Run 1 TOTAL E2E: 630.991102333 s
+PASS
+==========================================
+Run 2 at 06:50:54
+==========================================
+vm.drop_caches = 3
+/mnt/data/lineitem_sf1500.bin (1080.0 GB): fadvise(DONTNEED) rc=0
+              total        used        free      shared  buff/cache   available
+Mem:           1007         472         534           0           0         530
+HugePages_Total:   240000
+HugePages_Free:    240000
+  bucket[2]: 1145168135 records (45.81 GB)
+  bucket[3]: 1101796283 records (44.07 GB)
+  bucket[4]: 1126796913 records (45.07 GB)
+  bucket[5]: 1147469899 records (45.90 GB)
+  bucket[6]: 1109950494 records (44.40 GB)
+  bucket[7]: 1144908315 records (45.80 GB)
+Multi-stream GDS partition: 297468 ms (3.63 GB/s effective)
+Bucket files written in 215418 ms
+Total wall: 524426 ms (2.06 GB/s end-to-end)
+CSV,gds_partition_multistream,records=9000021272,K=8,N_SLOTS=4,N_READERS=2,part_ms=297468,total_ms=524426,gb_per_s=2.06
+Run 2 partition+write wall: 525.018214235 s
+Run 2 sort wall: 109.950141765 s
+Run 2 TOTAL E2E: 634.975833124 s
+PASS
+==========================================
+Run 3 at 07:02:19
+==========================================
+vm.drop_caches = 3
+/mnt/data/lineitem_sf1500.bin (1080.0 GB): fadvise(DONTNEED) rc=0
+              total        used        free      shared  buff/cache   available
+Mem:           1007         472         534           0           0         530
+HugePages_Total:   240000
+HugePages_Free:    240000
+  bucket[2]: 1145168135 records (45.81 GB)
+  bucket[3]: 1101796283 records (44.07 GB)
+  bucket[4]: 1126796913 records (45.07 GB)
+  bucket[5]: 1147469899 records (45.90 GB)
+  bucket[6]: 1109950494 records (44.40 GB)
+  bucket[7]: 1144908315 records (45.80 GB)
+Multi-stream GDS partition: 297322 ms (3.63 GB/s effective)
+Bucket files written in 211091 ms
+Total wall: 519963 ms (2.08 GB/s end-to-end)
+CSV,gds_partition_multistream,records=9000021272,K=8,N_SLOTS=4,N_READERS=2,part_ms=297322,total_ms=519963,gb_per_s=2.08
+Run 3 partition+write wall: 520.537879988 s
+Run 3 sort wall: 111.301618744 s
+Run 3 TOTAL E2E: 631.846914815 s
+PASS
+==========================================
+Run 4 at 07:13:43
+==========================================
+vm.drop_caches = 3
+/mnt/data/lineitem_sf1500.bin (1080.0 GB): fadvise(DONTNEED) rc=0
+              total        used        free      shared  buff/cache   available
+Mem:           1007         472         534           0           0         530
+HugePages_Total:   240000
+HugePages_Free:    240000
+  bucket[2]: 1145168135 records (45.81 GB)
+  bucket[3]: 1101796283 records (44.07 GB)
+  bucket[4]: 1126796913 records (45.07 GB)
+  bucket[5]: 1147469899 records (45.90 GB)
+  bucket[6]: 1109950494 records (44.40 GB)
+  bucket[7]: 1144908315 records (45.80 GB)
+Multi-stream GDS partition: 304500 ms (3.55 GB/s effective)
+Bucket files written in 213464 ms
+Total wall: 529486 ms (2.04 GB/s end-to-end)
+CSV,gds_partition_multistream,records=9000021272,K=8,N_SLOTS=4,N_READERS=2,part_ms=304500,total_ms=529486,gb_per_s=2.04
+Run 4 partition+write wall: 530.077827782 s
+Run 4 sort wall: 110.290973396 s
+Run 4 TOTAL E2E: 640.376435153 s
+PASS
+==========================================
+Run 5 at 07:25:19
+==========================================
+vm.drop_caches = 3
+/mnt/data/lineitem_sf1500.bin (1080.0 GB): fadvise(DONTNEED) rc=0
+              total        used        free      shared  buff/cache   available
+Mem:           1007         472         534           0           0         530
+HugePages_Total:   240000
+HugePages_Free:    240000
+  bucket[2]: 1145168135 records (45.81 GB)
+  bucket[3]: 1101796283 records (44.07 GB)
+  bucket[4]: 1126796913 records (45.07 GB)
+  bucket[5]: 1147469899 records (45.90 GB)
+  bucket[6]: 1109950494 records (44.40 GB)
+  bucket[7]: 1144908315 records (45.80 GB)
+Multi-stream GDS partition: 297201 ms (3.63 GB/s effective)
+Bucket files written in 209715 ms
+Total wall: 518426 ms (2.08 GB/s end-to-end)
+CSV,gds_partition_multistream,records=9000021272,K=8,N_SLOTS=4,N_READERS=2,part_ms=297201,total_ms=518426,gb_per_s=2.08
+Run 5 partition+write wall: 519.014342306 s
+Run 5 sort wall: 114.948310224 s
+Run 5 TOTAL E2E: 633.969998627 s
+PASS
+==========================================
+Run 6 at 07:36:36
+==========================================
+vm.drop_caches = 3
+/mnt/data/lineitem_sf1500.bin (1080.0 GB): fadvise(DONTNEED) rc=0
+              total        used        free      shared  buff/cache   available
+Mem:           1007         472         534           0           0         530
+HugePages_Total:   240000
+HugePages_Free:    240000
+  bucket[2]: 1145168135 records (45.81 GB)
+  bucket[3]: 1101796283 records (44.07 GB)
+  bucket[4]: 1126796913 records (45.07 GB)
+  bucket[5]: 1147469899 records (45.90 GB)
+  bucket[6]: 1109950494 records (44.40 GB)
+  bucket[7]: 1144908315 records (45.80 GB)
+Multi-stream GDS partition: 289358 ms (3.73 GB/s effective)
+Bucket files written in 209527 ms
+Total wall: 510425 ms (2.12 GB/s end-to-end)
+CSV,gds_partition_multistream,records=9000021272,K=8,N_SLOTS=4,N_READERS=2,part_ms=289358,total_ms=510425,gb_per_s=2.12
+Run 6 partition+write wall: 510.991581715 s
+Run 6 sort wall: 105.671143295 s
+Run 6 TOTAL E2E: 616.669194823 s
+PASS
+==========================================
+Run 7 at 07:48:00
+==========================================
+vm.drop_caches = 3
+/mnt/data/lineitem_sf1500.bin (1080.0 GB): fadvise(DONTNEED) rc=0
+              total        used        free      shared  buff/cache   available
+Mem:           1007         472         534           0           0         530
+HugePages_Total:   240000
+HugePages_Free:    240000
+  bucket[2]: 1145168135 records (45.81 GB)
+  bucket[3]: 1101796283 records (44.07 GB)
+  bucket[4]: 1126796913 records (45.07 GB)
+  bucket[5]: 1147469899 records (45.90 GB)
+  bucket[6]: 1109950494 records (44.40 GB)
+  bucket[7]: 1144908315 records (45.80 GB)
+Multi-stream GDS partition: 302667 ms (3.57 GB/s effective)
+Bucket files written in 214562 ms
+Total wall: 528764 ms (2.04 GB/s end-to-end)
+CSV,gds_partition_multistream,records=9000021272,K=8,N_SLOTS=4,N_READERS=2,part_ms=302667,total_ms=528764,gb_per_s=2.04
+Run 7 partition+write wall: 529.359764930 s
+Run 7 sort wall: 108.731192867 s
+Run 7 TOTAL E2E: 638.098413178 s
+PASS
+==========================================
+Run 8 at 07:59:33
+==========================================
+vm.drop_caches = 3
+/mnt/data/lineitem_sf1500.bin (1080.0 GB): fadvise(DONTNEED) rc=0
+              total        used        free      shared  buff/cache   available
+Mem:           1007         472         534           0           0         530
+HugePages_Total:   240000
+HugePages_Free:    240000
+  bucket[2]: 1145168135 records (45.81 GB)
+  bucket[3]: 1101796283 records (44.07 GB)
+  bucket[4]: 1126796913 records (45.07 GB)
+  bucket[5]: 1147469899 records (45.90 GB)
+  bucket[6]: 1109950494 records (44.40 GB)
+  bucket[7]: 1144908315 records (45.80 GB)
+Multi-stream GDS partition: 300143 ms (3.60 GB/s effective)
+Bucket files written in 213076 ms
+Total wall: 524767 ms (2.06 GB/s end-to-end)
+CSV,gds_partition_multistream,records=9000021272,K=8,N_SLOTS=4,N_READERS=2,part_ms=300143,total_ms=524767,gb_per_s=2.06
+Run 8 partition+write wall: 525.348529072 s
+Run 8 sort wall: 110.488824792 s
+Run 8 TOTAL E2E: 635.844763544 s
+PASS
+08:10:58 — overnight final done
