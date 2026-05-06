@@ -1,0 +1,14 @@
+16:42:35 — start
+vm.drop_caches = 3
+/mnt/data/lineitem_sf1500.bin (1080.0 GB): fadvise(DONTNEED) rc=0
+=== Phase 1: GDS partition + integrated sort ===
+  bucket[4]: 1126796913 records (45.07 GB)
+  bucket[5]: 1147469899 records (45.90 GB)
+  bucket[6]: 1109950494 records (44.40 GB)
+  bucket[7]: 1144908315 records (45.80 GB)
+Multi-stream GDS partition: 227733 ms (4.74 GB/s effective)
+Sort phase: 64839 ms (2 rounds)
+Total wall: 304719 ms (3.54 GB/s end-to-end)
+CSV,gds_partition_multistream,records=9000021272,K=8,N_SLOTS=4,N_READERS=2,part_ms=227733,total_ms=304719,gb_per_s=3.54
+Sort wall: 305.384901114 s
+=== Phase 2: Aggregate (GROUP BY first byte of key) ===
