@@ -1,0 +1,33 @@
+01:24:13 — start
+=== Inject 30% heavy-hitter skew ===
+Injecting 30% skew (record 0's key) into 300005811 records (36.00 GB)
+Done. Output: /mnt/data/lineitem_sf50_skew30.bin
+-rw-r--r-- 1 cc cc 36000697320 May  6 01:24 /mnt/data/lineitem_sf50_skew30.bin
+=== Baseline (v2) on skewed SF50 ===
+  bucket[0]: 36464760 records (1.46 GB compact)
+  bucket[1]: 36823377 records (1.47 GB compact)
+  bucket[2]: 93379708 records (3.74 GB compact)
+  bucket[3]: 0 records (0.00 GB compact)
+  bucket[4]: 17562334 records (0.70 GB compact)
+  bucket[5]: 40030531 records (1.60 GB compact)
+  bucket[6]: 36185744 records (1.45 GB compact)
+  bucket[7]: 39559357 records (1.58 GB compact)
+Total partition wall: 4200 ms (8.57 GB/s effective on input read)
+v2 wall: 4.203768188 s
+=== Adaptive (v3) on skewed SF50 ===
+WARNING: heavy hitter detected — 19806/65536 samples (30.2%) are duplicates
+Adaptive splitters: 185 ms, 7 distinct splitters, 8 buckets
+  bucket[0]: 36620232 records (1.46 GB compact)
+  bucket[1]: 38205258 records (1.53 GB compact)
+  bucket[2]: 91842355 records (3.67 GB compact)
+  bucket[3]: 313 records (0.00 GB compact)
+  bucket[4]: 20039512 records (0.80 GB compact)
+  bucket[5]: 37616011 records (1.50 GB compact)
+  bucket[6]: 37492533 records (1.50 GB compact)
+  bucket[7]: 38189597 records (1.53 GB compact)
+Partition: 3106 ms, max/min imbalance 29342505.4%
+Total: 4332 ms (effective K=8)
+CSV,partition_compact_v3,records=300005811,K_requested=8,K_actual=8,n_cmap=26,max_run_pct=30.2,sample_ms=185,pass_ms=3106,total_ms=4332,imbalance_pct=29342505.4
+v3 wall: 4.334686967 s
+=== Cleanup ===
+01:24:48 — done
